@@ -1,0 +1,33 @@
+{
+  "name": "y11n-spreadsheet",
+  "version": "0.1.0",
+  "description": "Accessible spreadsheet web component built with Lit 3.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "spreadsheet",
+    "accessible",
+    "web-component",
+    "lit",
+    "aria"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "lit": "^3.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0"
+  }
+}
