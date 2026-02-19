@@ -10,6 +10,7 @@ import {
   type DataChangeDetail,
   cellKey,
   colToLetter,
+  coordToRef,
 } from './types.js';
 import { SelectionManager } from './controllers/selection-manager.js';
 import { FormulaEngine } from './engine/formula-engine.js';
@@ -36,6 +37,9 @@ export class Y11nSpreadsheet extends LitElement {
   @state() private _isEditing = false;
   @state() private _editValue = '';
 
+  /** Whether arrow keys are currently selecting a cell reference in a formula */
+  @state() private _refMode = false;
+
   /** Track scroll position for virtual rendering */
   @state() private _scrollTop = 0;
   @state() private _scrollLeft = 0;
@@ -56,6 +60,14 @@ export class Y11nSpreadsheet extends LitElement {
 
   /** Track which cell started editing for commit logic */
   private _editingCellKey: string | null = null;
+
+  /** Reference mode cursor position */
+  private _refCursorRow = 0;
+  private _refCursorCol = 0;
+
+  /** Start/end positions of the reference text within the formula string */
+  private _refInsertStart = 0;
+  private _refInsertEnd = 0;
 
   // ─── Lifecycle ──────────────────────────────────────
 
@@ -174,6 +186,64 @@ export class Y11nSpreadsheet extends LitElement {
     this._isEditing = false;
     this._editingCellKey = null;
     requestAnimationFrame(() => this._focusActiveCell());
+  }
+
+  // ─── Reference Selection ────────────────────────────
+
+  /**
+   * Check if the cursor is at a position in the formula where a cell reference
+   * can be inserted (after =, +, -, *, /, &, (, ,, or comparison operators).
+   */
+  private _isRefPositionInFormula(): boolean {
+    if (!this._editValue.startsWith('=')) return false;
+
+    const cursorPos = this._editor?.selectionStart ?? this._editValue.length;
+    const before = this._editValue.substring(0, cursorPos).trimEnd();
+    if (before === '=') return true;
+
+    const lastChar = before[before.length - 1];
+    return ['+', '-', '*', '/', '&', '(', ',', '<', '>', '='].includes(lastChar);
+  }
+
+  /**
+   * Handle an arrow key press during formula editing to insert or move
+   * a cell reference.
+   */
+  private _handleRefArrow(key: string): void {
+    const dRow = key === 'ArrowDown' ? 1 : key === 'ArrowUp' ? -1 : 0;
+    const dCol = key === 'ArrowRight' ? 1 : key === 'ArrowLeft' ? -1 : 0;
+
+    if (!this._refMode) {
+      // Enter reference mode - start from the editing cell and move
+      const { row, col } = this._selection.activeCell;
+      this._refCursorRow = Math.max(0, Math.min(row + dRow, this.rows - 1));
+      this._refCursorCol = Math.max(0, Math.min(col + dCol, this.cols - 1));
+      this._refMode = true;
+
+      const cursorPos = this._editor?.selectionStart ?? this._editValue.length;
+      this._refInsertStart = cursorPos;
+      const ref = coordToRef({ row: this._refCursorRow, col: this._refCursorCol });
+      this._editValue =
+        this._editValue.substring(0, cursorPos) +
+        ref +
+        this._editValue.substring(cursorPos);
+      this._refInsertEnd = cursorPos + ref.length;
+    } else {
+      // Already in reference mode - move the reference cursor
+      this._refCursorRow = Math.max(0, Math.min(this._refCursorRow + dRow, this.rows - 1));
+      this._refCursorCol = Math.max(0, Math.min(this._refCursorCol + dCol, this.cols - 1));
+
+      const ref = coordToRef({ row: this._refCursorRow, col: this._refCursorCol });
+      this._editValue =
+        this._editValue.substring(0, this._refInsertStart) +
+        ref +
+        this._editValue.substring(this._refInsertEnd);
+      this._refInsertEnd = this._refInsertStart + ref.length;
+    }
+  }
+
+  private _exitRefMode(): void {
+    this._refMode = false;
   }
 
   // ─── Focus Management ───────────────────────────────
@@ -304,6 +374,7 @@ export class Y11nSpreadsheet extends LitElement {
     switch (e.key) {
       case 'Enter':
         e.preventDefault();
+        this._exitRefMode();
         this._commitEdit();
         // Move down after Enter commit
         this._selection.move(1, 0);
@@ -313,6 +384,7 @@ export class Y11nSpreadsheet extends LitElement {
 
       case 'Tab':
         e.preventDefault();
+        this._exitRefMode();
         this._commitEdit();
         if (e.shiftKey) {
           this._selection.move(0, -1);
@@ -325,7 +397,18 @@ export class Y11nSpreadsheet extends LitElement {
 
       case 'Escape':
         e.preventDefault();
+        this._exitRefMode();
         this._cancelEdit();
+        break;
+
+      case 'ArrowUp':
+      case 'ArrowDown':
+      case 'ArrowLeft':
+      case 'ArrowRight':
+        if (this._refMode || this._isRefPositionInFormula()) {
+          e.preventDefault();
+          this._handleRefArrow(e.key);
+        }
         break;
     }
   }
@@ -464,6 +547,7 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _handleEditorInput(e: Event): void {
     this._editValue = (e.target as HTMLInputElement).value;
+    this._exitRefMode();
   }
 
   private _handleEditorBlur(): void {
@@ -671,6 +755,13 @@ export class Y11nSpreadsheet extends LitElement {
       z-index: 1;
     }
 
+    .ls-cell.ref-highlight {
+      outline: 2px dashed var(--ls-ref-highlight-border, #1a73e8);
+      outline-offset: -2px;
+      background: var(--ls-ref-highlight-bg, rgba(26, 115, 232, 0.15));
+      z-index: 1;
+    }
+
     .ls-cell .cell-text {
       overflow: hidden;
       text-overflow: ellipsis;
@@ -797,12 +888,13 @@ export class Y11nSpreadsheet extends LitElement {
     for (let c = 0; c < this.cols; c++) {
       const isSelected = this._selection.isCellSelected(row, c);
       const isActive = this._selection.isCellActive(row, c);
+      const isRefTarget = this._refMode && row === this._refCursorRow && c === this._refCursorCol;
       const display = this._getCellDisplay(row, c);
       const key = cellKey(row, c);
 
       cells.push(html`
         <div
-          class="ls-cell ${isActive ? 'active-cell' : ''}"
+          class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''}"
           role="gridcell"
           aria-colindex="${c + 2}"
           aria-selected="${isSelected}"
@@ -837,8 +929,13 @@ export class Y11nSpreadsheet extends LitElement {
     // When editing starts, focus the editor
     if (this._isEditing && this._editor) {
       this._editor.focus();
-      // Place cursor at the end
-      this._editor.setSelectionRange(this._editValue.length, this._editValue.length);
+      if (this._refMode) {
+        // Place cursor after the inserted reference
+        this._editor.setSelectionRange(this._refInsertEnd, this._refInsertEnd);
+      } else {
+        // Place cursor at the end
+        this._editor.setSelectionRange(this._editValue.length, this._editValue.length);
+      }
     }
   }
 }
