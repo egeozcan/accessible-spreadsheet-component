@@ -475,7 +475,12 @@ export class FormulaEngine {
     if (cell.rawValue.startsWith('=')) {
       this.evaluating.add(key);
       try {
+        // Save and restore parser state so nested evaluation doesn't corrupt
+        // the token stream of the calling formula (same pattern as resolveRange)
+        const saved = { tokens: [...this.tokens], pos: this.pos };
         const result = this.parseExpression(cell.rawValue.substring(1));
+        this.tokens = saved.tokens;
+        this.pos = saved.pos;
         this.evaluating.delete(key);
         return result;
       } catch {

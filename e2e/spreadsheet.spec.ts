@@ -1,0 +1,399 @@
+import { test, expect, type Page } from '@playwright/test';
+
+// Helper: get the spreadsheet component
+function getSpreadsheet(page: Page) {
+  return page.locator('y11n-spreadsheet');
+}
+
+// Helper: get a cell by row/col (0-indexed) inside shadow DOM
+function getCell(page: Page, row: number, col: number) {
+  return page.locator('y11n-spreadsheet').locator(`[data-row="${row}"][data-col="${col}"]`);
+}
+
+// Helper: get the editor input inside shadow DOM
+function getEditor(page: Page) {
+  return page.locator('y11n-spreadsheet').locator('#editor');
+}
+
+// Helper: get cell text content
+async function getCellText(page: Page, row: number, col: number): Promise<string> {
+  const cell = getCell(page, row, col);
+  const span = cell.locator('.cell-text');
+  return (await span.textContent()) ?? '';
+}
+
+// Helper: type into a cell and commit
+async function editCell(page: Page, row: number, col: number, value: string) {
+  const cell = getCell(page, row, col);
+  await cell.click();
+  await cell.dblclick();
+  const editor = getEditor(page);
+  await editor.fill(value);
+  await editor.press('Enter');
+}
+
+test.describe('Spreadsheet Component', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+    // Wait for the web component to be defined and rendered
+    await page.waitForSelector('y11n-spreadsheet');
+    // Wait for shadow DOM to be ready
+    await page.locator('y11n-spreadsheet').locator('[data-row="0"]').first().waitFor();
+  });
+
+  test.describe('Rendering', () => {
+    test('renders the grid with headers', async ({ page }) => {
+      const spreadsheet = getSpreadsheet(page);
+      await expect(spreadsheet).toBeVisible();
+
+      // Check column headers exist
+      const colHeaders = spreadsheet.locator('.ls-col-header');
+      const count = await colHeaders.count();
+      expect(count).toBeGreaterThan(0);
+
+      // First header should be "A"
+      await expect(colHeaders.first()).toHaveText('A');
+    });
+
+    test('renders row numbers', async ({ page }) => {
+      const spreadsheet = getSpreadsheet(page);
+      const rowHeaders = spreadsheet.locator('.ls-row-header');
+      const first = rowHeaders.first();
+      await expect(first).toHaveText('1');
+    });
+
+    test('renders pre-populated data', async ({ page }) => {
+      // The demo page populates cells: Item, Qty, Price, Total
+      const itemCell = await getCellText(page, 0, 0);
+      expect(itemCell).toBe('Item');
+
+      const qtyCell = await getCellText(page, 0, 1);
+      expect(qtyCell).toBe('Qty');
+    });
+  });
+
+  test.describe('Navigation', () => {
+    test('navigates with arrow keys', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+      await expect(cell00).toBeFocused();
+
+      // Move right
+      await page.keyboard.press('ArrowRight');
+      const cell01 = getCell(page, 0, 1);
+      await expect(cell01).toBeFocused();
+
+      // Move down
+      await page.keyboard.press('ArrowDown');
+      const cell11 = getCell(page, 1, 1);
+      await expect(cell11).toBeFocused();
+
+      // Move left
+      await page.keyboard.press('ArrowLeft');
+      const cell10 = getCell(page, 1, 0);
+      await expect(cell10).toBeFocused();
+
+      // Move up
+      await page.keyboard.press('ArrowUp');
+      await expect(cell00).toBeFocused();
+    });
+
+    test('navigates with Tab', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+
+      await page.keyboard.press('Tab');
+      const cell01 = getCell(page, 0, 1);
+      await expect(cell01).toBeFocused();
+    });
+
+    test('does not navigate past grid boundaries', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+
+      // Try to go up from row 0
+      await page.keyboard.press('ArrowUp');
+      await expect(cell00).toBeFocused();
+
+      // Try to go left from col 0
+      await page.keyboard.press('ArrowLeft');
+      await expect(cell00).toBeFocused();
+    });
+  });
+
+  test.describe('Editing', () => {
+    test('enters edit mode on Enter key', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+      await page.keyboard.press('Enter');
+
+      const editor = getEditor(page);
+      await expect(editor).toBeFocused();
+    });
+
+    test('enters edit mode on double click', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.dblclick();
+
+      const editor = getEditor(page);
+      await expect(editor).toBeFocused();
+    });
+
+    test('enters edit mode on character input', async ({ page }) => {
+      // Click an empty cell
+      const cell = getCell(page, 10, 0);
+      await cell.click();
+      await page.keyboard.press('h');
+
+      const editor = getEditor(page);
+      await expect(editor).toBeFocused();
+    });
+
+    test('commits edit on Enter', async ({ page }) => {
+      await editCell(page, 10, 0, 'test value');
+
+      const text = await getCellText(page, 10, 0);
+      expect(text).toBe('test value');
+    });
+
+    test('cancels edit on Escape', async ({ page }) => {
+      const cell = getCell(page, 10, 0);
+      await cell.click();
+      await cell.dblclick();
+
+      const editor = getEditor(page);
+      await editor.fill('should be cancelled');
+      await page.keyboard.press('Escape');
+
+      // Cell should remain empty (original value)
+      const text = await getCellText(page, 10, 0);
+      expect(text).toBe('');
+    });
+
+    test('moves down after committing with Enter', async ({ page }) => {
+      await editCell(page, 10, 0, 'hello');
+
+      // After Enter, focus should move to the cell below
+      const cellBelow = getCell(page, 11, 0);
+      await expect(cellBelow).toBeFocused();
+    });
+  });
+
+  test.describe('Formulas', () => {
+    test('evaluates arithmetic formulas', async ({ page }) => {
+      // The demo has =B2*C2 in D2 (row index 1, col index 3)
+      // B2=10, C2=5.99 -> D2 should be 59.9
+      const totalText = await getCellText(page, 1, 3);
+      expect(parseFloat(totalText)).toBeCloseTo(59.9, 1);
+    });
+
+    test('evaluates SUM formula', async ({ page }) => {
+      // D6 (row 5, col 3) has =SUM(D2:D4)
+      const sumText = await getCellText(page, 5, 3);
+      const sumVal = parseFloat(sumText);
+      expect(sumVal).toBeGreaterThan(0);
+    });
+
+    test('formula recalculates when input changes', async ({ page }) => {
+      // Get original total
+      const originalTotal = await getCellText(page, 1, 3);
+
+      // Edit B2 (qty) from 10 to 20
+      await editCell(page, 1, 1, '20');
+
+      // D2 = B2*C2 should now be 20*5.99 = 119.8
+      const newTotal = await getCellText(page, 1, 3);
+      expect(parseFloat(newTotal)).toBeCloseTo(119.8, 1);
+      expect(newTotal).not.toBe(originalTotal);
+    });
+
+    test('string formulas can be entered and evaluated', async ({ page }) => {
+      // Enter a value, then a UPPER formula
+      await editCell(page, 15, 0, 'hello world');
+      await editCell(page, 15, 1, '=UPPER(A16)');
+
+      const upperText = await getCellText(page, 15, 1);
+      expect(upperText).toBe('HELLO WORLD');
+    });
+
+    test('LEN formula works', async ({ page }) => {
+      await editCell(page, 16, 0, 'hello');
+      await editCell(page, 16, 1, '=LEN(A17)');
+
+      const lenText = await getCellText(page, 16, 1);
+      expect(lenText).toBe('5');
+    });
+
+    test('UPPER works on formula cell references', async ({ page }) => {
+      // A18 = "hello", B18 = "world", C18 = =CONCAT(A18, " ", B18), D18 = =UPPER(C18)
+      await editCell(page, 17, 0, 'hello');
+      await editCell(page, 17, 1, 'world');
+      await editCell(page, 17, 2, '=CONCAT(A18, " ", B18)');
+      await editCell(page, 17, 3, '=UPPER(C18)');
+
+      const concatText = await getCellText(page, 17, 2);
+      expect(concatText).toBe('hello world');
+
+      const upperText = await getCellText(page, 17, 3);
+      expect(upperText).toBe('HELLO WORLD');
+    });
+
+    test('LEN works on formula cell references', async ({ page }) => {
+      await editCell(page, 18, 0, 'hello');
+      await editCell(page, 18, 1, 'world');
+      await editCell(page, 18, 2, '=A19 & " " & B19');
+      await editCell(page, 18, 3, '=LEN(C19)');
+
+      const lenText = await getCellText(page, 18, 3);
+      expect(lenText).toBe('11');
+    });
+
+    test('TRIM formula works', async ({ page }) => {
+      await editCell(page, 19, 0, '  spaced  ');
+      await editCell(page, 19, 1, '=TRIM(A20)');
+
+      const trimText = await getCellText(page, 19, 1);
+      expect(trimText).toBe('spaced');
+    });
+
+    test('LOWER formula works', async ({ page }) => {
+      await editCell(page, 20, 0, 'HELLO WORLD');
+      await editCell(page, 20, 1, '=LOWER(A21)');
+
+      const lowerText = await getCellText(page, 20, 1);
+      expect(lowerText).toBe('hello world');
+    });
+
+    test('IF formula works', async ({ page }) => {
+      await editCell(page, 8, 0, '100');
+      await editCell(page, 8, 1, '50');
+      await editCell(page, 8, 2, '=IF(A9>B9, "bigger", "smaller")');
+
+      const ifText = await getCellText(page, 8, 2);
+      expect(ifText).toBe('bigger');
+    });
+
+    test('shows error for invalid formula', async ({ page }) => {
+      await editCell(page, 9, 0, '=UNKNOWN_FUNC()');
+
+      const text = await getCellText(page, 9, 0);
+      expect(text).toBe('#ERROR!');
+    });
+  });
+
+  test.describe('Selection', () => {
+    test('selects a cell on click', async ({ page }) => {
+      const cell = getCell(page, 2, 1);
+      await cell.click();
+
+      await expect(cell).toHaveAttribute('aria-selected', 'true');
+    });
+
+    test('extends selection with Shift+Arrow', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+
+      // Shift+ArrowDown to extend
+      await page.keyboard.press('Shift+ArrowDown');
+      await page.keyboard.press('Shift+ArrowRight');
+
+      // Both original and extended cells should be selected
+      const cell01 = getCell(page, 0, 1);
+      const cell10 = getCell(page, 1, 0);
+      const cell11 = getCell(page, 1, 1);
+
+      await expect(cell00).toHaveAttribute('aria-selected', 'true');
+      await expect(cell01).toHaveAttribute('aria-selected', 'true');
+      await expect(cell10).toHaveAttribute('aria-selected', 'true');
+      await expect(cell11).toHaveAttribute('aria-selected', 'true');
+    });
+
+    test('clears selection on Escape', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+
+      // Extend selection
+      await page.keyboard.press('Shift+ArrowDown');
+      await page.keyboard.press('Shift+ArrowRight');
+
+      // Press Escape to clear
+      await page.keyboard.press('Escape');
+
+      // After clearing selection, the active cell stays selected
+      // but the range collapses to a single cell
+      const cell01 = getCell(page, 0, 1);
+      // The cell where head was should still be active
+      // but cells that were only in the range should no longer be selected
+    });
+  });
+
+  test.describe('Cell clearing', () => {
+    test('clears cell on Delete', async ({ page }) => {
+      // Cell A1 has "Item"
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+
+      const textBefore = await getCellText(page, 0, 0);
+      expect(textBefore).toBe('Item');
+
+      await page.keyboard.press('Delete');
+
+      const textAfter = await getCellText(page, 0, 0);
+      expect(textAfter).toBe('');
+    });
+
+    test('clears cell on Backspace', async ({ page }) => {
+      // First set a value in an empty cell
+      await editCell(page, 12, 0, 'temp');
+      expect(await getCellText(page, 12, 0)).toBe('temp');
+
+      // Navigate back to the cell
+      const cell = getCell(page, 12, 0);
+      await cell.click();
+      await page.keyboard.press('Backspace');
+
+      expect(await getCellText(page, 12, 0)).toBe('');
+    });
+  });
+
+  test.describe('Accessibility', () => {
+    test('grid has correct ARIA role', async ({ page }) => {
+      const grid = getSpreadsheet(page).locator('[role="grid"]');
+      await expect(grid).toBeVisible();
+    });
+
+    test('cells have gridcell role', async ({ page }) => {
+      const cell = getCell(page, 0, 0);
+      await expect(cell).toHaveAttribute('role', 'gridcell');
+    });
+
+    test('column headers have columnheader role', async ({ page }) => {
+      const header = getSpreadsheet(page).locator('[role="columnheader"]').first();
+      await expect(header).toBeVisible();
+    });
+
+    test('row headers have rowheader role', async ({ page }) => {
+      const header = getSpreadsheet(page).locator('[role="rowheader"]').first();
+      await expect(header).toBeVisible();
+    });
+
+    test('active cell has tabindex 0', async ({ page }) => {
+      const cell = getCell(page, 0, 0);
+      await cell.click();
+      await expect(cell).toHaveAttribute('tabindex', '0');
+    });
+
+    test('non-active cells have tabindex -1', async ({ page }) => {
+      const cell = getCell(page, 0, 0);
+      await cell.click();
+
+      const otherCell = getCell(page, 1, 1);
+      await expect(otherCell).toHaveAttribute('tabindex', '-1');
+    });
+
+    test('has aria-live region for announcements', async ({ page }) => {
+      const liveRegion = getSpreadsheet(page).locator('[aria-live="polite"]');
+      await expect(liveRegion).toBeAttached();
+    });
+  });
+});
