@@ -15,7 +15,10 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build"
+    "build-storybook": "storybook build",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed"
   },
   "keywords": [
     "spreadsheet",
@@ -29,6 +32,7 @@
     "lit": "^3.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.0",
     "@storybook/addon-essentials": "^8.6.17",
     "@storybook/blocks": "^8.6.17",
     "@storybook/manager-api": "^8.6.17",
