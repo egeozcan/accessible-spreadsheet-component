@@ -3,3 +3,5 @@ dist/
 *.tsbuildinfo
 .vite/
 storybook-static/
+playwright-report/
+test-results/
