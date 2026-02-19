@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>y11n-spreadsheet Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f5f5f5;
+      padding: 20px;
+    }
+    h1 { margin-bottom: 12px; font-size: 1.5rem; }
+    p { margin-bottom: 16px; color: #666; font-size: 0.9rem; }
+    .demo-container {
+      width: 100%;
+      height: 600px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      overflow: hidden;
+      background: #fff;
+    }
+    y11n-spreadsheet {
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+  <h1>y11n-spreadsheet Demo</h1>
+  <p>
+    Accessible spreadsheet component. Try: arrow keys to navigate,
+    Enter or type to edit, Shift+Arrow to select ranges, Ctrl+C/V for clipboard.
+  </p>
+
+  <div class="demo-container">
+    <y11n-spreadsheet id="sheet" rows="50" cols="26"></y11n-spreadsheet>
+  </div>
+
+  <script type="module">
+    import './src/index.ts';
+
+    const sheet = document.getElementById('sheet');
+
+    // Seed some demo data
+    const data = new Map();
+    data.set('0:0', { rawValue: 'Item', displayValue: 'Item', type: 'text' });
+    data.set('0:1', { rawValue: 'Qty', displayValue: 'Qty', type: 'text' });
+    data.set('0:2', { rawValue: 'Price', displayValue: 'Price', type: 'text' });
+    data.set('0:3', { rawValue: 'Total', displayValue: 'Total', type: 'text' });
+
+    data.set('1:0', { rawValue: 'Widget A', displayValue: 'Widget A', type: 'text' });
+    data.set('1:1', { rawValue: '10', displayValue: '10', type: 'number' });
+    data.set('1:2', { rawValue: '5.99', displayValue: '5.99', type: 'number' });
+    data.set('1:3', { rawValue: '=B2*C2', displayValue: '', type: 'text' });
+
+    data.set('2:0', { rawValue: 'Widget B', displayValue: 'Widget B', type: 'text' });
+    data.set('2:1', { rawValue: '25', displayValue: '25', type: 'number' });
+    data.set('2:2', { rawValue: '3.50', displayValue: '3.50', type: 'number' });
+    data.set('2:3', { rawValue: '=B3*C3', displayValue: '', type: 'text' });
+
+    data.set('3:0', { rawValue: 'Widget C', displayValue: 'Widget C', type: 'text' });
+    data.set('3:1', { rawValue: '7', displayValue: '7', type: 'number' });
+    data.set('3:2', { rawValue: '12.00', displayValue: '12.00', type: 'number' });
+    data.set('3:3', { rawValue: '=B4*C4', displayValue: '', type: 'text' });
+
+    data.set('5:0', { rawValue: 'Grand Total', displayValue: 'Grand Total', type: 'text' });
+    data.set('5:3', { rawValue: '=SUM(D2:D4)', displayValue: '', type: 'text' });
+
+    sheet.setData(data);
+
+    // Listen for events
+    sheet.addEventListener('cell-change', (e) => {
+      console.log('cell-change:', e.detail);
+    });
+    sheet.addEventListener('selection-change', (e) => {
+      console.log('selection-change:', e.detail);
+    });
+    sheet.addEventListener('data-change', (e) => {
+      console.log('data-change:', e.detail);
+    });
+  </script>
+</body>
+</html>
