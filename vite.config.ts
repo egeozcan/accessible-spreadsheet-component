@@ -12,4 +12,7 @@ export default defineConfig({
       external: /^lit/,
     },
   },
+  test: {
+    exclude: ['e2e/**', 'node_modules/**'],
+  },
 });
