@@ -200,6 +200,10 @@ export class Y11nSpreadsheet extends LitElement {
     const shift = e.shiftKey;
     const ctrl = e.ctrlKey || e.metaKey;
 
+    // Stop propagation for all handled keys so parent contexts
+    // (e.g. Storybook shortcuts) don't intercept them.
+    e.stopPropagation();
+
     switch (e.key) {
       case 'ArrowUp':
         e.preventDefault();
@@ -301,6 +305,8 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _handleEditorKeydown(e: KeyboardEvent): void {
+    e.stopPropagation();
+
     switch (e.key) {
       case 'Enter':
         e.preventDefault();
