@@ -576,4 +576,229 @@ test.describe('Spreadsheet Component', () => {
       await expect(liveRegion).toBeAttached();
     });
   });
+
+  test.describe('Arrow Key Reference Selection', () => {
+    test('arrow key inserts cell reference when editing formula', async ({ page }) => {
+      // Navigate to C11 (row 10, col 2)
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+
+      // Start editing a formula
+      await page.keyboard.type('=');
+
+      // Press ArrowDown - should insert reference to cell below (C12)
+      await page.keyboard.press('ArrowDown');
+
+      const editor = getEditor(page);
+      await expect(editor).toHaveValue('=C12');
+    });
+
+    test('subsequent arrow keys move the reference', async ({ page }) => {
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      await page.keyboard.type('=');
+
+      // ArrowDown → C12, then ArrowRight → D12
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('ArrowRight');
+
+      const editor = getEditor(page);
+      await expect(editor).toHaveValue('=D12');
+    });
+
+    test('reference is committed and evaluates correctly', async ({ page }) => {
+      // Put a value in B11 (row 10, col 1)
+      await editCell(page, 10, 1, '42');
+
+      // Navigate to C11 and create formula referencing B11
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      await page.keyboard.type('=');
+
+      // ArrowLeft selects B11
+      await page.keyboard.press('ArrowLeft');
+
+      const editor = getEditor(page);
+      await expect(editor).toHaveValue('=B11');
+
+      // Commit the formula
+      await page.keyboard.press('Enter');
+
+      // C11 should display 42 (value of B11)
+      const text = await getCellText(page, 10, 2);
+      expect(text).toBe('42');
+    });
+
+    test('typing an operator exits ref mode and allows a new reference', async ({ page }) => {
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      await page.keyboard.type('=');
+
+      // First reference: ArrowDown → C12
+      await page.keyboard.press('ArrowDown');
+      // Type '+' to exit ref mode
+      await page.keyboard.type('+');
+      // Second reference: ArrowUp → C10 (starts from editing cell C11, goes up)
+      await page.keyboard.press('ArrowUp');
+
+      const editor = getEditor(page);
+      await expect(editor).toHaveValue('=C12+C10');
+    });
+
+    test('arrow keys work normally in non-formula edit', async ({ page }) => {
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      // Type a non-formula value
+      await page.keyboard.type('hello');
+
+      const editor = getEditor(page);
+      // ArrowLeft should move cursor, not insert a reference
+      await page.keyboard.press('ArrowLeft');
+      await expect(editor).toHaveValue('hello');
+    });
+
+    test('arrow keys move cursor when not at operator position in formula', async ({ page }) => {
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      // Type a formula with a complete reference
+      await page.keyboard.type('=A1');
+
+      const editor = getEditor(page);
+      // Cursor is after '1' which is not an operator - arrow should move cursor
+      await page.keyboard.press('ArrowLeft');
+      await expect(editor).toHaveValue('=A1');
+    });
+
+    test('Escape cancels edit during reference mode', async ({ page }) => {
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      await page.keyboard.type('=');
+      await page.keyboard.press('ArrowDown');
+
+      // Escape should cancel the entire edit
+      await page.keyboard.press('Escape');
+
+      const text = await getCellText(page, 10, 2);
+      expect(text).toBe('');
+    });
+
+    test('referenced cell is highlighted during selection', async ({ page }) => {
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      await page.keyboard.type('=');
+      await page.keyboard.press('ArrowDown');
+
+      // C12 (row 11, col 2) should have ref-highlight class
+      const refCell = getCell(page, 11, 2);
+      await expect(refCell).toHaveClass(/ref-highlight/);
+    });
+
+    test('highlight moves when reference changes', async ({ page }) => {
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      await page.keyboard.type('=');
+
+      // ArrowDown → C12 highlighted
+      await page.keyboard.press('ArrowDown');
+      const cellC12 = getCell(page, 11, 2);
+      await expect(cellC12).toHaveClass(/ref-highlight/);
+
+      // ArrowRight → D12 highlighted, C12 no longer highlighted
+      await page.keyboard.press('ArrowRight');
+      const cellD12 = getCell(page, 11, 3);
+      await expect(cellD12).toHaveClass(/ref-highlight/);
+      await expect(cellC12).not.toHaveClass(/ref-highlight/);
+    });
+
+    test('highlight disappears after committing', async ({ page }) => {
+      const cell = getCell(page, 10, 2);
+      await cell.click();
+      await page.keyboard.type('=');
+      await page.keyboard.press('ArrowDown');
+
+      const refCell = getCell(page, 11, 2);
+      await expect(refCell).toHaveClass(/ref-highlight/);
+
+      // Commit the edit
+      await page.keyboard.press('Enter');
+
+      // Highlight should be gone
+      await expect(refCell).not.toHaveClass(/ref-highlight/);
+    });
+
+    test('builds a complete formula with multiple arrow-key references', async ({ page }) => {
+      // Set up values: A8 = 10, B8 = 20
+      await editCell(page, 7, 0, '10');
+      await editCell(page, 7, 1, '20');
+
+      // Navigate to C8 (row 7, col 2) and build formula =A8+B8
+      const cell = getCell(page, 7, 2);
+      await cell.click();
+      await page.keyboard.type('=');
+
+      // ArrowLeft twice to reach A8: first → B8, second → A8
+      await page.keyboard.press('ArrowLeft');
+      await page.keyboard.press('ArrowLeft');
+
+      const editor = getEditor(page);
+      await expect(editor).toHaveValue('=A8');
+
+      // Type '+' to exit ref mode, then ArrowLeft for B8
+      await page.keyboard.type('+');
+      await page.keyboard.press('ArrowLeft');
+      await expect(editor).toHaveValue('=A8+B8');
+
+      // Commit
+      await page.keyboard.press('Enter');
+
+      // C8 should show 30
+      const text = await getCellText(page, 7, 2);
+      expect(text).toBe('30');
+    });
+
+    test('reference works after opening parenthesis in function', async ({ page }) => {
+      // Put a value in A14
+      await editCell(page, 13, 0, '100');
+
+      // Navigate to B14 and enter edit mode, then type a SUM formula
+      const cell = getCell(page, 13, 1);
+      await cell.dblclick();
+      const editor = getEditor(page);
+      await editor.fill('=SUM(');
+
+      // ArrowLeft to reference A14
+      await page.keyboard.press('ArrowLeft');
+      await expect(editor).toHaveValue('=SUM(A14');
+
+      // Close paren and commit
+      await page.keyboard.type(')');
+      await page.keyboard.press('Enter');
+
+      const text = await getCellText(page, 13, 1);
+      expect(text).toBe('100');
+    });
+
+    test('reference works after comma in function arguments', async ({ page }) => {
+      // Put values: A15 = 5, C15 = 10
+      await editCell(page, 14, 0, '5');
+      await editCell(page, 14, 2, '10');
+
+      // Navigate to D15 and enter edit mode, type a SUM formula with first arg
+      const cell = getCell(page, 14, 3);
+      await cell.dblclick();
+      const editor = getEditor(page);
+      await editor.fill('=SUM(A15,');
+
+      // ArrowLeft to reference C15
+      await page.keyboard.press('ArrowLeft');
+      await expect(editor).toHaveValue('=SUM(A15,C15');
+
+      // Close and commit
+      await page.keyboard.type(')');
+      await page.keyboard.press('Enter');
+
+      const text = await getCellText(page, 14, 3);
+      expect(text).toBe('15');
+    });
+  });
 });
