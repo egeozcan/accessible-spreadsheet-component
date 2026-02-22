@@ -444,7 +444,7 @@ describe('FormulaEngine', () => {
 
   describe('unknown functions', () => {
     it('returns #NAME? for unregistered functions', () => {
-      expect(engine.evaluate('=UNKNOWN(1)')).toEqual({ displayValue: '#ERROR!', type: 'error' });
+      expect(engine.evaluate('=UNKNOWN(1)')).toEqual({ displayValue: '#NAME?', type: 'error' });
     });
   });
 
@@ -567,6 +567,161 @@ describe('FormulaEngine', () => {
       expect(data.get('2:3')!.displayValue).toBe('BOB JOHNSON');
       // E3 = LEN(C3) = 11
       expect(data.get('2:4')!.displayValue).toBe('11');
+    });
+  });
+
+  // ─── recalculateAffected ────────────────────────────
+
+  describe('recalculateAffected', () => {
+    it('recalculates a direct dependent when input changes', () => {
+      const data = makeData({ '0:0': '10', '0:1': '=A1*2' });
+      engine.setData(data);
+      engine.recalculate();
+      expect(data.get('0:1')!.displayValue).toBe('20');
+
+      // Simulate changing A1
+      data.set('0:0', cell('5', 'number'));
+      engine.evaluate('5', '0:0');
+      const changed = engine.recalculateAffected(['0:0']);
+      expect(changed.has('0:1')).toBe(true);
+      expect(data.get('0:1')!.displayValue).toBe('10');
+    });
+
+    it('recalculates transitive dependents (A1 -> B1 -> C1)', () => {
+      const data = makeData({
+        '0:0': '5',
+        '0:1': '=A1+1',
+        '0:2': '=B1*2',
+      });
+      engine.setData(data);
+      engine.recalculate();
+      expect(data.get('0:1')!.displayValue).toBe('6');
+      expect(data.get('0:2')!.displayValue).toBe('12');
+
+      data.set('0:0', cell('10', 'number'));
+      engine.evaluate('10', '0:0');
+      const changed = engine.recalculateAffected(['0:0']);
+      expect(changed.has('0:1')).toBe(true);
+      expect(changed.has('0:2')).toBe(true);
+      expect(data.get('0:1')!.displayValue).toBe('11');
+      expect(data.get('0:2')!.displayValue).toBe('22');
+    });
+
+    it('recalculates diamond dependencies correctly', () => {
+      // A1 -> B1, A1 -> C1, B1+C1 -> D1
+      const data = makeData({
+        '0:0': '10',
+        '0:1': '=A1+1',
+        '0:2': '=A1+2',
+        '0:3': '=B1+C1',
+      });
+      engine.setData(data);
+      engine.recalculate();
+      expect(data.get('0:3')!.displayValue).toBe('23'); // 11 + 12
+
+      data.set('0:0', cell('20', 'number'));
+      engine.evaluate('20', '0:0');
+      const changed = engine.recalculateAffected(['0:0']);
+      expect(changed.has('0:3')).toBe(true);
+      expect(data.get('0:3')!.displayValue).toBe('43'); // 21 + 22
+    });
+
+    it('handles cell that becomes a formula', () => {
+      const data = makeData({ '0:0': '10', '0:1': '5' });
+      engine.setData(data);
+      engine.recalculate();
+
+      // B1 becomes a formula — evaluate and update the cell
+      const result = engine.evaluate('=A1*3', '0:1');
+      data.set('0:1', cell('=A1*3', result.type, result.displayValue));
+      expect(data.get('0:1')!.displayValue).toBe('30');
+    });
+
+    it('handles cell that stops being a formula', () => {
+      const data = makeData({ '0:0': '10', '0:1': '=A1*2' });
+      engine.setData(data);
+      engine.recalculate();
+
+      data.set('0:1', cell('plain text'));
+      engine.evaluate('plain text', '0:1');
+      const changed = engine.recalculateAffected(['0:1']);
+      // No dependents to update, should not error
+      expect(data.get('0:1')!.displayValue).toBe('plain text');
+      expect(changed.size).toBe(0);
+    });
+
+    it('falls back to full recalculate when dependency graph is empty', () => {
+      const data = makeData({
+        '0:0': '10',
+        '0:1': '=A1*2',
+      });
+      engine.setData(data);
+      // setData clears the dependency graph, don't call recalculate()
+
+      // recalculateAffected should detect empty graph and fall back
+      data.set('0:0', cell('5', 'number'));
+      const changed = engine.recalculateAffected(['0:0']);
+      expect(changed.has('0:1')).toBe(true);
+      expect(data.get('0:1')!.displayValue).toBe('10');
+    });
+
+    it('handles range dependencies', () => {
+      const data = makeData({
+        '0:0': '1',
+        '1:0': '2',
+        '2:0': '3',
+        '3:0': '=SUM(A1:A3)',
+      });
+      engine.setData(data);
+      engine.recalculate();
+      expect(data.get('3:0')!.displayValue).toBe('6');
+
+      data.set('1:0', cell('20', 'number'));
+      engine.evaluate('20', '1:0');
+      const changed = engine.recalculateAffected(['1:0']);
+      expect(changed.has('3:0')).toBe(true);
+      expect(data.get('3:0')!.displayValue).toBe('24');
+    });
+  });
+
+  // ─── String comparisons ───────────────────────────────
+
+  describe('string comparisons', () => {
+    it('compares strings with < operator', () => {
+      expect(engine.evaluate('="apple"<"banana"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('="banana"<"apple"')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('compares strings with > operator', () => {
+      expect(engine.evaluate('="banana">"apple"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('compares strings with <= operator', () => {
+      expect(engine.evaluate('="apple"<="apple"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('="apple"<="banana"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('compares strings with >= operator', () => {
+      expect(engine.evaluate('="banana">="apple"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('="apple">="banana"')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+  });
+
+  // ─── Recursion depth limit ────────────────────────────
+
+  describe('recursion depth limit', () => {
+    it('returns error for excessively deep formula chains', () => {
+      // Create a chain of references that exceeds depth limit
+      const data: GridData = new Map();
+      for (let i = 0; i < 70; i++) {
+        const raw = i === 0 ? '1' : `=A${i}+1`;
+        const isFormula = raw.startsWith('=');
+        data.set(`${i}:0`, cell(raw, isFormula ? 'text' : 'number'));
+      }
+      engine.setData(data);
+      // Evaluating a cell deep in the chain should hit the depth limit
+      const result = engine.evaluate('=A70');
+      expect(result.type).toBe('error');
     });
   });
 

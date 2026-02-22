@@ -108,7 +108,9 @@ export class ClipboardManager {
 
   // ─── Fallback ───────────────────────────────────────
 
+  /** @deprecated Uses document.execCommand('copy') which is deprecated. Only used as a fallback when the Clipboard API is unavailable. */
   private fallbackCopy(text: string): void {
+    console.warn('y11n-spreadsheet: Clipboard API unavailable, using deprecated execCommand fallback.');
     const textarea = document.createElement('textarea');
     textarea.value = text;
     textarea.style.position = 'fixed';

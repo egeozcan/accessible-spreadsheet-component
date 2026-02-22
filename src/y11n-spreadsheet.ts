@@ -1,5 +1,6 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 import {
   type CellCoord,
   type CellData,
@@ -98,6 +99,8 @@ export class Y11nSpreadsheet extends LitElement {
       this._syncData();
     }
     if (changedProps.has('rows') || changedProps.has('cols')) {
+      this.rows = Math.max(1, Math.round(this.rows));
+      this.cols = Math.max(1, Math.round(this.cols));
       this._selection.setBounds(this.rows, this.cols);
     }
     if (changedProps.has('functions')) {
@@ -138,8 +141,11 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _recalcAll(): void {
-    this._formulaEngine.setData(this._internalData);
     this._formulaEngine.recalculate();
+  }
+
+  private _recalcAffected(changedKeys: string[]): void {
+    this._formulaEngine.recalculateAffected(changedKeys);
   }
 
   // ─── Cell Access ────────────────────────────────────
@@ -169,7 +175,7 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _setCellRaw(key: string, rawValue: string): void {
     const existing = this._internalData.get(key);
-    const evaluated = this._formulaEngine.evaluate(rawValue);
+    const evaluated = this._formulaEngine.evaluate(rawValue, key);
 
     this._internalData.set(key, {
       rawValue,
@@ -198,7 +204,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._selection.moveTo(snapshot.anchor.row, snapshot.anchor.col);
     this._selection.moveTo(snapshot.head.row, snapshot.head.col, true);
     this._dispatchSelectionChange();
-    requestAnimationFrame(() => this._focusActiveCell());
+    this.updateComplete.then(() => this._focusActiveCell());
   }
 
   private _buildCommandBatch(
@@ -242,7 +248,7 @@ export class Y11nSpreadsheet extends LitElement {
     source: ChangeSource,
     valueSide: 'before' | 'after'
   ): void {
-    this._recalcAll();
+    this._recalcAffected(batch.deltas.map((d) => d.id));
 
     const shouldEmitDataChange = source !== 'user' || batch.operation !== 'edit';
     if (shouldEmitDataChange) {
@@ -345,13 +351,13 @@ export class Y11nSpreadsheet extends LitElement {
     this._commitRawValue(key, newValue);
 
     // Return focus to the grid
-    requestAnimationFrame(() => this._focusActiveCell());
+    this.updateComplete.then(() => this._focusActiveCell());
   }
 
   private _cancelEdit(): void {
     this._isEditing = false;
     this._editingCellKey = null;
-    requestAnimationFrame(() => this._focusActiveCell());
+    this.updateComplete.then(() => this._focusActiveCell());
   }
 
   // ─── Focus Management ───────────────────────────────
@@ -387,28 +393,28 @@ export class Y11nSpreadsheet extends LitElement {
         e.preventDefault();
         this._selection.move(-1, 0, shift);
         this._dispatchSelectionChange();
-        requestAnimationFrame(() => this._focusActiveCell());
+        this.updateComplete.then(() => this._focusActiveCell());
         break;
 
       case 'ArrowDown':
         e.preventDefault();
         this._selection.move(1, 0, shift);
         this._dispatchSelectionChange();
-        requestAnimationFrame(() => this._focusActiveCell());
+        this.updateComplete.then(() => this._focusActiveCell());
         break;
 
       case 'ArrowLeft':
         e.preventDefault();
         this._selection.move(0, -1, shift);
         this._dispatchSelectionChange();
-        requestAnimationFrame(() => this._focusActiveCell());
+        this.updateComplete.then(() => this._focusActiveCell());
         break;
 
       case 'ArrowRight':
         e.preventDefault();
         this._selection.move(0, 1, shift);
         this._dispatchSelectionChange();
-        requestAnimationFrame(() => this._focusActiveCell());
+        this.updateComplete.then(() => this._focusActiveCell());
         break;
 
       case 'Tab':
@@ -419,7 +425,7 @@ export class Y11nSpreadsheet extends LitElement {
           this._selection.move(0, 1);
         }
         this._dispatchSelectionChange();
-        requestAnimationFrame(() => this._focusActiveCell());
+        this.updateComplete.then(() => this._focusActiveCell());
         break;
 
       case 'Enter':
@@ -504,7 +510,7 @@ export class Y11nSpreadsheet extends LitElement {
         // Move down after Enter commit
         this._selection.move(1, 0);
         this._dispatchSelectionChange();
-        requestAnimationFrame(() => this._focusActiveCell());
+        this.updateComplete.then(() => this._focusActiveCell());
         break;
 
       case 'Tab':
@@ -516,7 +522,7 @@ export class Y11nSpreadsheet extends LitElement {
           this._selection.move(0, 1);
         }
         this._dispatchSelectionChange();
-        requestAnimationFrame(() => this._focusActiveCell());
+        this.updateComplete.then(() => this._focusActiveCell());
         break;
 
       case 'Escape':
@@ -545,7 +551,12 @@ export class Y11nSpreadsheet extends LitElement {
     this._dispatchSelectionChange();
     cellEl.focus();
 
-    // Set up drag tracking on the document
+    // Set up drag tracking on the document with guaranteed cleanup
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const cleanup = () => controller.abort();
+
     const onPointerMove = (ev: PointerEvent) => {
       // Find the cell under the pointer
       const el = this.shadowRoot?.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
@@ -560,12 +571,13 @@ export class Y11nSpreadsheet extends LitElement {
 
     const onPointerUp = () => {
       this._selection.endSelection();
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
+      cleanup();
     };
 
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointermove', onPointerMove, { signal });
+    document.addEventListener('pointerup', onPointerUp, { signal });
+    document.addEventListener('pointercancel', onPointerUp, { signal });
+    window.addEventListener('blur', onPointerUp, { signal });
   }
 
   private _handleCellDblClick(e: MouseEvent): void {
@@ -923,7 +935,7 @@ export class Y11nSpreadsheet extends LitElement {
   `;
 
   protected render() {
-    const { startRow, endRow } = this._getVisibleRange();
+    const { startRow, endRow, startCol, endCol } = this._getVisibleRange();
     const activeCell = this._selection.activeCell;
     const activeRawValue = this._getCellRaw(activeCell.row, activeCell.col);
     const activeDisplayValue = this._getCellDisplay(activeCell.row, activeCell.col);
@@ -963,8 +975,8 @@ export class Y11nSpreadsheet extends LitElement {
             @keydown="${this._handleGridKeydown}"
             @scroll="${this._handleScroll}"
           >
-            ${this._renderHeaderRow()}
-            ${this._renderRows(startRow, endRow)}
+            ${this._renderHeaderRow(startCol, endCol)}
+            ${this._renderRows(startRow, endRow, startCol, endCol)}
           </div>
         </div>
 
@@ -975,59 +987,57 @@ export class Y11nSpreadsheet extends LitElement {
     `;
   }
 
-  private _renderHeaderRow() {
+  private _renderHeaderRow(startCol: number, endCol: number) {
     const headers = [];
-    for (let c = 0; c < this.cols; c++) {
-      headers.push(colToLetter(c));
+    for (let c = startCol; c < endCol; c++) {
+      headers.push({ letter: colToLetter(c), index: c });
     }
+
+    const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
 
     return html`
       <div class="ls-header-row" role="row" aria-rowindex="1">
         <div class="ls-corner-header" role="columnheader"></div>
+        ${startCol > 0
+          ? html`<div style="width: ${startCol * cellWidth}px;"></div>`
+          : nothing}
         ${headers.map(
-          (h, i) => html`
+          (h) => html`
             <div
               class="ls-col-header"
               role="columnheader"
-              aria-colindex="${i + 2}"
+              aria-colindex="${h.index + 2}"
             >
-              ${h}
+              ${h.letter}
             </div>
           `
         )}
+        ${endCol < this.cols
+          ? html`<div style="width: ${(this.cols - endCol) * cellWidth}px;"></div>`
+          : nothing}
       </div>
     `;
   }
 
-  private _renderRows(startRow: number, endRow: number) {
-    const rows = [];
+  private _renderRows(startRow: number, endRow: number, startCol: number, endCol: number) {
+    const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+    const rowIndices = Array.from({ length: endRow - startRow }, (_, i) => startRow + i);
 
-    // Add spacer for rows above the visible area
-    if (startRow > 0) {
-      const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
-      rows.push(html`
-        <div style="grid-column: 1 / -1; height: ${startRow * cellHeight}px;"></div>
-      `);
-    }
-
-    for (let r = startRow; r < endRow; r++) {
-      rows.push(this._renderRow(r));
-    }
-
-    // Add spacer for rows below the visible area
-    if (endRow < this.rows) {
-      const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
-      rows.push(html`
-        <div style="grid-column: 1 / -1; height: ${(this.rows - endRow) * cellHeight}px;"></div>
-      `);
-    }
-
-    return rows;
+    return html`
+      ${startRow > 0
+        ? html`<div style="grid-column: 1 / -1; height: ${startRow * cellHeight}px;"></div>`
+        : nothing}
+      ${repeat(rowIndices, (r) => r, (r) => this._renderRow(r, startCol, endCol))}
+      ${endRow < this.rows
+        ? html`<div style="grid-column: 1 / -1; height: ${(this.rows - endRow) * cellHeight}px;"></div>`
+        : nothing}
+    `;
   }
 
-  private _renderRow(row: number) {
+  private _renderRow(row: number, startCol: number, endCol: number) {
+    const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
     const cells = [];
-    for (let c = 0; c < this.cols; c++) {
+    for (let c = startCol; c < endCol; c++) {
       const isSelected = this._selection.isCellSelected(row, c);
       const isActive = this._selection.isCellActive(row, c);
       const display = this._getCellDisplay(row, c);
@@ -1055,7 +1065,13 @@ export class Y11nSpreadsheet extends LitElement {
     return html`
       <div class="ls-row" role="row" aria-rowindex="${row + 2}">
         <div class="ls-row-header" role="rowheader">${row + 1}</div>
+        ${startCol > 0
+          ? html`<div style="width: ${startCol * cellWidth}px;"></div>`
+          : nothing}
         ${cells}
+        ${endCol < this.cols
+          ? html`<div style="width: ${(this.cols - endCol) * cellWidth}px;"></div>`
+          : nothing}
       </div>
     `;
   }
@@ -1067,11 +1083,11 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   protected updated(): void {
-    // When editing starts, focus the editor
     if (this._isEditing && this._editor) {
-      this._editor.focus();
-      // Place cursor at the end
-      this._editor.setSelectionRange(this._editValue.length, this._editValue.length);
+      const editor = this._editor;
+      const len = this._editValue.length;
+      editor.focus();
+      editor.setSelectionRange(len, len);
     }
   }
 }

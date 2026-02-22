@@ -24,6 +24,7 @@ export class Y11nFormulaBar extends LitElement {
   @property({ type: Boolean, attribute: 'read-only', reflect: true }) readOnly = false;
 
   @state() private _draft = '';
+  private _suppressNextBlur = false;
 
   static styles = css`
     :host {
@@ -144,7 +145,16 @@ export class Y11nFormulaBar extends LitElement {
     } else if (e.key === 'Escape') {
       e.preventDefault();
       this._draft = this._sourceValue();
+      this._suppressNextBlur = true;
     }
+  }
+
+  private _onBlur(): void {
+    if (this._suppressNextBlur) {
+      this._suppressNextBlur = false;
+      return;
+    }
+    this._commit();
   }
 
   render() {
@@ -172,7 +182,7 @@ export class Y11nFormulaBar extends LitElement {
         ?disabled="${this.readOnly}"
         @input="${this._onInput}"
         @keydown="${this._onKeydown}"
-        @blur="${this._commit}"
+        @blur="${this._onBlur}"
         aria-label="Formula bar"
       />
     `;

@@ -344,7 +344,7 @@ test.describe('Spreadsheet Component', () => {
       await editCell(page, 9, 0, '=UNKNOWN_FUNC()');
 
       const text = await getCellText(page, 9, 0);
-      expect(text).toBe('#ERROR!');
+      expect(text).toBe('#NAME?');
     });
   });
 
@@ -383,14 +383,21 @@ test.describe('Spreadsheet Component', () => {
       await page.keyboard.press('Shift+ArrowDown');
       await page.keyboard.press('Shift+ArrowRight');
 
+      // Verify extended selection exists
+      const cell10 = getCell(page, 1, 0);
+      await expect(cell10).toHaveAttribute('aria-selected', 'true');
+
       // Press Escape to clear
       await page.keyboard.press('Escape');
 
-      // After clearing selection, the active cell stays selected
-      // but the range collapses to a single cell
-      const cell01 = getCell(page, 0, 1);
-      // The cell where head was should still be active
-      // but cells that were only in the range should no longer be selected
+      // After Escape the range collapses — previously extended cells
+      // should no longer be selected
+      await expect(cell10).toHaveAttribute('aria-selected', 'false');
+      await expect(cell00).toHaveAttribute('aria-selected', 'false');
+
+      // The head cell (1,1) remains as the active cell
+      const cell11 = getCell(page, 1, 1);
+      await expect(cell11).toHaveAttribute('aria-selected', 'true');
     });
   });
 
@@ -454,6 +461,8 @@ test.describe('Spreadsheet Component', () => {
     });
 
     test('undo restores cut cells', async ({ page }) => {
+      await installClipboardMock(page);
+
       const cell00 = getCell(page, 0, 0);
       await cell00.click();
       await page.keyboard.press('ControlOrMeta+x');
@@ -563,7 +572,7 @@ test.describe('Spreadsheet Component', () => {
     });
 
     test('has aria-live region for announcements', async ({ page }) => {
-      const liveRegion = getSpreadsheet(page).locator('[aria-live="polite"]');
+      const liveRegion = getSpreadsheet(page).locator('.sr-only[aria-live="polite"]');
       await expect(liveRegion).toBeAttached();
     });
   });

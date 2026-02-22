@@ -25,6 +25,12 @@ interface Token {
   value: string;
 }
 
+/** Mutable parser state passed through the recursive descent chain */
+interface ParserState {
+  tokens: Token[];
+  pos: number;
+}
+
 /**
  * FormulaEngine - A recursive descent parser for Excel-like formula syntax.
  *
@@ -39,10 +45,19 @@ interface Token {
  * - Comparison: =, <>, <, >, <=, >=
  * - String concatenation: &
  */
+/** Maximum nesting depth for formula evaluation to prevent stack overflow from deeply nested formulas */
+const MAX_EVAL_DEPTH = 64;
+
 export class FormulaEngine {
   private functions: Map<string, FormulaFunction> = new Map();
   private data: GridData = new Map();
   private evaluating: Set<string> = new Set(); // circular reference detection
+  private _evalDepth = 0;
+
+  // Dependency tracking for targeted recalculation
+  private _deps: Map<string, Set<string>> = new Map();
+  private _reverseDeps: Map<string, Set<string>> = new Map();
+  private _trackingCellKey: string | null = null;
 
   constructor() {
     this.registerBuiltins();
@@ -56,41 +71,63 @@ export class FormulaEngine {
   /** Update the data reference for evaluation */
   setData(data: GridData): void {
     this.data = data;
+    this._deps.clear();
+    this._reverseDeps.clear();
   }
 
   /**
    * Evaluate a raw value. If it starts with '=', parse and execute the formula.
    * Otherwise, return the value as-is (possibly coerced).
+   *
+   * @param forCellKey - If provided, tracks formula dependencies for this cell key.
    */
-  evaluate(rawValue: string): { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' } {
+  evaluate(
+    rawValue: string,
+    forCellKey?: string
+  ): { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' } {
     if (!rawValue || rawValue.trim() === '') {
+      if (forCellKey) this._clearDepsFor(forCellKey);
       return { displayValue: '', type: 'text' };
     }
 
     if (!rawValue.startsWith('=')) {
+      if (forCellKey) this._clearDepsFor(forCellKey);
       return this.coerceValue(rawValue);
     }
 
     try {
-      this.evaluating.clear();
+      if (forCellKey) {
+        this._clearDepsFor(forCellKey);
+        this._trackingCellKey = forCellKey;
+      }
       const formula = rawValue.substring(1);
       const result = this.parseExpression(formula);
       return this.coerceValue(String(result));
-    } catch {
+    } catch (e) {
+      // Preserve specific error codes (#DIV/0!, #NAME?, #CIRC!)
+      const msg = e instanceof Error ? e.message : '';
+      if (msg.startsWith('#')) {
+        return { displayValue: msg, type: 'error' };
+      }
       return { displayValue: '#ERROR!', type: 'error' };
+    } finally {
+      this._trackingCellKey = null;
     }
   }
 
   /**
    * Re-evaluate all formula cells in the grid.
-   * Returns a set of cell keys that changed.
+   * Rebuilds the dependency graph. Returns a set of cell keys that changed.
    */
   recalculate(): Set<string> {
+    this._deps.clear();
+    this._reverseDeps.clear();
+
     const changed = new Set<string>();
 
     for (const [key, cell] of this.data) {
       if (cell.rawValue.startsWith('=')) {
-        const result = this.evaluate(cell.rawValue);
+        const result = this.evaluate(cell.rawValue, key);
         if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
           cell.displayValue = result.displayValue;
           cell.type = result.type;
@@ -101,6 +138,101 @@ export class FormulaEngine {
 
     return changed;
   }
+
+  /**
+   * Recalculate only formulas affected by the given changed cell keys.
+   * Uses the dependency graph for targeted recalculation (BFS order).
+   */
+  recalculateAffected(changedKeys: string[]): Set<string> {
+    // If the dependency graph is empty but data exists, fall back to a full
+    // recalculate so we never silently skip dependents after a setData() call.
+    if (this._reverseDeps.size === 0 && this.data.size > 0) {
+      return this.recalculate();
+    }
+
+    const changed = new Set<string>();
+    const changedSet = new Set(changedKeys);
+
+    // Re-evaluate changed cells that are formulas (they may have been
+    // evaluated with stale sibling values during batch application)
+    for (const key of changedKeys) {
+      const cell = this.data.get(key);
+      if (cell?.rawValue.startsWith('=')) {
+        const result = this.evaluate(cell.rawValue, key);
+        if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
+          cell.displayValue = result.displayValue;
+          cell.type = result.type;
+          changed.add(key);
+        }
+      }
+    }
+
+    // BFS to find all transitive dependents (respects evaluation order)
+    const toRecalc: string[] = [];
+    const visited = new Set<string>();
+    const queue = [...changedKeys];
+
+    while (queue.length > 0) {
+      const key = queue.shift()!;
+      const dependents = this._reverseDeps.get(key);
+      if (dependents) {
+        for (const dep of dependents) {
+          if (!visited.has(dep) && !changedSet.has(dep)) {
+            visited.add(dep);
+            toRecalc.push(dep);
+            queue.push(dep);
+          }
+        }
+      }
+    }
+
+    // Recalculate each dependent formula in BFS order
+    for (const key of toRecalc) {
+      const cell = this.data.get(key);
+      if (cell?.rawValue.startsWith('=')) {
+        const result = this.evaluate(cell.rawValue, key);
+        if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
+          cell.displayValue = result.displayValue;
+          cell.type = result.type;
+          changed.add(key);
+        }
+      }
+    }
+
+    return changed;
+  }
+
+  // ─── Dependency Tracking ─────────────────────────────
+
+  private _clearDepsFor(targetKey: string): void {
+    const oldDeps = this._deps.get(targetKey);
+    if (oldDeps) {
+      for (const dep of oldDeps) {
+        this._reverseDeps.get(dep)?.delete(targetKey);
+      }
+      this._deps.delete(targetKey);
+    }
+  }
+
+  private _trackDep(referencedKey: string): void {
+    if (!this._trackingCellKey) return;
+
+    let deps = this._deps.get(this._trackingCellKey);
+    if (!deps) {
+      deps = new Set();
+      this._deps.set(this._trackingCellKey, deps);
+    }
+    deps.add(referencedKey);
+
+    let rev = this._reverseDeps.get(referencedKey);
+    if (!rev) {
+      rev = new Set();
+      this._reverseDeps.set(referencedKey, rev);
+    }
+    rev.add(this._trackingCellKey);
+  }
+
+  // ─── Value Coercion ──────────────────────────────────
 
   private coerceValue(val: string): { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' } {
     if (val === '#ERROR!' || val === '#REF!' || val === '#DIV/0!' || val === '#NAME?' || val === '#CIRC!') {
@@ -265,88 +397,73 @@ export class FormulaEngine {
   }
 
   // ─── Parser ──────────────────────────────────────────
+  //
+  // Parser state is passed as a mutable object through the recursive
+  // descent chain so that nested evaluations (resolveRef / resolveRange)
+  // each get their own independent state without save/restore.
 
-  private tokens: Token[] = [];
-  private pos = 0;
-
-  private peek(): Token {
-    return this.tokens[this.pos];
+  private _peek(s: ParserState): Token {
+    return s.tokens[s.pos];
   }
 
-  private consume(expectedType?: TokenType): Token {
-    const token = this.tokens[this.pos];
+  private _consume(s: ParserState, expectedType?: TokenType): Token {
+    const token = s.tokens[s.pos];
     if (expectedType && token.type !== expectedType) {
       throw new Error(`Expected ${expectedType} but got ${token.type} (${token.value})`);
     }
-    this.pos++;
+    s.pos++;
     return token;
   }
 
   private parseExpression(input: string): unknown {
-    this.tokens = this.tokenize(input);
-    this.pos = 0;
-    const result = this.parseComparison();
-    return result;
+    if (++this._evalDepth > MAX_EVAL_DEPTH) {
+      this._evalDepth--;
+      throw new Error('#ERROR!');
+    }
+    try {
+      const s: ParserState = { tokens: this.tokenize(input), pos: 0 };
+      return this._parseComparison(s);
+    } finally {
+      this._evalDepth--;
+    }
   }
 
-  private parseComparison(): unknown {
-    let left = this.parseConcatenation();
+  private _parseComparison(s: ParserState): unknown {
+    let left = this._parseConcatenation(s);
 
     while (
-      this.peek().type === 'OPERATOR' &&
-      ['=', '<>', '<', '>', '<=', '>='].includes(this.peek().value)
+      this._peek(s).type === 'OPERATOR' &&
+      ['=', '<>', '<', '>', '<=', '>='].includes(this._peek(s).value)
     ) {
-      const op = this.consume().value;
-      const right = this.parseConcatenation();
-      const l = Number(left);
-      const r = Number(right);
-
-      switch (op) {
-        case '=':
-          left = left === right || (!isNaN(l) && !isNaN(r) && l === r);
-          break;
-        case '<>':
-          left = left !== right && (isNaN(l) || isNaN(r) || l !== r);
-          break;
-        case '<':
-          left = l < r;
-          break;
-        case '>':
-          left = l > r;
-          break;
-        case '<=':
-          left = l <= r;
-          break;
-        case '>=':
-          left = l >= r;
-          break;
-      }
+      const op = this._consume(s).value;
+      const right = this._parseConcatenation(s);
+      left = this._compareValues(left, right, op);
     }
 
     return left;
   }
 
-  private parseConcatenation(): unknown {
-    let left = this.parseAddSub();
+  private _parseConcatenation(s: ParserState): unknown {
+    let left = this._parseAddSub(s);
 
-    while (this.peek().type === 'OPERATOR' && this.peek().value === '&') {
-      this.consume(); // &
-      const right = this.parseAddSub();
+    while (this._peek(s).type === 'OPERATOR' && this._peek(s).value === '&') {
+      this._consume(s); // &
+      const right = this._parseAddSub(s);
       left = String(left) + String(right);
     }
 
     return left;
   }
 
-  private parseAddSub(): unknown {
-    let left = this.parseMulDiv();
+  private _parseAddSub(s: ParserState): unknown {
+    let left = this._parseMulDiv(s);
 
     while (
-      this.peek().type === 'OPERATOR' &&
-      (this.peek().value === '+' || this.peek().value === '-')
+      this._peek(s).type === 'OPERATOR' &&
+      (this._peek(s).value === '+' || this._peek(s).value === '-')
     ) {
-      const op = this.consume().value;
-      const right = this.parseMulDiv();
+      const op = this._consume(s).value;
+      const right = this._parseMulDiv(s);
       if (op === '+') left = Number(left) + Number(right);
       else left = Number(left) - Number(right);
     }
@@ -354,15 +471,15 @@ export class FormulaEngine {
     return left;
   }
 
-  private parseMulDiv(): unknown {
-    let left = this.parseUnary();
+  private _parseMulDiv(s: ParserState): unknown {
+    let left = this._parseUnary(s);
 
     while (
-      this.peek().type === 'OPERATOR' &&
-      (this.peek().value === '*' || this.peek().value === '/')
+      this._peek(s).type === 'OPERATOR' &&
+      (this._peek(s).value === '*' || this._peek(s).value === '/')
     ) {
-      const op = this.consume().value;
-      const right = this.parseUnary();
+      const op = this._consume(s).value;
+      const right = this._parseUnary(s);
       if (op === '*') left = Number(left) * Number(right);
       else {
         const divisor = Number(right);
@@ -374,49 +491,49 @@ export class FormulaEngine {
     return left;
   }
 
-  private parseUnary(): unknown {
-    if (this.peek().type === 'OPERATOR' && this.peek().value === '-') {
-      this.consume();
-      return -Number(this.parsePrimary());
+  private _parseUnary(s: ParserState): unknown {
+    if (this._peek(s).type === 'OPERATOR' && this._peek(s).value === '-') {
+      this._consume(s);
+      return -Number(this._parsePrimary(s));
     }
-    if (this.peek().type === 'OPERATOR' && this.peek().value === '+') {
-      this.consume();
-      return Number(this.parsePrimary());
+    if (this._peek(s).type === 'OPERATOR' && this._peek(s).value === '+') {
+      this._consume(s);
+      return Number(this._parsePrimary(s));
     }
-    return this.parsePrimary();
+    return this._parsePrimary(s);
   }
 
-  private parsePrimary(): unknown {
-    const token = this.peek();
+  private _parsePrimary(s: ParserState): unknown {
+    const token = this._peek(s);
 
     switch (token.type) {
       case 'NUMBER':
-        this.consume();
+        this._consume(s);
         return parseFloat(token.value);
 
       case 'STRING':
-        this.consume();
+        this._consume(s);
         return token.value;
 
       case 'BOOLEAN':
-        this.consume();
+        this._consume(s);
         return token.value === 'TRUE';
 
       case 'REF':
-        this.consume();
-        return this.resolveRef(token.value);
+        this._consume(s);
+        return this._resolveRef(token.value);
 
       case 'RANGE':
-        this.consume();
-        return this.resolveRange(token.value);
+        this._consume(s);
+        return this._resolveRange(token.value);
 
       case 'FUNC':
-        return this.parseFunction();
+        return this._parseFunction(s);
 
       case 'LPAREN':
-        this.consume();
-        const expr = this.parseComparison();
-        this.consume('RPAREN');
+        this._consume(s);
+        const expr = this._parseComparison(s);
+        this._consume(s, 'RPAREN');
         return expr;
 
       default:
@@ -424,25 +541,25 @@ export class FormulaEngine {
     }
   }
 
-  private parseFunction(): unknown {
-    const name = this.consume('FUNC').value;
-    this.consume('LPAREN');
+  private _parseFunction(s: ParserState): unknown {
+    const name = this._consume(s, 'FUNC').value;
+    this._consume(s, 'LPAREN');
 
     const args: unknown[] = [];
-    if (this.peek().type !== 'RPAREN') {
-      args.push(this.parseComparison());
-      while (this.peek().type === 'COMMA') {
-        this.consume();
-        args.push(this.parseComparison());
+    if (this._peek(s).type !== 'RPAREN') {
+      args.push(this._parseComparison(s));
+      while (this._peek(s).type === 'COMMA') {
+        this._consume(s);
+        args.push(this._parseComparison(s));
       }
     }
 
-    this.consume('RPAREN');
+    this._consume(s, 'RPAREN');
 
     const fn = this.functions.get(name);
     if (!fn) throw new Error(`#NAME?`);
 
-    const ctx = this.createContext();
+    const ctx = this._createContext();
 
     // Flatten range arrays into args for aggregate functions
     const flatArgs: unknown[] = [];
@@ -457,11 +574,42 @@ export class FormulaEngine {
     return fn(ctx, ...flatArgs);
   }
 
-  // ─── Reference resolution ───────────────────────────
+  // ─── Comparison helper ────────────────────────────────
 
-  private resolveRef(ref: string): unknown {
+  private _compareValues(left: unknown, right: unknown, op: string): boolean {
+    const l = Number(left);
+    const r = Number(right);
+    const bothNumeric = !isNaN(l) && !isNaN(r)
+      && String(left).trim() !== '' && String(right).trim() !== '';
+
+    switch (op) {
+      case '=':
+        return left === right || (bothNumeric && l === r);
+      case '<>':
+        return left !== right && (!bothNumeric || l !== r);
+      case '<':
+        return bothNumeric ? l < r : String(left) < String(right);
+      case '>':
+        return bothNumeric ? l > r : String(left) > String(right);
+      case '<=':
+        return bothNumeric ? l <= r : String(left) <= String(right);
+      case '>=':
+        return bothNumeric ? l >= r : String(left) >= String(right);
+      default:
+        return false;
+    }
+  }
+
+  // ─── Reference resolution ───────────────────────────
+  //
+  // Each nested evaluation calls parseExpression which creates its
+  // own ParserState, so no save/restore is needed.
+
+  private _resolveRef(ref: string): unknown {
     const coord = refToCoord(ref);
     const key = cellKey(coord.row, coord.col);
+
+    this._trackDep(key);
 
     // Circular reference detection
     if (this.evaluating.has(key)) {
@@ -471,21 +619,18 @@ export class FormulaEngine {
     const cell = this.data.get(key);
     if (!cell) return 0; // empty cells are 0
 
-    // If this cell also has a formula, evaluate it
+    // If this cell also has a formula, evaluate it in a fresh parser context
     if (cell.rawValue.startsWith('=')) {
+      const savedTracking = this._trackingCellKey;
+      this._trackingCellKey = null; // only track direct dependencies
       this.evaluating.add(key);
       try {
-        // Save and restore parser state so nested evaluation doesn't corrupt
-        // the token stream of the calling formula (same pattern as resolveRange)
-        const saved = { tokens: [...this.tokens], pos: this.pos };
-        const result = this.parseExpression(cell.rawValue.substring(1));
-        this.tokens = saved.tokens;
-        this.pos = saved.pos;
-        this.evaluating.delete(key);
-        return result;
+        return this.parseExpression(cell.rawValue.substring(1));
       } catch {
-        this.evaluating.delete(key);
         throw new Error('#ERROR!');
+      } finally {
+        this._trackingCellKey = savedTracking;
+        this.evaluating.delete(key);
       }
     }
 
@@ -497,7 +642,7 @@ export class FormulaEngine {
     return cell.rawValue;
   }
 
-  private resolveRange(rangeStr: string): unknown[] {
+  private _resolveRange(rangeStr: string): unknown[] {
     const [startRef, endRef] = rangeStr.split(':');
     const start = refToCoord(startRef);
     const end = refToCoord(endRef);
@@ -511,23 +656,32 @@ export class FormulaEngine {
     for (let r = minRow; r <= maxRow; r++) {
       for (let c = minCol; c <= maxCol; c++) {
         const key = cellKey(r, c);
+
+        this._trackDep(key);
+
         const cell = this.data.get(key);
         if (cell) {
           if (cell.rawValue.startsWith('=')) {
+            const savedTracking = this._trackingCellKey;
+            this._trackingCellKey = null;
             this.evaluating.add(key);
             try {
-              const saved = { tokens: [...this.tokens], pos: this.pos };
               values.push(this.parseExpression(cell.rawValue.substring(1)));
-              this.tokens = saved.tokens;
-              this.pos = saved.pos;
             } catch {
               values.push(0);
+            } finally {
+              this._trackingCellKey = savedTracking;
+              this.evaluating.delete(key);
             }
-            this.evaluating.delete(key);
           } else {
+            // Match _resolveRef's coercion logic for consistency
             const num = Number(cell.rawValue);
             if (!isNaN(num) && cell.rawValue.trim() !== '') {
               values.push(num);
+            } else if (cell.rawValue.toUpperCase() === 'TRUE') {
+              values.push(true);
+            } else if (cell.rawValue.toUpperCase() === 'FALSE') {
+              values.push(false);
             } else {
               values.push(cell.rawValue);
             }
@@ -539,7 +693,7 @@ export class FormulaEngine {
     return values;
   }
 
-  private createContext(): FormulaContext {
+  private _createContext(): FormulaContext {
     return {
       getCellValue: (ref: string) => {
         if (ref.includes(':') && !/[A-Z]/i.test(ref.charAt(0))) {
@@ -549,7 +703,7 @@ export class FormulaEngine {
           const num = Number(cell.rawValue);
           return !isNaN(num) && cell.rawValue.trim() !== '' ? num : cell.rawValue;
         }
-        return this.resolveRef(ref);
+        return this._resolveRef(ref);
       },
       getRangeValues: (startRef: string, endRef: string) => {
         const start = refToCoord(startRef);
