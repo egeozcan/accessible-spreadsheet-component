@@ -15,6 +15,27 @@ import { SelectionManager } from './controllers/selection-manager.js';
 import { FormulaEngine } from './engine/formula-engine.js';
 import { ClipboardManager } from './controllers/clipboard-manager.js';
 
+type DataChangeOperation = NonNullable<DataChangeDetail['operation']>;
+type ChangeSource = NonNullable<DataChangeDetail['source']>;
+
+interface CellDelta {
+  id: string;
+  before: string;
+  after: string;
+}
+
+interface SelectionSnapshot {
+  anchor: CellCoord;
+  head: CellCoord;
+}
+
+interface CommandBatch {
+  deltas: CellDelta[];
+  selectionBefore: SelectionSnapshot;
+  selectionAfter: SelectionSnapshot;
+  operation: DataChangeOperation;
+}
+
 /**
  * <y11n-spreadsheet> - An accessible spreadsheet web component.
  *
@@ -56,6 +77,10 @@ export class Y11nSpreadsheet extends LitElement {
 
   /** Track which cell started editing for commit logic */
   private _editingCellKey: string | null = null;
+
+  private _undoStack: CommandBatch[] = [];
+  private _redoStack: CommandBatch[] = [];
+  private readonly _maxHistory = 100;
 
   // ─── Lifecycle ──────────────────────────────────────
 
@@ -102,6 +127,8 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _syncData(): void {
     this._internalData = new Map(this.data);
+    this._undoStack = [];
+    this._redoStack = [];
     this._formulaEngine.setData(this._internalData);
     this._recalcAll();
   }
@@ -134,6 +161,127 @@ export class Y11nSpreadsheet extends LitElement {
     });
   }
 
+  private _applyRawValueByString(key: string, rawValue: string): void {
+    if (rawValue === '') {
+      this._internalData.delete(key);
+      return;
+    }
+    this._setCellRaw(key, rawValue);
+  }
+
+  private _snapshotSelection(): SelectionSnapshot {
+    return {
+      anchor: { ...this._selection.anchor },
+      head: { ...this._selection.head },
+    };
+  }
+
+  private _restoreSelection(snapshot: SelectionSnapshot): void {
+    this._selection.moveTo(snapshot.anchor.row, snapshot.anchor.col);
+    this._selection.moveTo(snapshot.head.row, snapshot.head.col, true);
+    this._dispatchSelectionChange();
+    requestAnimationFrame(() => this._focusActiveCell());
+  }
+
+  private _buildCommandBatch(
+    updates: Array<{ id: string; value: string }>,
+    operation: DataChangeOperation,
+    selectionBefore: SelectionSnapshot,
+    selectionAfter: SelectionSnapshot
+  ): CommandBatch | null {
+    const deltas: CellDelta[] = [];
+
+    for (const update of updates) {
+      const before = this._internalData.get(update.id)?.rawValue ?? '';
+      const after = update.value;
+      if (before !== after) {
+        deltas.push({ id: update.id, before, after });
+      }
+    }
+
+    if (deltas.length === 0) {
+      return null;
+    }
+
+    return {
+      deltas,
+      selectionBefore,
+      selectionAfter,
+      operation,
+    };
+  }
+
+  private _pushHistory(batch: CommandBatch): void {
+    this._undoStack.push(batch);
+    this._redoStack = [];
+    if (this._undoStack.length > this._maxHistory) {
+      this._undoStack.shift();
+    }
+  }
+
+  private _finalizeBatch(
+    batch: CommandBatch,
+    source: ChangeSource,
+    valueSide: 'before' | 'after'
+  ): void {
+    this._recalcAll();
+
+    const shouldEmitDataChange = source !== 'user' || batch.operation !== 'edit';
+    if (shouldEmitDataChange) {
+      this._dispatchDataChange({
+        updates: batch.deltas.map((delta) => ({ id: delta.id, value: delta[valueSide] })),
+        source,
+        operation: batch.operation,
+      });
+    }
+
+    this.requestUpdate();
+  }
+
+  private _applyBatch(batch: CommandBatch, source: ChangeSource): void {
+    for (const delta of batch.deltas) {
+      this._applyRawValueByString(delta.id, delta.after);
+    }
+    this._restoreSelection(batch.selectionAfter);
+    this._finalizeBatch(batch, source, 'after');
+  }
+
+  private _revertBatch(batch: CommandBatch): void {
+    for (const delta of batch.deltas) {
+      this._applyRawValueByString(delta.id, delta.before);
+    }
+    this._restoreSelection(batch.selectionBefore);
+    this._finalizeBatch(batch, 'undo', 'before');
+  }
+
+  private _executeUserBatch(batch: CommandBatch): void {
+    this._applyBatch(batch, 'user');
+    this._pushHistory(batch);
+  }
+
+  private _undo(): void {
+    if (this.readOnly) return;
+
+    const batch = this._undoStack.pop();
+    if (!batch) return;
+
+    this._revertBatch(batch);
+    this._redoStack.push(batch);
+  }
+
+  private _redo(): void {
+    if (this.readOnly) return;
+
+    const batch = this._redoStack.pop();
+    if (!batch) return;
+
+    this._applyBatch(batch, 'redo');
+    this._undoStack.push(batch);
+    if (this._undoStack.length > this._maxHistory) {
+      this._undoStack.shift();
+    }
+  }
+
   // ─── Editing ────────────────────────────────────────
 
   private _startEditing(initialValue?: string): void {
@@ -160,9 +308,16 @@ export class Y11nSpreadsheet extends LitElement {
     this._editingCellKey = null;
 
     if (newValue !== oldValue) {
-      this._setCellRaw(key, newValue);
-      this._recalcAll();
-
+      const selection = this._snapshotSelection();
+      const batch = this._buildCommandBatch(
+        [{ id: key, value: newValue }],
+        'edit',
+        selection,
+        selection
+      );
+      if (batch) {
+        this._executeUserBatch(batch);
+      }
       this._dispatchCellChange({ cellId: key, value: newValue, oldValue });
     }
 
@@ -294,6 +449,18 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
 
+      case 'z':
+      case 'Z':
+        if (ctrl) {
+          e.preventDefault();
+          if (shift) {
+            this._redo();
+          } else {
+            this._undo();
+          }
+        }
+        break;
+
       default:
         // Start editing on printable character input
         if (!ctrl && !e.altKey && e.key.length === 1 && !this.readOnly) {
@@ -405,17 +572,16 @@ export class Y11nSpreadsheet extends LitElement {
     );
 
     const updates: Array<{ id: string; value: string }> = [];
+    const selection = this._snapshotSelection();
     for (const key of keysToDelete) {
       if (this._internalData.has(key)) {
         updates.push({ id: key, value: '' });
-        this._internalData.delete(key);
       }
     }
 
-    if (updates.length > 0) {
-      this._recalcAll();
-      this._dispatchDataChange({ updates });
-      this.requestUpdate();
+    const batch = this._buildCommandBatch(updates, 'cut', selection, selection);
+    if (batch) {
+      this._executeUserBatch(batch);
     }
   }
 
@@ -426,12 +592,11 @@ export class Y11nSpreadsheet extends LitElement {
     const updates = await this._clipboardManager.paste(row, col, this.rows, this.cols);
 
     if (updates && updates.length > 0) {
-      for (const { id, value } of updates) {
-        this._setCellRaw(id, value);
+      const selection = this._snapshotSelection();
+      const batch = this._buildCommandBatch(updates, 'paste', selection, selection);
+      if (batch) {
+        this._executeUserBatch(batch);
       }
-      this._recalcAll();
-      this._dispatchDataChange({ updates });
-      this.requestUpdate();
     }
   }
 
@@ -440,21 +605,20 @@ export class Y11nSpreadsheet extends LitElement {
   private _clearSelectedCells(): void {
     const range = this._selection.range;
     const updates: Array<{ id: string; value: string }> = [];
+    const selection = this._snapshotSelection();
 
     for (let r = range.start.row; r <= range.end.row; r++) {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const key = cellKey(r, c);
         if (this._internalData.has(key)) {
           updates.push({ id: key, value: '' });
-          this._internalData.delete(key);
         }
       }
     }
 
-    if (updates.length > 0) {
-      this._recalcAll();
-      this._dispatchDataChange({ updates });
-      this.requestUpdate();
+    const batch = this._buildCommandBatch(updates, 'clear', selection, selection);
+    if (batch) {
+      this._executeUserBatch(batch);
     }
   }
 

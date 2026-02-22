@@ -32,6 +32,40 @@ async function editCell(page: Page, row: number, col: number, value: string) {
   await editor.press('Enter');
 }
 
+async function pressUndo(page: Page) {
+  await page.keyboard.press('ControlOrMeta+z');
+}
+
+async function pressRedo(page: Page) {
+  await page.keyboard.press('ControlOrMeta+Shift+z');
+}
+
+async function installClipboardMock(page: Page, initialText = '') {
+  await page.evaluate((text) => {
+    let clipboardText = text;
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        readText: async () => clipboardText,
+        writeText: async (nextText: string) => {
+          clipboardText = nextText;
+        },
+      },
+    });
+    (window as unknown as { __setClipboardText?: (nextText: string) => void }).__setClipboardText = (
+      nextText: string
+    ) => {
+      clipboardText = nextText;
+    };
+  }, initialText);
+}
+
+async function setClipboardText(page: Page, text: string) {
+  await page.evaluate((nextText) => {
+    (window as unknown as { __setClipboardText: (value: string) => void }).__setClipboardText(nextText);
+  }, text);
+}
+
 test.describe('Spreadsheet Component', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
@@ -353,6 +387,110 @@ test.describe('Spreadsheet Component', () => {
       await page.keyboard.press('Backspace');
 
       expect(await getCellText(page, 12, 0)).toBe('');
+    });
+  });
+
+  test.describe('Undo / Redo', () => {
+    test('undoes and redoes committed edit', async ({ page }) => {
+      await editCell(page, 12, 1, 'original');
+      await editCell(page, 12, 1, 'updated');
+      expect(await getCellText(page, 12, 1)).toBe('updated');
+
+      const cell = getCell(page, 12, 1);
+      await cell.click();
+
+      await pressUndo(page);
+      expect(await getCellText(page, 12, 1)).toBe('original');
+
+      await pressRedo(page);
+      expect(await getCellText(page, 12, 1)).toBe('updated');
+    });
+
+    test('undo restores value after Delete and restores focus to affected cell', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+      await page.keyboard.press('Delete');
+      expect(await getCellText(page, 0, 0)).toBe('');
+
+      await page.keyboard.press('ArrowRight');
+      await expect(getCell(page, 0, 1)).toBeFocused();
+
+      await pressUndo(page);
+      expect(await getCellText(page, 0, 0)).toBe('Item');
+      await expect(cell00).toBeFocused();
+    });
+
+    test('undo restores cut cells', async ({ page }) => {
+      const cell00 = getCell(page, 0, 0);
+      await cell00.click();
+      await page.keyboard.press('ControlOrMeta+x');
+      expect(await getCellText(page, 0, 0)).toBe('');
+
+      await pressUndo(page);
+      expect(await getCellText(page, 0, 0)).toBe('Item');
+    });
+
+    test('undo and redo pasted range', async ({ page }) => {
+      await installClipboardMock(page, 'p11\tp12\np21\tp22');
+
+      const target = getCell(page, 22, 0);
+      await target.click();
+      await page.keyboard.press('ControlOrMeta+v');
+
+      expect(await getCellText(page, 22, 0)).toBe('p11');
+      expect(await getCellText(page, 22, 1)).toBe('p12');
+      expect(await getCellText(page, 23, 0)).toBe('p21');
+      expect(await getCellText(page, 23, 1)).toBe('p22');
+
+      await pressUndo(page);
+      expect(await getCellText(page, 22, 0)).toBe('');
+      expect(await getCellText(page, 22, 1)).toBe('');
+      expect(await getCellText(page, 23, 0)).toBe('');
+      expect(await getCellText(page, 23, 1)).toBe('');
+
+      await pressRedo(page);
+      expect(await getCellText(page, 22, 0)).toBe('p11');
+      expect(await getCellText(page, 22, 1)).toBe('p12');
+      expect(await getCellText(page, 23, 0)).toBe('p21');
+      expect(await getCellText(page, 23, 1)).toBe('p22');
+
+      await setClipboardText(page, 'unused');
+    });
+
+    test('redo stack clears after new user edit', async ({ page }) => {
+      await editCell(page, 13, 0, 'one');
+      await editCell(page, 13, 0, 'two');
+
+      const cell = getCell(page, 13, 0);
+      await cell.click();
+      await pressUndo(page);
+      expect(await getCellText(page, 13, 0)).toBe('one');
+
+      await editCell(page, 13, 0, 'three');
+      expect(await getCellText(page, 13, 0)).toBe('three');
+
+      await pressRedo(page);
+      expect(await getCellText(page, 13, 0)).toBe('three');
+    });
+
+    test('read-only mode disables undo and redo', async ({ page }) => {
+      await editCell(page, 12, 2, 'locked-value');
+      expect(await getCellText(page, 12, 2)).toBe('locked-value');
+
+      await page.evaluate(() => {
+        const el = document.querySelector('y11n-spreadsheet') as (HTMLElement & { readOnly: boolean }) | null;
+        if (el) {
+          el.readOnly = true;
+        }
+      });
+
+      const cell = getCell(page, 12, 2);
+      await cell.click();
+      await pressUndo(page);
+      expect(await getCellText(page, 12, 2)).toBe('locked-value');
+
+      await pressRedo(page);
+      expect(await getCellText(page, 12, 2)).toBe('locked-value');
     });
   });
 

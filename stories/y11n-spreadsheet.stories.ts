@@ -51,6 +51,7 @@ A lightweight, fully accessible, framework-agnostic spreadsheet web component bu
 | Tab / Shift+Tab | Move right / left |
 | Delete / Backspace | Clear selected cells |
 | Ctrl+C / Ctrl+V / Ctrl+X | Copy / Paste / Cut |
+| Ctrl+Z / Ctrl+Shift+Z | Undo / Redo |
 | Ctrl+A | Select all |
 | Type any character | Start editing with that character |
         `,

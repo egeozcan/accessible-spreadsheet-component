@@ -66,6 +66,8 @@ export interface SelectionChangeDetail {
  */
 export interface DataChangeDetail {
   updates: Array<{ id: string; value: string }>;
+  source?: 'user' | 'undo' | 'redo' | 'programmatic';
+  operation?: 'edit' | 'cut' | 'paste' | 'clear';
 }
 
 /**
