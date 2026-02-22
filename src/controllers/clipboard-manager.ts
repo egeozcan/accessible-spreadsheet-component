@@ -67,16 +67,11 @@ export class ClipboardManager {
     maxRows: number,
     maxCols: number
   ): Array<{ id: string; value: string }> {
-    const rows = text.split(/\r?\n/);
-    // Remove trailing empty row (common in TSV)
-    if (rows.length > 0 && rows[rows.length - 1] === '') {
-      rows.pop();
-    }
-
+    const rows = this._parseTSVRows(text);
     const updates: Array<{ id: string; value: string }> = [];
 
     for (let r = 0; r < rows.length; r++) {
-      const cells = rows[r].split('\t');
+      const cells = rows[r];
       for (let c = 0; c < cells.length; c++) {
         const row = targetRow + r;
         const col = targetCol + c;
@@ -87,6 +82,80 @@ export class ClipboardManager {
     }
 
     return updates;
+  }
+
+  /**
+   * Parse TSV text with RFC 4180-style quoted field support.
+   * Quoted fields can contain tabs, newlines, and escaped quotes ("").
+   */
+  private _parseTSVRows(text: string): string[][] {
+    const rows: string[][] = [];
+    let currentRow: string[] = [];
+    let field = '';
+    let inQuotes = false;
+    let i = 0;
+
+    while (i < text.length) {
+      const ch = text[i];
+
+      if (inQuotes) {
+        if (ch === '"') {
+          if (i + 1 < text.length && text[i + 1] === '"') {
+            // Escaped quote
+            field += '"';
+            i += 2;
+          } else {
+            // End of quoted field
+            inQuotes = false;
+            i++;
+          }
+        } else {
+          field += ch;
+          i++;
+        }
+      } else {
+        if (ch === '"' && field === '') {
+          // Start of quoted field
+          inQuotes = true;
+          i++;
+        } else if (ch === '\t') {
+          currentRow.push(field);
+          field = '';
+          i++;
+        } else if (ch === '\r' && i + 1 < text.length && text[i + 1] === '\n') {
+          currentRow.push(field);
+          field = '';
+          rows.push(currentRow);
+          currentRow = [];
+          i += 2;
+        } else if (ch === '\n') {
+          currentRow.push(field);
+          field = '';
+          rows.push(currentRow);
+          currentRow = [];
+          i++;
+        } else {
+          field += ch;
+          i++;
+        }
+      }
+    }
+
+    // Push the last field/row
+    if (field !== '' || currentRow.length > 0) {
+      currentRow.push(field);
+      rows.push(currentRow);
+    }
+
+    // Remove trailing empty row (common in TSV)
+    if (rows.length > 0) {
+      const lastRow = rows[rows.length - 1];
+      if (lastRow.length === 1 && lastRow[0] === '') {
+        rows.pop();
+      }
+    }
+
+    return rows;
   }
 
   // ─── Serialization ──────────────────────────────────

@@ -5,6 +5,7 @@ export type FormulaBarMode = 'raw' | 'formatted';
 
 interface FormulaBarCommitDetail {
   value: string;
+  cellRef: string;
 }
 
 interface FormulaBarModeChangeDetail {
@@ -25,6 +26,8 @@ export class Y11nFormulaBar extends LitElement {
 
   @state() private _draft = '';
   private _suppressNextBlur = false;
+  private _isInputFocused = false;
+  private _editingCellRef = '';
 
   static styles = css`
     :host {
@@ -101,9 +104,10 @@ export class Y11nFormulaBar extends LitElement {
 
   willUpdate(changedProps: Map<string, unknown>): void {
     if (
-      changedProps.has('mode') ||
+      !this._isInputFocused &&
+      (changedProps.has('mode') ||
       changedProps.has('rawValue') ||
-      changedProps.has('displayValue')
+      changedProps.has('displayValue'))
     ) {
       this._draft = this._sourceValue();
     }
@@ -128,14 +132,22 @@ export class Y11nFormulaBar extends LitElement {
     this._draft = (e.target as HTMLInputElement).value;
   }
 
+  private _onFocus(): void {
+    this._isInputFocused = true;
+    this._editingCellRef = this.cellRef;
+  }
+
   private _commit(): void {
+    const ref = this._isInputFocused ? this._editingCellRef : this.cellRef;
+    this._isInputFocused = false;
     this.dispatchEvent(
       new CustomEvent<FormulaBarCommitDetail>('formula-bar-commit', {
-        detail: { value: this._draft },
+        detail: { value: this._draft, cellRef: ref },
         bubbles: true,
         composed: true,
       })
     );
+    this._draft = this._sourceValue();
   }
 
   private _onKeydown(e: KeyboardEvent): void {
@@ -144,6 +156,7 @@ export class Y11nFormulaBar extends LitElement {
       this._commit();
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      this._isInputFocused = false;
       this._draft = this._sourceValue();
       this._suppressNextBlur = true;
     }
@@ -180,6 +193,7 @@ export class Y11nFormulaBar extends LitElement {
         type="text"
         .value="${this._draft}"
         ?disabled="${this.readOnly}"
+        @focus="${this._onFocus}"
         @input="${this._onInput}"
         @keydown="${this._onKeydown}"
         @blur="${this._onBlur}"

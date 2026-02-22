@@ -577,26 +577,67 @@ export class FormulaEngine {
   // ─── Comparison helper ────────────────────────────────
 
   private _compareValues(left: unknown, right: unknown, op: string): boolean {
+    const lIsBool = typeof left === 'boolean';
+    const rIsBool = typeof right === 'boolean';
+
+    // Boolean vs non-boolean: never equal, booleans sort after other types
+    if (lIsBool !== rIsBool) {
+      switch (op) {
+        case '=': return false;
+        case '<>': return true;
+        case '<': return !lIsBool; // non-bool < bool
+        case '>': return lIsBool;
+        case '<=': return !lIsBool;
+        case '>=': return lIsBool;
+        default: return false;
+      }
+    }
+
+    // Both booleans
+    if (lIsBool && rIsBool) {
+      const ln = left ? 1 : 0;
+      const rn = right ? 1 : 0;
+      switch (op) {
+        case '=': return ln === rn;
+        case '<>': return ln !== rn;
+        case '<': return ln < rn;
+        case '>': return ln > rn;
+        case '<=': return ln <= rn;
+        case '>=': return ln >= rn;
+        default: return false;
+      }
+    }
+
+    // Numeric comparison when both can be parsed as numbers
+    const lStr = String(left).trim();
+    const rStr = String(right).trim();
     const l = Number(left);
     const r = Number(right);
-    const bothNumeric = !isNaN(l) && !isNaN(r)
-      && String(left).trim() !== '' && String(right).trim() !== '';
+    const bothNumeric = lStr !== '' && rStr !== '' && !isNaN(l) && !isNaN(r);
 
+    if (bothNumeric) {
+      switch (op) {
+        case '=': return l === r;
+        case '<>': return l !== r;
+        case '<': return l < r;
+        case '>': return l > r;
+        case '<=': return l <= r;
+        case '>=': return l >= r;
+        default: return false;
+      }
+    }
+
+    // String comparison (case-insensitive, matching Excel behavior)
+    const lLower = String(left).toLowerCase();
+    const rLower = String(right).toLowerCase();
     switch (op) {
-      case '=':
-        return left === right || (bothNumeric && l === r);
-      case '<>':
-        return left !== right && (!bothNumeric || l !== r);
-      case '<':
-        return bothNumeric ? l < r : String(left) < String(right);
-      case '>':
-        return bothNumeric ? l > r : String(left) > String(right);
-      case '<=':
-        return bothNumeric ? l <= r : String(left) <= String(right);
-      case '>=':
-        return bothNumeric ? l >= r : String(left) >= String(right);
-      default:
-        return false;
+      case '=': return lLower === rLower;
+      case '<>': return lLower !== rLower;
+      case '<': return lLower < rLower;
+      case '>': return lLower > rLower;
+      case '<=': return lLower <= rLower;
+      case '>=': return lLower >= rLower;
+      default: return false;
     }
   }
 
@@ -622,7 +663,7 @@ export class FormulaEngine {
     // If this cell also has a formula, evaluate it in a fresh parser context
     if (cell.rawValue.startsWith('=')) {
       const savedTracking = this._trackingCellKey;
-      this._trackingCellKey = null; // only track direct dependencies
+      this._trackingCellKey = key; // track dependencies for the referenced cell
       this.evaluating.add(key);
       try {
         return this.parseExpression(cell.rawValue.substring(1));
@@ -663,12 +704,12 @@ export class FormulaEngine {
         if (cell) {
           if (cell.rawValue.startsWith('=')) {
             const savedTracking = this._trackingCellKey;
-            this._trackingCellKey = null;
+            this._trackingCellKey = key; // track dependencies for the referenced cell
             this.evaluating.add(key);
             try {
               values.push(this.parseExpression(cell.rawValue.substring(1)));
             } catch {
-              values.push(0);
+              throw new Error('#ERROR!');
             } finally {
               this._trackingCellKey = savedTracking;
               this.evaluating.delete(key);

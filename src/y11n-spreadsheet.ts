@@ -12,6 +12,7 @@ import {
   cellKey,
   colToLetter,
   coordToRef,
+  refToCoord,
 } from './types.js';
 import { SelectionManager } from './controllers/selection-manager.js';
 import { FormulaEngine } from './engine/formula-engine.js';
@@ -90,6 +91,10 @@ export class Y11nSpreadsheet extends LitElement {
   private _redoStack: CommandBatch[] = [];
   private readonly _maxHistory = 100;
 
+  /** Debounced screen reader announcement */
+  @state() private _announcementText = '';
+  private _announceTimer?: ReturnType<typeof setTimeout>;
+
   /** Reference mode cursor position */
   private _refCursorRow = 0;
   private _refCursorCol = 0;
@@ -118,6 +123,7 @@ export class Y11nSpreadsheet extends LitElement {
       for (const [name, fn] of Object.entries(this.functions)) {
         this._formulaEngine.registerFunction(name, fn as FormulaFunction);
       }
+      this._recalcAll();
     }
   }
 
@@ -173,11 +179,6 @@ export class Y11nSpreadsheet extends LitElement {
   private _getCellRaw(row: number, col: number): string {
     const cell = this._getCell(row, col);
     return cell?.rawValue ?? '';
-  }
-
-  private _getActiveCellKey(): string {
-    const { row, col } = this._selection.activeCell;
-    return cellKey(row, col);
   }
 
   private _getActiveCellRef(): string {
@@ -766,7 +767,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._formulaBarMode = e.detail.mode;
   }
 
-  private _handleFormulaBarCommit(e: CustomEvent<{ value: string }>): void {
+  private _handleFormulaBarCommit(e: CustomEvent<{ value: string; cellRef: string }>): void {
     if (this.readOnly) return;
 
     if (this._isEditing) {
@@ -774,7 +775,9 @@ export class Y11nSpreadsheet extends LitElement {
       this._editingCellKey = null;
     }
 
-    this._commitRawValue(this._getActiveCellKey(), e.detail.value);
+    const coord = refToCoord(e.detail.cellRef);
+    const key = cellKey(coord.row, coord.col);
+    this._commitRawValue(key, e.detail.value);
   }
 
   // ─── Event Dispatching ──────────────────────────────
@@ -788,6 +791,7 @@ export class Y11nSpreadsheet extends LitElement {
     this.dispatchEvent(
       new CustomEvent('selection-change', { detail, bubbles: true, composed: true })
     );
+    this._scheduleAnnouncement();
   }
 
   private _dispatchDataChange(detail: DataChangeDetail): void {
@@ -815,10 +819,18 @@ export class Y11nSpreadsheet extends LitElement {
 
     const buffer = 5;
 
-    const startRow = Math.max(0, Math.floor(this._scrollTop / cellHeight) - buffer);
-    const endRow = Math.min(this.rows, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
-    const startCol = Math.max(0, Math.floor(this._scrollLeft / cellWidth) - buffer);
-    const endCol = Math.min(this.cols, Math.ceil((this._scrollLeft + viewWidth) / cellWidth) + buffer);
+    let startRow = Math.max(0, Math.floor(this._scrollTop / cellHeight) - buffer);
+    let endRow = Math.min(this.rows, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
+    let startCol = Math.max(0, Math.floor(this._scrollLeft / cellWidth) - buffer);
+    let endCol = Math.min(this.cols, Math.ceil((this._scrollLeft + viewWidth) / cellWidth) + buffer);
+
+    // Ensure the active cell is always in the rendered range so screen readers
+    // can always find and announce the focused element.
+    const { row: activeRow, col: activeCol } = this._selection.activeCell;
+    if (activeRow < startRow) startRow = activeRow;
+    if (activeRow >= endRow) endRow = activeRow + 1;
+    if (activeCol < startCol) startCol = activeCol;
+    if (activeCol >= endCol) endCol = activeCol + 1;
 
     return { startRow, endRow, startCol, endCol };
   }
@@ -842,8 +854,8 @@ export class Y11nSpreadsheet extends LitElement {
     const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
     const headerWidth = 50; // row header width
 
-    const top = (row + 1) * cellHeight; // +1 for the column header row
-    const left = headerWidth + col * cellWidth;
+    const top = (row + 1) * cellHeight - this._scrollTop; // +1 for the column header row
+    const left = headerWidth + col * cellWidth - this._scrollLeft;
 
     return `
       display: block;
@@ -1071,7 +1083,7 @@ export class Y11nSpreadsheet extends LitElement {
         </div>
 
         <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          ${this._getAnnouncement(activeCell)}
+          ${this._announcementText}
         </div>
       </div>
     `;
@@ -1167,10 +1179,17 @@ export class Y11nSpreadsheet extends LitElement {
     `;
   }
 
-  private _getAnnouncement(activeCell: CellCoord): string {
+  private _buildAnnouncement(activeCell: CellCoord): string {
     const ref = `${colToLetter(activeCell.col)}${activeCell.row + 1}`;
     const display = this._getCellDisplay(activeCell.row, activeCell.col);
     return display ? `${ref}: ${display}` : ref;
+  }
+
+  private _scheduleAnnouncement(): void {
+    clearTimeout(this._announceTimer);
+    this._announceTimer = setTimeout(() => {
+      this._announcementText = this._buildAnnouncement(this._selection.activeCell);
+    }, 150);
   }
 
   protected updated(): void {
