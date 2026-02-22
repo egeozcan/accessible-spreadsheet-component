@@ -15,6 +15,11 @@ function getEditor(page: Page) {
   return page.locator('y11n-spreadsheet').locator('#editor');
 }
 
+// Helper: get the formula bar input inside shadow DOM
+function getFormulaBarInput(page: Page) {
+  return page.locator('y11n-spreadsheet').locator('y11n-formula-bar input');
+}
+
 // Helper: get cell text content
 async function getCellText(page: Page, row: number, col: number): Promise<string> {
   const cell = getCell(page, row, col);
@@ -210,6 +215,34 @@ test.describe('Spreadsheet Component', () => {
       // After Enter, focus should move to the cell below
       const cellBelow = getCell(page, 11, 0);
       await expect(cellBelow).toBeFocused();
+    });
+
+    test('formula bar shows raw value for formula cells and can commit edits', async ({ page }) => {
+      const formulaCell = getCell(page, 1, 3);
+      await formulaCell.click();
+
+      const formulaBar = getFormulaBarInput(page);
+      await expect(formulaBar).toHaveValue('=B2*C2');
+
+      await formulaBar.fill('=B2*C2+1');
+      await formulaBar.press('Enter');
+
+      const display = await getCellText(page, 1, 3);
+      expect(parseFloat(display)).toBeCloseTo(60.9, 1);
+    });
+
+    test('formula bar formatted mode shows display value for formula cells', async ({ page }) => {
+      const formulaCell = getCell(page, 1, 3);
+      await formulaCell.click();
+
+      const formattedBtn = page
+        .locator('y11n-spreadsheet')
+        .locator('y11n-formula-bar button:has-text("Formatted")');
+      await formattedBtn.click();
+
+      const formulaBar = getFormulaBarInput(page);
+      const formatted = await formulaBar.inputValue();
+      expect(parseFloat(formatted)).toBeCloseTo(59.9, 1);
     });
   });
 

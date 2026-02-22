@@ -10,10 +10,13 @@ import {
   type DataChangeDetail,
   cellKey,
   colToLetter,
+  coordToRef,
 } from './types.js';
 import { SelectionManager } from './controllers/selection-manager.js';
 import { FormulaEngine } from './engine/formula-engine.js';
 import { ClipboardManager } from './controllers/clipboard-manager.js';
+import './components/y11n-formula-bar.js';
+import type { FormulaBarMode } from './components/y11n-formula-bar.js';
 
 type DataChangeOperation = NonNullable<DataChangeDetail['operation']>;
 type ChangeSource = NonNullable<DataChangeDetail['source']>;
@@ -56,6 +59,7 @@ export class Y11nSpreadsheet extends LitElement {
 
   @state() private _isEditing = false;
   @state() private _editValue = '';
+  @state() private _formulaBarMode: FormulaBarMode = 'raw';
 
   /** Track scroll position for virtual rendering */
   @state() private _scrollTop = 0;
@@ -147,6 +151,20 @@ export class Y11nSpreadsheet extends LitElement {
   private _getCellDisplay(row: number, col: number): string {
     const cell = this._getCell(row, col);
     return cell?.displayValue ?? '';
+  }
+
+  private _getCellRaw(row: number, col: number): string {
+    const cell = this._getCell(row, col);
+    return cell?.rawValue ?? '';
+  }
+
+  private _getActiveCellKey(): string {
+    const { row, col } = this._selection.activeCell;
+    return cellKey(row, col);
+  }
+
+  private _getActiveCellRef(): string {
+    return coordToRef(this._selection.activeCell);
   }
 
   private _setCellRaw(key: string, rawValue: string): void {
@@ -259,6 +277,25 @@ export class Y11nSpreadsheet extends LitElement {
     this._pushHistory(batch);
   }
 
+  private _commitRawValue(key: string, newValue: string): boolean {
+    const oldCell = this._internalData.get(key);
+    const oldValue = oldCell?.rawValue ?? '';
+    if (newValue === oldValue) return false;
+
+    const selection = this._snapshotSelection();
+    const batch = this._buildCommandBatch(
+      [{ id: key, value: newValue }],
+      'edit',
+      selection,
+      selection
+    );
+
+    if (!batch) return false;
+    this._executeUserBatch(batch);
+    this._dispatchCellChange({ cellId: key, value: newValue, oldValue });
+    return true;
+  }
+
   private _undo(): void {
     if (this.readOnly) return;
 
@@ -300,26 +337,12 @@ export class Y11nSpreadsheet extends LitElement {
     if (!this._isEditing || !this._editingCellKey) return;
 
     const key = this._editingCellKey;
-    const oldCell = this._internalData.get(key);
-    const oldValue = oldCell?.rawValue ?? '';
     const newValue = this._editValue;
 
     this._isEditing = false;
     this._editingCellKey = null;
 
-    if (newValue !== oldValue) {
-      const selection = this._snapshotSelection();
-      const batch = this._buildCommandBatch(
-        [{ id: key, value: newValue }],
-        'edit',
-        selection,
-        selection
-      );
-      if (batch) {
-        this._executeUserBatch(batch);
-      }
-      this._dispatchCellChange({ cellId: key, value: newValue, oldValue });
-    }
+    this._commitRawValue(key, newValue);
 
     // Return focus to the grid
     requestAnimationFrame(() => this._focusActiveCell());
@@ -642,6 +665,23 @@ export class Y11nSpreadsheet extends LitElement {
     }
   }
 
+  private _handleFormulaBarModeChange(
+    e: CustomEvent<{ mode: FormulaBarMode }>
+  ): void {
+    this._formulaBarMode = e.detail.mode;
+  }
+
+  private _handleFormulaBarCommit(e: CustomEvent<{ value: string }>): void {
+    if (this.readOnly) return;
+
+    if (this._isEditing) {
+      this._isEditing = false;
+      this._editingCellKey = null;
+    }
+
+    this._commitRawValue(this._getActiveCellKey(), e.detail.value);
+  }
+
   // ─── Event Dispatching ──────────────────────────────
 
   private _dispatchCellChange(detail: CellChangeDetail): void {
@@ -750,8 +790,17 @@ export class Y11nSpreadsheet extends LitElement {
 
     .ls-wrapper {
       position: relative;
+      display: flex;
+      flex-direction: column;
       width: 100%;
       height: 100%;
+      overflow: hidden;
+    }
+
+    .ls-grid-shell {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 0;
       overflow: hidden;
     }
 
@@ -876,33 +925,47 @@ export class Y11nSpreadsheet extends LitElement {
   protected render() {
     const { startRow, endRow } = this._getVisibleRange();
     const activeCell = this._selection.activeCell;
+    const activeRawValue = this._getCellRaw(activeCell.row, activeCell.col);
+    const activeDisplayValue = this._getCellDisplay(activeCell.row, activeCell.col);
 
     return html`
       <div class="ls-wrapper">
-        <input
-          id="editor"
-          part="editor"
-          style="${this._getEditorStyle()}"
-          .value="${this._editValue}"
-          @input="${this._handleEditorInput}"
-          @keydown="${this._handleEditorKeydown}"
-          @blur="${this._handleEditorBlur}"
-          aria-label="Cell editor"
-        />
+        <y11n-formula-bar
+          cell-ref="${this._getActiveCellRef()}"
+          raw-value="${activeRawValue}"
+          display-value="${activeDisplayValue}"
+          .mode="${this._formulaBarMode}"
+          .readOnly="${this.readOnly}"
+          @formula-bar-mode-change="${this._handleFormulaBarModeChange}"
+          @formula-bar-commit="${this._handleFormulaBarCommit}"
+        ></y11n-formula-bar>
 
-        <div
-          class="ls-grid"
-          role="grid"
-          aria-rowcount="${this.rows + 1}"
-          aria-colcount="${this.cols + 1}"
-          aria-readonly="${this.readOnly}"
-          style="--cols: ${this.cols};"
-          tabindex="-1"
-          @keydown="${this._handleGridKeydown}"
-          @scroll="${this._handleScroll}"
-        >
-          ${this._renderHeaderRow()}
-          ${this._renderRows(startRow, endRow)}
+        <div class="ls-grid-shell">
+          <input
+            id="editor"
+            part="editor"
+            style="${this._getEditorStyle()}"
+            .value="${this._editValue}"
+            @input="${this._handleEditorInput}"
+            @keydown="${this._handleEditorKeydown}"
+            @blur="${this._handleEditorBlur}"
+            aria-label="Cell editor"
+          />
+
+          <div
+            class="ls-grid"
+            role="grid"
+            aria-rowcount="${this.rows + 1}"
+            aria-colcount="${this.cols + 1}"
+            aria-readonly="${this.readOnly}"
+            style="--cols: ${this.cols};"
+            tabindex="-1"
+            @keydown="${this._handleGridKeydown}"
+            @scroll="${this._handleScroll}"
+          >
+            ${this._renderHeaderRow()}
+            ${this._renderRows(startRow, endRow)}
+          </div>
         </div>
 
         <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
