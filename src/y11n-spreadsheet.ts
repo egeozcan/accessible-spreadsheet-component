@@ -65,6 +65,9 @@ export class Y11nSpreadsheet extends LitElement {
   /** Whether arrow keys are currently selecting a cell reference in a formula */
   @state() private _refMode = false;
 
+  /** Screen reader announcement text for mode changes */
+  @state() private _modeAnnouncement = '';
+
   /** Track scroll position for virtual rendering */
   @state() private _scrollTop = 0;
   @state() private _scrollLeft = 0;
@@ -118,6 +121,7 @@ export class Y11nSpreadsheet extends LitElement {
       for (const [name, fn] of Object.entries(this.functions)) {
         this._formulaEngine.registerFunction(name, fn as FormulaFunction);
       }
+      this._recalcAll();
     }
   }
 
@@ -402,6 +406,7 @@ export class Y11nSpreadsheet extends LitElement {
       this._refCursorRow = Math.max(0, Math.min(row + dRow, this.rows - 1));
       this._refCursorCol = Math.max(0, Math.min(col + dCol, this.cols - 1));
       this._refMode = true;
+      this._modeAnnouncement = `Reference selection mode. Selecting ${coordToRef({ row: this._refCursorRow, col: this._refCursorCol })}`;
 
       const cursorPos = this._editor?.selectionStart ?? this._editValue.length;
       this._refInsertStart = cursorPos;
@@ -417,6 +422,7 @@ export class Y11nSpreadsheet extends LitElement {
       this._refCursorCol = Math.max(0, Math.min(this._refCursorCol + dCol, this.cols - 1));
 
       const ref = coordToRef({ row: this._refCursorRow, col: this._refCursorCol });
+      this._modeAnnouncement = `Selecting ${ref}`;
       this._editValue =
         this._editValue.substring(0, this._refInsertStart) +
         ref +
@@ -426,6 +432,9 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _exitRefMode(): void {
+    if (this._refMode) {
+      this._modeAnnouncement = 'Reference selection ended';
+    }
     this._refMode = false;
   }
 
@@ -769,12 +778,15 @@ export class Y11nSpreadsheet extends LitElement {
   private _handleFormulaBarCommit(e: CustomEvent<{ value: string }>): void {
     if (this.readOnly) return;
 
+    // If editing via the grid editor, commit to that cell specifically
+    const targetKey = this._editingCellKey ?? this._getActiveCellKey();
+
     if (this._isEditing) {
       this._isEditing = false;
       this._editingCellKey = null;
     }
 
-    this._commitRawValue(this._getActiveCellKey(), e.detail.value);
+    this._commitRawValue(targetKey, e.detail.value);
   }
 
   // ─── Event Dispatching ──────────────────────────────
@@ -815,10 +827,17 @@ export class Y11nSpreadsheet extends LitElement {
 
     const buffer = 5;
 
-    const startRow = Math.max(0, Math.floor(this._scrollTop / cellHeight) - buffer);
-    const endRow = Math.min(this.rows, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
-    const startCol = Math.max(0, Math.floor(this._scrollLeft / cellWidth) - buffer);
-    const endCol = Math.min(this.cols, Math.ceil((this._scrollLeft + viewWidth) / cellWidth) + buffer);
+    let startRow = Math.max(0, Math.floor(this._scrollTop / cellHeight) - buffer);
+    let endRow = Math.min(this.rows, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
+    let startCol = Math.max(0, Math.floor(this._scrollLeft / cellWidth) - buffer);
+    let endCol = Math.min(this.cols, Math.ceil((this._scrollLeft + viewWidth) / cellWidth) + buffer);
+
+    // Ensure the active cell is always within the rendered range
+    const { row: activeRow, col: activeCol } = this._selection.activeCell;
+    if (activeRow < startRow) startRow = activeRow;
+    if (activeRow >= endRow) endRow = activeRow + 1;
+    if (activeCol < startCol) startCol = activeCol;
+    if (activeCol >= endCol) endCol = activeCol + 1;
 
     return { startRow, endRow, startCol, endCol };
   }
@@ -842,8 +861,8 @@ export class Y11nSpreadsheet extends LitElement {
     const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
     const headerWidth = 50; // row header width
 
-    const top = (row + 1) * cellHeight; // +1 for the column header row
-    const left = headerWidth + col * cellWidth;
+    const top = (row + 1) * cellHeight - this._scrollTop; // +1 for header, offset by scroll
+    const left = headerWidth + col * cellWidth - this._scrollLeft;
 
     return `
       display: block;
@@ -1073,6 +1092,9 @@ export class Y11nSpreadsheet extends LitElement {
         <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
           ${this._getAnnouncement(activeCell)}
         </div>
+        <div class="sr-only" role="log" aria-live="assertive" aria-atomic="true">
+          ${this._modeAnnouncement}
+        </div>
       </div>
     `;
   }
@@ -1083,13 +1105,11 @@ export class Y11nSpreadsheet extends LitElement {
       headers.push({ letter: colToLetter(c), index: c });
     }
 
-    const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
-
     return html`
       <div class="ls-header-row" role="row" aria-rowindex="1">
         <div class="ls-corner-header" role="columnheader"></div>
         ${startCol > 0
-          ? html`<div style="width: ${startCol * cellWidth}px;"></div>`
+          ? html`<div style="grid-column: span ${startCol};"></div>`
           : nothing}
         ${headers.map(
           (h) => html`
@@ -1103,7 +1123,7 @@ export class Y11nSpreadsheet extends LitElement {
           `
         )}
         ${endCol < this.cols
-          ? html`<div style="width: ${(this.cols - endCol) * cellWidth}px;"></div>`
+          ? html`<div style="grid-column: span ${this.cols - endCol};"></div>`
           : nothing}
       </div>
     `;
@@ -1125,7 +1145,6 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _renderRow(row: number, startCol: number, endCol: number) {
-    const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
     const cells = [];
     for (let c = startCol; c < endCol; c++) {
       const isSelected = this._selection.isCellSelected(row, c);
@@ -1141,6 +1160,7 @@ export class Y11nSpreadsheet extends LitElement {
           aria-colindex="${c + 2}"
           aria-selected="${isSelected}"
           aria-readonly="${this.readOnly}"
+          aria-current="${isActive ? 'true' : 'false'}"
           data-row="${row}"
           data-col="${c}"
           data-key="${key}"
@@ -1157,11 +1177,11 @@ export class Y11nSpreadsheet extends LitElement {
       <div class="ls-row" role="row" aria-rowindex="${row + 2}">
         <div class="ls-row-header" role="rowheader">${row + 1}</div>
         ${startCol > 0
-          ? html`<div style="width: ${startCol * cellWidth}px;"></div>`
+          ? html`<div style="grid-column: span ${startCol};"></div>`
           : nothing}
         ${cells}
         ${endCol < this.cols
-          ? html`<div style="width: ${(this.cols - endCol) * cellWidth}px;"></div>`
+          ? html`<div style="grid-column: span ${this.cols - endCol};"></div>`
           : nothing}
       </div>
     `;

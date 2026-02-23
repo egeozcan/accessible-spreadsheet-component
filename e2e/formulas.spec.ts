@@ -179,7 +179,7 @@ test.describe('Formula Engine', () => {
       '0:2': { rawValue: '=A1/B1', displayValue: '', type: 'text' },
     });
 
-    await spreadsheet.waitForCellText(0, 2, '#ERROR!');
+    await spreadsheet.waitForCellText(0, 2, '#DIV/0!');
   });
 
   test('invalid formula produces #ERROR!', async ({ spreadsheet }) => {
@@ -190,12 +190,12 @@ test.describe('Formula Engine', () => {
     await spreadsheet.waitForCellText(0, 0, '#ERROR!');
   });
 
-  test('unknown function produces #ERROR!', async ({ spreadsheet }) => {
+  test('unknown function produces #NAME?', async ({ spreadsheet }) => {
     await spreadsheet.setData({
       '0:0': { rawValue: '=NOSUCHFUNC(1)', displayValue: '', type: 'text' },
     });
 
-    await spreadsheet.waitForCellText(0, 0, '#ERROR!');
+    await spreadsheet.waitForCellText(0, 0, '#NAME?');
   });
 
   test('formula updates when referenced cell changes', async ({ spreadsheet }) => {

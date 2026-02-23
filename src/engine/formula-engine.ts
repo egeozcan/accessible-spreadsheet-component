@@ -577,26 +577,43 @@ export class FormulaEngine {
   // ─── Comparison helper ────────────────────────────────
 
   private _compareValues(left: unknown, right: unknown, op: string): boolean {
-    const l = Number(left);
-    const r = Number(right);
-    const bothNumeric = !isNaN(l) && !isNaN(r)
-      && String(left).trim() !== '' && String(right).trim() !== '';
+    // Determine if both sides can be compared numerically.
+    // Booleans are numeric (TRUE=1, FALSE=0). Strings that look like numbers
+    // are numeric. Empty strings and non-numeric strings are NOT numeric.
+    const isNumeric = (v: unknown): boolean => {
+      if (typeof v === 'boolean') return true;
+      if (typeof v === 'number') return true;
+      const s = String(v).trim();
+      return s !== '' && !isNaN(Number(s));
+    };
 
+    const bothNumeric = isNumeric(left) && isNumeric(right);
+
+    if (bothNumeric) {
+      const l = Number(left);
+      const r = Number(right);
+      switch (op) {
+        case '=':  return l === r;
+        case '<>': return l !== r;
+        case '<':  return l < r;
+        case '>':  return l > r;
+        case '<=': return l <= r;
+        case '>=': return l >= r;
+        default:   return false;
+      }
+    }
+
+    // String comparison (case-insensitive for = and <>, lexicographic for ordering)
+    const ls = String(left ?? '');
+    const rs = String(right ?? '');
     switch (op) {
-      case '=':
-        return left === right || (bothNumeric && l === r);
-      case '<>':
-        return left !== right && (!bothNumeric || l !== r);
-      case '<':
-        return bothNumeric ? l < r : String(left) < String(right);
-      case '>':
-        return bothNumeric ? l > r : String(left) > String(right);
-      case '<=':
-        return bothNumeric ? l <= r : String(left) <= String(right);
-      case '>=':
-        return bothNumeric ? l >= r : String(left) >= String(right);
-      default:
-        return false;
+      case '=':  return ls === rs;
+      case '<>': return ls !== rs;
+      case '<':  return ls < rs;
+      case '>':  return ls > rs;
+      case '<=': return ls <= rs;
+      case '>=': return ls >= rs;
+      default:   return false;
     }
   }
 
@@ -619,17 +636,16 @@ export class FormulaEngine {
     const cell = this.data.get(key);
     if (!cell) return 0; // empty cells are 0
 
-    // If this cell also has a formula, evaluate it in a fresh parser context
+    // If this cell also has a formula, evaluate it in a fresh parser context.
+    // Keep _trackingCellKey so transitive dependencies are recorded
+    // (e.g. C1→B1→A1 means C1 depends on A1 too).
     if (cell.rawValue.startsWith('=')) {
-      const savedTracking = this._trackingCellKey;
-      this._trackingCellKey = null; // only track direct dependencies
       this.evaluating.add(key);
       try {
         return this.parseExpression(cell.rawValue.substring(1));
       } catch {
         throw new Error('#ERROR!');
       } finally {
-        this._trackingCellKey = savedTracking;
         this.evaluating.delete(key);
       }
     }
@@ -662,16 +678,19 @@ export class FormulaEngine {
         const cell = this.data.get(key);
         if (cell) {
           if (cell.rawValue.startsWith('=')) {
-            const savedTracking = this._trackingCellKey;
-            this._trackingCellKey = null;
-            this.evaluating.add(key);
-            try {
-              values.push(this.parseExpression(cell.rawValue.substring(1)));
-            } catch {
-              values.push(0);
-            } finally {
-              this._trackingCellKey = savedTracking;
-              this.evaluating.delete(key);
+            // Keep _trackingCellKey so transitive deps through ranges are tracked
+            if (this.evaluating.has(key)) {
+              values.push('#CIRC!');
+            } else {
+              this.evaluating.add(key);
+              try {
+                values.push(this.parseExpression(cell.rawValue.substring(1)));
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : '';
+                values.push(msg.startsWith('#') ? msg : '#ERROR!');
+              } finally {
+                this.evaluating.delete(key);
+              }
             }
           } else {
             // Match _resolveRef's coercion logic for consistency
