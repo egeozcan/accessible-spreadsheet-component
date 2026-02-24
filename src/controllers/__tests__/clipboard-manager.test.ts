@@ -88,6 +88,58 @@ describe('ClipboardManager', () => {
         { id: '99:25', value: 'b' },
       ]);
     });
+
+    it('handles bare \\r line endings (old Mac style)', () => {
+      // parseTSV uses /\r?\n/ so bare \r is treated as part of the value
+      // This documents the current behavior
+      const result = manager.parseTSV('a\rb\rc', 0, 0, 100, 26);
+      // Bare \r is NOT split as newlines in the current implementation
+      expect(result).toEqual([{ id: '0:0', value: 'a\rb\rc' }]);
+    });
+
+    it('handles multi-row multi-col grid', () => {
+      const result = manager.parseTSV('a\tb\tc\n1\t2\t3\nx\ty\tz', 0, 0, 100, 26);
+      expect(result).toEqual([
+        { id: '0:0', value: 'a' },
+        { id: '0:1', value: 'b' },
+        { id: '0:2', value: 'c' },
+        { id: '1:0', value: '1' },
+        { id: '1:1', value: '2' },
+        { id: '1:2', value: '3' },
+        { id: '2:0', value: 'x' },
+        { id: '2:1', value: 'y' },
+        { id: '2:2', value: 'z' },
+      ]);
+    });
+
+    it('handles target offset with multi-row grid', () => {
+      const result = manager.parseTSV('a\tb\n1\t2', 2, 3, 100, 26);
+      expect(result).toEqual([
+        { id: '2:3', value: 'a' },
+        { id: '2:4', value: 'b' },
+        { id: '3:3', value: '1' },
+        { id: '3:4', value: '2' },
+      ]);
+    });
+
+    it('clips both rows and columns to grid bounds', () => {
+      const result = manager.parseTSV('a\tb\tc\n1\t2\t3\nx\ty\tz', 0, 0, 2, 2);
+      expect(result).toEqual([
+        { id: '0:0', value: 'a' },
+        { id: '0:1', value: 'b' },
+        { id: '1:0', value: '1' },
+        { id: '1:1', value: '2' },
+      ]);
+    });
+
+    it('handles tab-only input (empty cells)', () => {
+      const result = manager.parseTSV('\t\t', 0, 0, 100, 26);
+      expect(result).toEqual([
+        { id: '0:0', value: '' },
+        { id: '0:1', value: '' },
+        { id: '0:2', value: '' },
+      ]);
+    });
   });
 
   describe('cut', () => {

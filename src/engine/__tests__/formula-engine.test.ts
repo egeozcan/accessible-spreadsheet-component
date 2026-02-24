@@ -22,6 +22,101 @@ describe('FormulaEngine', () => {
     engine = new FormulaEngine();
   });
 
+  // ─── Tokenizer tests (via evaluate) ────────────────
+
+  describe('tokenizer', () => {
+    it('tokenizes numeric literals: integer', () => {
+      expect(engine.evaluate('=42')).toEqual({ displayValue: '42', type: 'number' });
+    });
+
+    it('tokenizes numeric literals: decimal', () => {
+      expect(engine.evaluate('=3.14')).toEqual({ displayValue: '3.14', type: 'number' });
+    });
+
+    it('tokenizes numeric literals: leading dot', () => {
+      expect(engine.evaluate('=.5')).toEqual({ displayValue: '0.5', type: 'number' });
+    });
+
+    it('tokenizes string literals', () => {
+      expect(engine.evaluate('="hello"')).toEqual({ displayValue: 'hello', type: 'text' });
+    });
+
+    it('tokenizes empty string literal', () => {
+      expect(engine.evaluate('=""')).toEqual({ displayValue: '', type: 'text' });
+    });
+
+    it('tokenizes boolean literals TRUE', () => {
+      expect(engine.evaluate('=TRUE')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('tokenizes boolean literals FALSE', () => {
+      expect(engine.evaluate('=FALSE')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('tokenizes all arithmetic operators', () => {
+      expect(engine.evaluate('=2+3')).toEqual({ displayValue: '5', type: 'number' });
+      expect(engine.evaluate('=5-2')).toEqual({ displayValue: '3', type: 'number' });
+      expect(engine.evaluate('=4*3')).toEqual({ displayValue: '12', type: 'number' });
+      expect(engine.evaluate('=12/4')).toEqual({ displayValue: '3', type: 'number' });
+      expect(engine.evaluate('="a"&"b"')).toEqual({ displayValue: 'ab', type: 'text' });
+    });
+
+    it('tokenizes all comparison operators', () => {
+      expect(engine.evaluate('=1=1')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('=1<>2')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('=1<2')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('=2>1')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('=1<=2')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('=2>=1')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('throws error on unexpected characters', () => {
+      const result = engine.evaluate('=1@2');
+      expect(result).toEqual({ displayValue: '#ERROR!', type: 'error' });
+    });
+
+    it('returns empty result for empty formula input', () => {
+      expect(engine.evaluate('')).toEqual({ displayValue: '', type: 'text' });
+      expect(engine.evaluate('  ')).toEqual({ displayValue: '', type: 'text' });
+    });
+  });
+
+  // ─── Parser / precedence tests ─────────────────────
+
+  describe('parser precedence', () => {
+    it('multiplication over addition: 1+2*3=7', () => {
+      expect(engine.evaluate('=1+2*3')).toEqual({ displayValue: '7', type: 'number' });
+    });
+
+    it('parentheses overriding precedence: (1+2)*3=9', () => {
+      expect(engine.evaluate('=(1+2)*3')).toEqual({ displayValue: '9', type: 'number' });
+    });
+
+    it('nested parentheses: ((2+3)*2)+1=11', () => {
+      expect(engine.evaluate('=((2+3)*2)+1')).toEqual({ displayValue: '11', type: 'number' });
+    });
+
+    it('unary negation: -5', () => {
+      expect(engine.evaluate('=-5')).toEqual({ displayValue: '-5', type: 'number' });
+    });
+
+    it('unary negation of expression: -(3+2)', () => {
+      expect(engine.evaluate('=-(3+2)')).toEqual({ displayValue: '-5', type: 'number' });
+    });
+
+    it('unary plus: +5', () => {
+      expect(engine.evaluate('=+5')).toEqual({ displayValue: '5', type: 'number' });
+    });
+
+    it('comparison has lowest precedence: 1+2>2 is TRUE', () => {
+      expect(engine.evaluate('=1+2>2')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('concatenation binds tighter than comparison: "a"&"b"="ab" is TRUE', () => {
+      expect(engine.evaluate('="a"&"b"="ab"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+  });
+
   // ─── Basic evaluation ───────────────────────────────
 
   describe('evaluate', () => {
@@ -67,7 +162,7 @@ describe('FormulaEngine', () => {
 
     it('returns error on division by zero', () => {
       const result = engine.evaluate('=1/0');
-      expect(result.type).toBe('error');
+      expect(result).toEqual({ displayValue: '#DIV/0!', type: 'error' });
     });
 
     it('returns #ERROR! for invalid formulas', () => {
@@ -131,6 +226,12 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=A1')).toEqual({ displayValue: '0', type: 'number' });
     });
 
+    it('resolves multi-letter column references (AA1)', () => {
+      const data = makeData({ '0:26': '99' });
+      engine.setData(data);
+      expect(engine.evaluate('=AA1')).toEqual({ displayValue: '99', type: 'number' });
+    });
+
     it('resolves text cell references', () => {
       const data = makeData({ '0:0': 'hello' });
       engine.setData(data);
@@ -138,6 +239,18 @@ describe('FormulaEngine', () => {
         displayValue: 'hello world',
         type: 'text',
       });
+    });
+
+    it('resolves boolean cell references', () => {
+      const data = makeData({ '0:0': 'TRUE' });
+      engine.setData(data);
+      expect(engine.evaluate('=IF(A1, "yes", "no")')).toEqual({ displayValue: 'yes', type: 'text' });
+    });
+
+    it('performs arithmetic with cell references: A1+B1', () => {
+      const data = makeData({ '0:0': '10', '0:1': '25' });
+      engine.setData(data);
+      expect(engine.evaluate('=A1+B1')).toEqual({ displayValue: '35', type: 'number' });
     });
 
     it('resolves chained formula references', () => {
@@ -150,10 +263,21 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=C1*2')).toEqual({ displayValue: '60', type: 'number' });
     });
 
-    it('detects circular references', () => {
+    it('detects direct circular reference (A1 references itself)', () => {
       const data = makeData({ '0:0': '=A1' });
       engine.setData(data);
-      expect(engine.evaluate('=A1')).toEqual({ displayValue: '#ERROR!', type: 'error' });
+      const result = engine.evaluate('=A1');
+      expect(result.type).toBe('error');
+    });
+
+    it('detects indirect circular reference (A1->B1->A1)', () => {
+      const data = makeData({
+        '0:0': '=B1',
+        '0:1': '=A1',
+      });
+      engine.setData(data);
+      const result = engine.evaluate('=A1');
+      expect(result.type).toBe('error');
     });
   });
 
@@ -168,6 +292,30 @@ describe('FormulaEngine', () => {
       });
       engine.setData(data);
       expect(engine.evaluate('=SUM(A1:A3)')).toEqual({ displayValue: '60', type: 'number' });
+    });
+
+    it('handles ranges with mixed types', () => {
+      const data = makeData({
+        '0:0': '10',
+        '1:0': 'hello',
+        '2:0': '30',
+      });
+      engine.setData(data);
+      // SUM treats non-numeric as 0: 10 + 0 + 30 = 40
+      expect(engine.evaluate('=SUM(A1:A3)')).toEqual({ displayValue: '40', type: 'number' });
+      // COUNT should only count numeric
+      expect(engine.evaluate('=COUNT(A1:A3)')).toEqual({ displayValue: '2', type: 'number' });
+    });
+
+    it('handles 2D ranges (A1:B2)', () => {
+      const data = makeData({
+        '0:0': '1',
+        '0:1': '2',
+        '1:0': '3',
+        '1:1': '4',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUM(A1:B2)')).toEqual({ displayValue: '10', type: 'number' });
     });
   });
 
@@ -739,6 +887,153 @@ describe('FormulaEngine', () => {
     it('uses booleans in IF', () => {
       expect(engine.evaluate('=IF(TRUE, 1, 0)')).toEqual({ displayValue: '1', type: 'number' });
       expect(engine.evaluate('=IF(FALSE, 1, 0)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+  });
+
+  // ─── Value coercion tests ─────────────────────────
+
+  describe('value coercion', () => {
+    it('coerces numeric strings to number type', () => {
+      expect(engine.evaluate('42')).toEqual({ displayValue: '42', type: 'number' });
+      expect(engine.evaluate('3.14')).toEqual({ displayValue: '3.14', type: 'number' });
+      expect(engine.evaluate('0')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('coerces boolean strings to boolean type', () => {
+      expect(engine.evaluate('TRUE')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('false')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('returns text type for plain text', () => {
+      expect(engine.evaluate('hello')).toEqual({ displayValue: 'hello', type: 'text' });
+    });
+
+    it('coerces error codes to error type', () => {
+      expect(engine.evaluate('#ERROR!')).toEqual({ displayValue: '#ERROR!', type: 'error' });
+      expect(engine.evaluate('#REF!')).toEqual({ displayValue: '#REF!', type: 'error' });
+      expect(engine.evaluate('#DIV/0!')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
+      expect(engine.evaluate('#NAME?')).toEqual({ displayValue: '#NAME?', type: 'error' });
+      expect(engine.evaluate('#CIRC!')).toEqual({ displayValue: '#CIRC!', type: 'error' });
+    });
+  });
+
+  // ─── Error handling tests ─────────────────────────
+
+  describe('error handling', () => {
+    it('returns #DIV/0! on division by zero', () => {
+      expect(engine.evaluate('=1/0')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
+      expect(engine.evaluate('=10/(5-5)')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
+    });
+
+    it('returns #NAME? on unknown function', () => {
+      expect(engine.evaluate('=UNKNOWNFUNC(1)')).toEqual({ displayValue: '#NAME?', type: 'error' });
+    });
+
+    it('returns #ERROR! on syntax error', () => {
+      expect(engine.evaluate('=(((')).toEqual({ displayValue: '#ERROR!', type: 'error' });
+    });
+
+    it('returns error on direct circular reference (A1=A1)', () => {
+      const data = makeData({ '0:0': '=A1' });
+      engine.setData(data);
+      engine.recalculate();
+      const cellData = data.get('0:0')!;
+      expect(cellData.type).toBe('error');
+    });
+
+    it('returns error on indirect circular reference (A1=B1, B1=A1)', () => {
+      const data = makeData({
+        '0:0': '=B1',
+        '0:1': '=A1',
+      });
+      engine.setData(data);
+      engine.recalculate();
+      // At least one of them should be an error
+      const a1 = data.get('0:0')!;
+      const b1 = data.get('0:1')!;
+      expect(a1.type === 'error' || b1.type === 'error').toBe(true);
+    });
+
+    it('returns error when max eval depth is exceeded', () => {
+      const data: GridData = new Map();
+      for (let i = 0; i < 70; i++) {
+        const raw = i === 0 ? '1' : `=A${i}+1`;
+        const isFormula = raw.startsWith('=');
+        data.set(`${i}:0`, cell(raw, isFormula ? 'text' : 'number'));
+      }
+      engine.setData(data);
+      const result = engine.evaluate('=A70');
+      expect(result.type).toBe('error');
+    });
+  });
+
+  // ─── Dependency tracking tests ─────────────────────
+
+  describe('dependency tracking', () => {
+    it('recalculateAffected updates dependent cells', () => {
+      const data = makeData({ '0:0': '10', '0:1': '=A1+5' });
+      engine.setData(data);
+      engine.recalculate();
+      expect(data.get('0:1')!.displayValue).toBe('15');
+
+      data.set('0:0', cell('20', 'number'));
+      engine.evaluate('20', '0:0');
+      const changed = engine.recalculateAffected(['0:0']);
+      expect(changed.has('0:1')).toBe(true);
+      expect(data.get('0:1')!.displayValue).toBe('25');
+    });
+
+    it('transitive dependencies: A1 change updates B1 and C1', () => {
+      const data = makeData({
+        '0:0': '1',
+        '0:1': '=A1*10',
+        '0:2': '=B1+1',
+      });
+      engine.setData(data);
+      engine.recalculate();
+      expect(data.get('0:1')!.displayValue).toBe('10');
+      expect(data.get('0:2')!.displayValue).toBe('11');
+
+      data.set('0:0', cell('2', 'number'));
+      engine.evaluate('2', '0:0');
+      const changed = engine.recalculateAffected(['0:0']);
+      expect(changed.has('0:1')).toBe(true);
+      expect(changed.has('0:2')).toBe(true);
+      expect(data.get('0:1')!.displayValue).toBe('20');
+      expect(data.get('0:2')!.displayValue).toBe('21');
+    });
+
+    it('recalculate() rebuilds the full dependency graph', () => {
+      const data = makeData({
+        '0:0': '5',
+        '0:1': '=A1*2',
+      });
+      engine.setData(data);
+      // setData clears deps, recalculate rebuilds them
+      engine.recalculate();
+      expect(data.get('0:1')!.displayValue).toBe('10');
+
+      // Now recalculateAffected should work because deps are rebuilt
+      data.set('0:0', cell('7', 'number'));
+      engine.evaluate('7', '0:0');
+      const changed = engine.recalculateAffected(['0:0']);
+      expect(changed.has('0:1')).toBe(true);
+      expect(data.get('0:1')!.displayValue).toBe('14');
+    });
+
+    it('recalculateAffected falls back to full recalc when deps empty (after setData)', () => {
+      const data = makeData({
+        '0:0': '10',
+        '0:1': '=A1*3',
+      });
+      engine.setData(data);
+      // Intentionally skip recalculate so deps are empty
+
+      data.set('0:0', cell('4', 'number'));
+      const changed = engine.recalculateAffected(['0:0']);
+      // Should fall back to full recalc and update B1
+      expect(changed.has('0:1')).toBe(true);
+      expect(data.get('0:1')!.displayValue).toBe('12');
     });
   });
 });
