@@ -111,9 +111,11 @@ export function letterToCol(letter: string): number {
 
 /**
  * Convert a cell reference like "A1" to a CellCoord
+ * Supports absolute/mixed references: $A$1, $A1, A$1
  */
 export function refToCoord(ref: string): CellCoord {
-  const match = ref.match(/^([A-Z]+)(\d+)$/i);
+  const stripped = ref.replace(/\$/g, '');
+  const match = stripped.match(/^([A-Z]+)(\d+)$/i);
   if (!match) throw new Error(`Invalid cell reference: ${ref}`);
   const col = letterToCol(match[1].toUpperCase());
   const row = parseInt(match[2], 10) - 1; // 1-indexed to 0-indexed

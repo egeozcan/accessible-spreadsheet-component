@@ -1,6 +1,6 @@
 export { Y11nSpreadsheet } from './y11n-spreadsheet.js';
 export { Y11nFormulaBar } from './components/y11n-formula-bar.js';
-export { FormulaEngine } from './engine/formula-engine.js';
+export { FormulaEngine, RangeValue } from './engine/formula-engine.js';
 export { SelectionManager } from './controllers/selection-manager.js';
 export { ClipboardManager } from './controllers/clipboard-manager.js';
 export type {

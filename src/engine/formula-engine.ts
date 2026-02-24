@@ -48,6 +48,99 @@ interface ParserState {
 /** Maximum nesting depth for formula evaluation to prevent stack overflow from deeply nested formulas */
 const MAX_EVAL_DEPTH = 64;
 
+/** Set of aggregate function names that should have RangeValue flattened into individual args */
+const AGGREGATE_FUNCTIONS = new Set([
+  'SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'COUNTA', 'CONCAT',
+]);
+
+/**
+ * Represents a 2D range of values with shape information.
+ * Used by lookup functions (VLOOKUP, INDEX, etc.) that need row/col structure.
+ */
+export class RangeValue {
+  readonly values: unknown[];
+  readonly rows: number;
+  readonly cols: number;
+
+  constructor(values: unknown[], rows: number, cols: number) {
+    this.values = values;
+    this.rows = rows;
+    this.cols = cols;
+  }
+
+  get(row: number, col: number): unknown {
+    return this.values[row * this.cols + col];
+  }
+
+  getRow(row: number): unknown[] {
+    const start = row * this.cols;
+    return this.values.slice(start, start + this.cols);
+  }
+
+  getCol(col: number): unknown[] {
+    const result: unknown[] = [];
+    for (let r = 0; r < this.rows; r++) {
+      result.push(this.values[r * this.cols + col]);
+    }
+    return result;
+  }
+}
+
+/**
+ * Helper to check if a value matches a criteria string.
+ * Supports operator prefixes: <>, >=, <=, >, <, =
+ * Without operator prefix, does exact match (case-insensitive for strings).
+ */
+function matchesCriteria(value: unknown, criteria: string): boolean {
+  // Parse operator from criteria
+  let op = '=';
+  let target = criteria;
+
+  if (criteria.startsWith('<>')) {
+    op = '<>';
+    target = criteria.substring(2);
+  } else if (criteria.startsWith('>=')) {
+    op = '>=';
+    target = criteria.substring(2);
+  } else if (criteria.startsWith('<=')) {
+    op = '<=';
+    target = criteria.substring(2);
+  } else if (criteria.startsWith('>')) {
+    op = '>';
+    target = criteria.substring(1);
+  } else if (criteria.startsWith('<')) {
+    op = '<';
+    target = criteria.substring(1);
+  } else if (criteria.startsWith('=')) {
+    op = '=';
+    target = criteria.substring(1);
+  }
+
+  const numTarget = Number(target);
+  const numValue = Number(value);
+  const bothNumeric = !isNaN(numTarget) && !isNaN(numValue)
+    && target.trim() !== '' && String(value).trim() !== '';
+
+  switch (op) {
+    case '=':
+      if (bothNumeric) return numValue === numTarget;
+      return String(value).toLowerCase() === target.toLowerCase();
+    case '<>':
+      if (bothNumeric) return numValue !== numTarget;
+      return String(value).toLowerCase() !== target.toLowerCase();
+    case '>':
+      return bothNumeric ? numValue > numTarget : String(value) > target;
+    case '<':
+      return bothNumeric ? numValue < numTarget : String(value) < target;
+    case '>=':
+      return bothNumeric ? numValue >= numTarget : String(value) >= target;
+    case '<=':
+      return bothNumeric ? numValue <= numTarget : String(value) <= target;
+    default:
+      return false;
+  }
+}
+
 export class FormulaEngine {
   private functions: Map<string, FormulaFunction> = new Map();
   private data: GridData = new Map();
@@ -235,7 +328,7 @@ export class FormulaEngine {
   // ─── Value Coercion ──────────────────────────────────
 
   private coerceValue(val: string): { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' } {
-    if (val === '#ERROR!' || val === '#REF!' || val === '#DIV/0!' || val === '#NAME?' || val === '#CIRC!') {
+    if (val === '#ERROR!' || val === '#REF!' || val === '#DIV/0!' || val === '#NAME?' || val === '#CIRC!' || val === '#VALUE!') {
       return { displayValue: val, type: 'error' };
     }
 
@@ -339,30 +432,35 @@ export class FormulaEngine {
       }
 
       // Identifiers: cell references, function names, booleans
-      if (/[A-Za-z_]/.test(ch)) {
+      // Also match $ for absolute/mixed references like $A$1, $A1, A$1
+      if (/[A-Za-z_$]/.test(ch)) {
         let ident = '';
-        while (i < input.length && /[A-Za-z0-9_]/.test(input[i])) {
+        while (i < input.length && /[A-Za-z0-9_$]/.test(input[i])) {
           ident += input[i];
           i++;
         }
 
-        const upper = ident.toUpperCase();
+        // Strip $ for structure checks, but keep original for token value
+        const stripped = ident.replace(/\$/g, '');
+        const hasDollar = stripped !== ident;
+        const upper = stripped.toUpperCase();
 
-        // Check if boolean
-        if (upper === 'TRUE' || upper === 'FALSE') {
+        // Check if boolean (only when no $ is present)
+        if (!hasDollar && (upper === 'TRUE' || upper === 'FALSE')) {
           tokens.push({ type: 'BOOLEAN', value: upper });
           continue;
         }
 
-        // Check for range (e.g. A1:B2) - look ahead for colon
-        if (i < input.length && input[i] === ':' && /^[A-Z]+\d+$/i.test(ident)) {
+        // Check for range (e.g. A1:B2 or $A$1:$B$2) - look ahead for colon
+        if (i < input.length && input[i] === ':' && /^[A-Z]+\d+$/i.test(stripped)) {
           i++; // skip colon
           let end = '';
-          while (i < input.length && /[A-Za-z0-9]/.test(input[i])) {
+          while (i < input.length && /[A-Za-z0-9$]/.test(input[i])) {
             end += input[i];
             i++;
           }
-          if (/^[A-Z]+\d+$/i.test(end)) {
+          const endStripped = end.replace(/\$/g, '');
+          if (/^[A-Z]+\d+$/i.test(endStripped)) {
             tokens.push({ type: 'RANGE', value: `${ident.toUpperCase()}:${end.toUpperCase()}` });
             continue;
           }
@@ -370,23 +468,29 @@ export class FormulaEngine {
           throw new Error(`Invalid range: ${ident}:${end}`);
         }
 
-        // Check if function call (next non-space is '(')
-        let lookAhead = i;
-        while (lookAhead < input.length && /\s/.test(input[lookAhead])) lookAhead++;
-        if (lookAhead < input.length && input[lookAhead] === '(') {
-          tokens.push({ type: 'FUNC', value: upper });
-          continue;
+        // Check if function call (next non-space is '(') - only when no $ is present
+        if (!hasDollar) {
+          let lookAhead = i;
+          while (lookAhead < input.length && /\s/.test(input[lookAhead])) lookAhead++;
+          if (lookAhead < input.length && input[lookAhead] === '(') {
+            tokens.push({ type: 'FUNC', value: upper });
+            continue;
+          }
         }
 
         // Cell reference
-        if (/^[A-Z]+\d+$/i.test(ident)) {
+        if (/^[A-Z]+\d+$/i.test(stripped)) {
           tokens.push({ type: 'REF', value: ident.toUpperCase() });
           continue;
         }
 
-        // Unknown identifier - treat as function name or error
-        tokens.push({ type: 'FUNC', value: upper });
-        continue;
+        // Unknown identifier - treat as function name or error (only without $)
+        if (!hasDollar) {
+          tokens.push({ type: 'FUNC', value: upper });
+          continue;
+        }
+
+        throw new Error(`Unexpected identifier: ${ident}`);
       }
 
       throw new Error(`Unexpected character: ${ch}`);
@@ -561,17 +665,26 @@ export class FormulaEngine {
 
     const ctx = this._createContext();
 
-    // Flatten range arrays into args for aggregate functions
-    const flatArgs: unknown[] = [];
-    for (const arg of args) {
-      if (Array.isArray(arg)) {
-        flatArgs.push(...arg);
-      } else {
-        flatArgs.push(arg);
+    // For aggregate functions, flatten RangeValue into individual args
+    // For other functions, pass RangeValue directly so they can access shape
+    if (AGGREGATE_FUNCTIONS.has(name)) {
+      const flatArgs: unknown[] = [];
+      for (const arg of args) {
+        if (arg instanceof RangeValue) {
+          // Filter out undefined (empty cells) for aggregates
+          for (const v of arg.values) {
+            if (v !== undefined) flatArgs.push(v);
+          }
+        } else if (Array.isArray(arg)) {
+          flatArgs.push(...arg);
+        } else {
+          flatArgs.push(arg);
+        }
       }
+      return fn(ctx, ...flatArgs);
     }
 
-    return fn(ctx, ...flatArgs);
+    return fn(ctx, ...args);
   }
 
   // ─── Comparison helper ────────────────────────────────
@@ -623,7 +736,7 @@ export class FormulaEngine {
   // own ParserState, so no save/restore is needed.
 
   private _resolveRef(ref: string): unknown {
-    const coord = refToCoord(ref);
+    const coord = refToCoord(ref.replace(/\$/g, ''));
     const key = cellKey(coord.row, coord.col);
 
     this._trackDep(key);
@@ -658,15 +771,18 @@ export class FormulaEngine {
     return cell.rawValue;
   }
 
-  private _resolveRange(rangeStr: string): unknown[] {
+  private _resolveRange(rangeStr: string): RangeValue {
     const [startRef, endRef] = rangeStr.split(':');
-    const start = refToCoord(startRef);
-    const end = refToCoord(endRef);
+    const start = refToCoord(startRef.replace(/\$/g, ''));
+    const end = refToCoord(endRef.replace(/\$/g, ''));
 
     const minRow = Math.min(start.row, end.row);
     const maxRow = Math.max(start.row, end.row);
     const minCol = Math.min(start.col, end.col);
     const maxCol = Math.max(start.col, end.col);
+
+    const numRows = maxRow - minRow + 1;
+    const numCols = maxCol - minCol + 1;
 
     const values: unknown[] = [];
     for (let r = minRow; r <= maxRow; r++) {
@@ -705,11 +821,14 @@ export class FormulaEngine {
               values.push(cell.rawValue);
             }
           }
+        } else {
+          // Empty cells contribute to shape
+          values.push(undefined);
         }
       }
     }
 
-    return values;
+    return new RangeValue(values, numRows, numCols);
   }
 
   private _createContext(): FormulaContext {
@@ -813,6 +932,350 @@ export class FormulaEngine {
 
     this.registerFunction('TRIM', (_ctx, val) => {
       return String(val).trim();
+    });
+
+    // ─── Logic/Conditional ────────────────────────────────
+
+    this.registerFunction('IFERROR', (_ctx, value, fallback) => {
+      const s = String(value);
+      if (
+        s === '#ERROR!' || s === '#REF!' || s === '#DIV/0!' ||
+        s === '#NAME?' || s === '#CIRC!' || s === '#VALUE!'
+      ) {
+        return fallback;
+      }
+      return value;
+    });
+
+    this.registerFunction('AND', (_ctx, ...args) => {
+      for (const arg of args) {
+        if (arg instanceof RangeValue) {
+          for (const v of arg.values) {
+            if (v !== undefined && !v) return false;
+          }
+        } else {
+          if (!arg) return false;
+        }
+      }
+      return true;
+    });
+
+    this.registerFunction('OR', (_ctx, ...args) => {
+      for (const arg of args) {
+        if (arg instanceof RangeValue) {
+          for (const v of arg.values) {
+            if (v !== undefined && v) return true;
+          }
+        } else {
+          if (arg) return true;
+        }
+      }
+      return false;
+    });
+
+    this.registerFunction('NOT', (_ctx, val) => {
+      return !val;
+    });
+
+    // ─── Conditional Aggregation ─────────────────────────
+
+    this.registerFunction('SUMIF', (_ctx, range, criteria, sumRange?) => {
+      const criteriaStr = String(criteria);
+      const rangeArr: unknown[] = range instanceof RangeValue ? range.values : (Array.isArray(range) ? range : [range]);
+      const sumArr: unknown[] | undefined = sumRange instanceof RangeValue ? sumRange.values : (Array.isArray(sumRange) ? sumRange : undefined);
+
+      let total = 0;
+      for (let i = 0; i < rangeArr.length; i++) {
+        const val = rangeArr[i];
+        if (val !== undefined && matchesCriteria(val, criteriaStr)) {
+          if (sumArr) {
+            total += Number(sumArr[i]) || 0;
+          } else {
+            total += Number(val) || 0;
+          }
+        }
+      }
+      return total;
+    });
+
+    this.registerFunction('COUNTIF', (_ctx, range, criteria) => {
+      const criteriaStr = String(criteria);
+      const rangeArr: unknown[] = range instanceof RangeValue ? range.values : (Array.isArray(range) ? range : [range]);
+
+      let count = 0;
+      for (const val of rangeArr) {
+        if (val !== undefined && matchesCriteria(val, criteriaStr)) {
+          count++;
+        }
+      }
+      return count;
+    });
+
+    // ─── Lookup ─────────────────────────────────────────
+
+    this.registerFunction('VLOOKUP', (_ctx, lookupValue, tableRange, colIndex, exactMatch?) => {
+      if (!(tableRange instanceof RangeValue)) {
+        throw new Error('#VALUE!');
+      }
+      const colIdx = Number(colIndex);
+      if (colIdx < 1 || colIdx > tableRange.cols) {
+        throw new Error('#REF!');
+      }
+      const isExact = exactMatch === undefined || exactMatch === true || exactMatch === 0;
+
+      // Search first column
+      const firstCol = tableRange.getCol(0);
+      for (let r = 0; r < firstCol.length; r++) {
+        if (isExact) {
+          const numLookup = Number(lookupValue);
+          const numCell = Number(firstCol[r]);
+          const bothNum = !isNaN(numLookup) && !isNaN(numCell)
+            && String(lookupValue).trim() !== '' && String(firstCol[r]).trim() !== '';
+          if (bothNum ? numLookup === numCell : String(firstCol[r]).toLowerCase() === String(lookupValue).toLowerCase()) {
+            return tableRange.get(r, colIdx - 1);
+          }
+        } else {
+          // Approximate match: find largest value <= lookupValue
+          // Data assumed sorted ascending
+          if (Number(firstCol[r]) > Number(lookupValue)) {
+            if (r === 0) throw new Error('#N/A');
+            return tableRange.get(r - 1, colIdx - 1);
+          }
+        }
+      }
+      if (!isExact && firstCol.length > 0) {
+        return tableRange.get(firstCol.length - 1, colIdx - 1);
+      }
+      throw new Error('#N/A');
+    });
+
+    this.registerFunction('HLOOKUP', (_ctx, lookupValue, tableRange, rowIndex, exactMatch?) => {
+      if (!(tableRange instanceof RangeValue)) {
+        throw new Error('#VALUE!');
+      }
+      const rowIdx = Number(rowIndex);
+      if (rowIdx < 1 || rowIdx > tableRange.rows) {
+        throw new Error('#REF!');
+      }
+      const isExact = exactMatch === undefined || exactMatch === true || exactMatch === 0;
+
+      // Search first row
+      const firstRow = tableRange.getRow(0);
+      for (let c = 0; c < firstRow.length; c++) {
+        if (isExact) {
+          const numLookup = Number(lookupValue);
+          const numCell = Number(firstRow[c]);
+          const bothNum = !isNaN(numLookup) && !isNaN(numCell)
+            && String(lookupValue).trim() !== '' && String(firstRow[c]).trim() !== '';
+          if (bothNum ? numLookup === numCell : String(firstRow[c]).toLowerCase() === String(lookupValue).toLowerCase()) {
+            return tableRange.get(rowIdx - 1, c);
+          }
+        } else {
+          if (Number(firstRow[c]) > Number(lookupValue)) {
+            if (c === 0) throw new Error('#N/A');
+            return tableRange.get(rowIdx - 1, c - 1);
+          }
+        }
+      }
+      if (!isExact && firstRow.length > 0) {
+        return tableRange.get(rowIdx - 1, firstRow.length - 1);
+      }
+      throw new Error('#N/A');
+    });
+
+    this.registerFunction('INDEX', (_ctx, rangeArg, rowNum, colNum?) => {
+      if (rangeArg instanceof RangeValue) {
+        const r = Number(rowNum) - 1;
+        const c = colNum !== undefined ? Number(colNum) - 1 : 0;
+        if (r < 0 || r >= rangeArg.rows || c < 0 || c >= rangeArg.cols) {
+          throw new Error('#REF!');
+        }
+        const val = rangeArg.get(r, c);
+        return val !== undefined ? val : 0;
+      }
+      throw new Error('#VALUE!');
+    });
+
+    this.registerFunction('MATCH', (_ctx, lookupValue, rangeArg, matchType?) => {
+      let arr: unknown[];
+      if (rangeArg instanceof RangeValue) {
+        // Use flat values array for 1D lookup
+        arr = rangeArg.values;
+      } else if (Array.isArray(rangeArg)) {
+        arr = rangeArg;
+      } else {
+        throw new Error('#VALUE!');
+      }
+
+      const mt = matchType !== undefined ? Number(matchType) : 0;
+
+      if (mt === 0) {
+        // Exact match
+        for (let i = 0; i < arr.length; i++) {
+          const numLookup = Number(lookupValue);
+          const numCell = Number(arr[i]);
+          const bothNum = !isNaN(numLookup) && !isNaN(numCell)
+            && String(lookupValue).trim() !== '' && String(arr[i]).trim() !== '';
+          if (bothNum ? numLookup === numCell : String(arr[i]).toLowerCase() === String(lookupValue).toLowerCase()) {
+            return i + 1; // 1-indexed
+          }
+        }
+        throw new Error('#N/A');
+      } else if (mt === 1) {
+        // Largest value <= lookupValue (data assumed sorted ascending)
+        let lastMatch = -1;
+        for (let i = 0; i < arr.length; i++) {
+          if (Number(arr[i]) <= Number(lookupValue)) {
+            lastMatch = i;
+          }
+        }
+        if (lastMatch === -1) throw new Error('#N/A');
+        return lastMatch + 1;
+      } else {
+        // mt === -1: Smallest value >= lookupValue (data assumed sorted descending)
+        let lastMatch = -1;
+        for (let i = 0; i < arr.length; i++) {
+          if (Number(arr[i]) >= Number(lookupValue)) {
+            lastMatch = i;
+          }
+        }
+        if (lastMatch === -1) throw new Error('#N/A');
+        return lastMatch + 1;
+      }
+    });
+
+    // ─── Math ───────────────────────────────────────────
+
+    this.registerFunction('MOD', (_ctx, num, divisor) => {
+      const d = Number(divisor);
+      if (d === 0) throw new Error('#DIV/0!');
+      return Number(num) % d;
+    });
+
+    this.registerFunction('POWER', (_ctx, base, exp) => {
+      return Math.pow(Number(base), Number(exp));
+    });
+
+    this.registerFunction('CEILING', (_ctx, num, significance?) => {
+      const n = Number(num);
+      const sig = significance !== undefined ? Number(significance) : 1;
+      if (sig === 0) return 0;
+      return Math.ceil(n / sig) * sig;
+    });
+
+    this.registerFunction('FLOOR', (_ctx, num, significance?) => {
+      const n = Number(num);
+      const sig = significance !== undefined ? Number(significance) : 1;
+      if (sig === 0) return 0;
+      return Math.floor(n / sig) * sig;
+    });
+
+    // ─── String ─────────────────────────────────────────
+
+    this.registerFunction('LEFT', (_ctx, text, n?) => {
+      const count = n !== undefined ? Number(n) : 1;
+      return String(text).substring(0, count);
+    });
+
+    this.registerFunction('RIGHT', (_ctx, text, n?) => {
+      const s = String(text);
+      const count = n !== undefined ? Number(n) : 1;
+      return s.substring(s.length - count);
+    });
+
+    this.registerFunction('MID', (_ctx, text, start, n) => {
+      const s = String(text);
+      const startIdx = Number(start) - 1; // 1-indexed to 0-indexed
+      const count = Number(n);
+      return s.substring(startIdx, startIdx + count);
+    });
+
+    this.registerFunction('SUBSTITUTE', (_ctx, text, oldStr, newStr, instance?) => {
+      const s = String(text);
+      const old = String(oldStr);
+      const replacement = String(newStr);
+
+      if (instance !== undefined) {
+        const nth = Number(instance);
+        let count = 0;
+        let idx = -1;
+        let searchFrom = 0;
+        while (searchFrom < s.length) {
+          idx = s.indexOf(old, searchFrom);
+          if (idx === -1) break;
+          count++;
+          if (count === nth) {
+            return s.substring(0, idx) + replacement + s.substring(idx + old.length);
+          }
+          searchFrom = idx + 1;
+        }
+        return s; // nth occurrence not found, return unchanged
+      }
+
+      // Replace all occurrences
+      return s.split(old).join(replacement);
+    });
+
+    this.registerFunction('FIND', (_ctx, search, text, start?) => {
+      const s = String(text);
+      const searchStr = String(search);
+      const startIdx = start !== undefined ? Number(start) - 1 : 0;
+      const idx = s.indexOf(searchStr, startIdx);
+      if (idx === -1) throw new Error('#VALUE!');
+      return idx + 1; // 1-indexed
+    });
+
+    // ─── Conversion ─────────────────────────────────────
+
+    this.registerFunction('TEXT', (_ctx, value, format) => {
+      const num = Number(value);
+      const fmt = String(format);
+
+      if (isNaN(num)) return String(value);
+
+      // Support common number formats
+      if (fmt === '0') {
+        return Math.round(num).toString();
+      }
+      if (fmt === '0.00' || fmt === '0.0') {
+        const decimals = (fmt.split('.')[1] || '').length;
+        return num.toFixed(decimals);
+      }
+      if (fmt === '#,##0' || fmt === '#,##0.00') {
+        const decimals = fmt.includes('.') ? (fmt.split('.')[1] || '').length : 0;
+        return num.toLocaleString('en-US', {
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals,
+        });
+      }
+
+      return num.toString();
+    });
+
+    this.registerFunction('VALUE', (_ctx, text) => {
+      const num = Number(String(text));
+      if (isNaN(num)) throw new Error('#VALUE!');
+      return num;
+    });
+
+    // ─── Date ───────────────────────────────────────────
+
+    this.registerFunction('DATE', (_ctx, year, month, day) => {
+      // Excel serial number: days since 1899-12-30
+      const y = Number(year);
+      const m = Number(month);
+      const d = Number(day);
+      const date = new Date(y, m - 1, d);
+      const epoch = new Date(1899, 11, 30); // 1899-12-30
+      const diff = date.getTime() - epoch.getTime();
+      return Math.round(diff / (1000 * 60 * 60 * 24));
+    });
+
+    this.registerFunction('NOW', () => {
+      const now = new Date();
+      const epoch = new Date(1899, 11, 30); // 1899-12-30
+      const diff = now.getTime() - epoch.getTime();
+      return Math.round(diff / (1000 * 60 * 60 * 24));
     });
   }
 }
