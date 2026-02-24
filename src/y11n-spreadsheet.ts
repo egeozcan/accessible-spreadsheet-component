@@ -1,14 +1,18 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
+import { styleMap } from 'lit/directives/style-map.js';
 import {
   type CellCoord,
   type CellData,
+  type CellFormat,
   type GridData,
+  type SelectionRange,
   type FormulaFunction,
   type CellChangeDetail,
   type SelectionChangeDetail,
   type DataChangeDetail,
+  type FormatChangeDetail,
   cellKey,
   colToLetter,
   coordToRef,
@@ -26,6 +30,8 @@ interface CellDelta {
   id: string;
   before: string;
   after: string;
+  formatBefore?: CellFormat;
+  formatAfter?: CellFormat;
 }
 
 interface SelectionSnapshot {
@@ -145,6 +151,187 @@ export class Y11nSpreadsheet extends LitElement {
     this._recalcAll();
   }
 
+  // ─── Format API ──────────────────────────────────────
+
+  /** Returns the format for a cell, or undefined if unformatted */
+  getCellFormat(cellId: string): CellFormat | undefined {
+    return this._internalData.get(cellId)?.format;
+  }
+
+  /** Merges format into a cell (creates cell if needed). Pass undefined to unset a property. */
+  setCellFormat(cellId: string, format: CellFormat): void {
+    this._applyFormat([cellId], format, 'programmatic');
+  }
+
+  /** Applies format to all cells in a range (creates empty cells if needed) */
+  setRangeFormat(range: SelectionRange, format: CellFormat): void {
+    const cellIds: string[] = [];
+    for (let r = range.start.row; r <= range.end.row; r++) {
+      for (let c = range.start.col; c <= range.end.col; c++) {
+        cellIds.push(cellKey(r, c));
+      }
+    }
+    this._applyFormat(cellIds, format, 'programmatic');
+  }
+
+  /** Removes all formatting from a cell */
+  clearCellFormat(cellId: string): void {
+    this._clearFormat([cellId], 'programmatic');
+  }
+
+  /** Removes all formatting from a range */
+  clearRangeFormat(range: SelectionRange): void {
+    const cellIds: string[] = [];
+    for (let r = range.start.row; r <= range.end.row; r++) {
+      for (let c = range.start.col; c <= range.end.col; c++) {
+        cellIds.push(cellKey(r, c));
+      }
+    }
+    this._clearFormat(cellIds, 'programmatic');
+  }
+
+  /** Toggles a boolean format property on the current selection */
+  toggleFormat(prop: 'bold' | 'italic' | 'underline' | 'strikethrough'): void {
+    if (this.readOnly) return;
+    const range = this._selection.range;
+    const cellIds: string[] = [];
+    let allHaveProp = true;
+
+    for (let r = range.start.row; r <= range.end.row; r++) {
+      for (let c = range.start.col; c <= range.end.col; c++) {
+        const id = cellKey(r, c);
+        cellIds.push(id);
+        const cell = this._internalData.get(id);
+        if (!cell?.format?.[prop]) {
+          allHaveProp = false;
+        }
+      }
+    }
+
+    const format: CellFormat = { [prop]: !allHaveProp };
+    this._applyFormat(cellIds, format, 'user');
+  }
+
+  // ─── Format Internals ────────────────────────────────
+
+  private _applyFormat(cellIds: string[], format: CellFormat, source: FormatChangeDetail['source']): void {
+    const selection = this._snapshotSelection();
+    const batch = this._buildFormatBatch(cellIds, format, selection);
+    if (!batch) return;
+
+    if (source === 'user') {
+      this._executeUserBatch(batch);
+    } else {
+      this._applyBatch(batch, source);
+      this._pushHistory(batch);
+    }
+
+    this._dispatchFormatChange({ cellIds, format, source });
+  }
+
+  private _clearFormat(cellIds: string[], source: FormatChangeDetail['source']): void {
+    const selection = this._snapshotSelection();
+    const deltas: CellDelta[] = [];
+
+    for (const id of cellIds) {
+      const cell = this._internalData.get(id);
+      if (cell?.format) {
+        deltas.push({
+          id,
+          before: cell.rawValue,
+          after: cell.rawValue,
+          formatBefore: { ...cell.format },
+          formatAfter: undefined,
+        });
+      }
+    }
+
+    if (deltas.length === 0) return;
+
+    const batch: CommandBatch = {
+      deltas,
+      selectionBefore: selection,
+      selectionAfter: selection,
+      operation: 'format',
+    };
+
+    if (source === 'user') {
+      this._executeUserBatch(batch);
+    } else {
+      this._applyBatch(batch, source);
+      this._pushHistory(batch);
+    }
+
+    this._dispatchFormatChange({ cellIds, format: {}, source });
+  }
+
+  private _buildFormatBatch(
+    cellIds: string[],
+    format: CellFormat,
+    selection: SelectionSnapshot
+  ): CommandBatch | null {
+    const deltas: CellDelta[] = [];
+
+    for (const id of cellIds) {
+      const cell = this._internalData.get(id);
+      const existingFormat = cell?.format;
+      const merged = { ...existingFormat, ...format };
+      // Clean out undefined values
+      for (const k of Object.keys(merged) as (keyof CellFormat)[]) {
+        if (merged[k] === undefined) delete merged[k];
+      }
+
+      const formatChanged = JSON.stringify(existingFormat) !== JSON.stringify(merged);
+      if (formatChanged) {
+        deltas.push({
+          id,
+          before: cell?.rawValue ?? '',
+          after: cell?.rawValue ?? '',
+          formatBefore: existingFormat ? { ...existingFormat } : undefined,
+          formatAfter: Object.keys(merged).length > 0 ? merged : undefined,
+        });
+      }
+    }
+
+    if (deltas.length === 0) return null;
+
+    return {
+      deltas,
+      selectionBefore: selection,
+      selectionAfter: selection,
+      operation: 'format',
+    };
+  }
+
+  /** Convert CellFormat to inline styles for styleMap */
+  _getCellStyles(row: number, col: number): Record<string, string> {
+    const cell = this._getCell(row, col);
+    if (!cell?.format) return {};
+
+    const styles: Record<string, string> = {};
+    const fmt = cell.format;
+
+    if (fmt.bold) styles['font-weight'] = 'bold';
+    if (fmt.italic) styles['font-style'] = 'italic';
+
+    const decorations: string[] = [];
+    if (fmt.underline) decorations.push('underline');
+    if (fmt.strikethrough) decorations.push('line-through');
+    if (decorations.length > 0) styles['text-decoration'] = decorations.join(' ');
+
+    if (fmt.textColor) styles.color = fmt.textColor;
+    if (fmt.backgroundColor) styles['background-color'] = fmt.backgroundColor;
+    if (fmt.fontSize) styles['font-size'] = `${fmt.fontSize}px`;
+
+    if (fmt.textAlign) {
+      styles['text-align'] = fmt.textAlign;
+      const justifyMap = { left: 'flex-start', center: 'center', right: 'flex-end' };
+      styles['justify-content'] = justifyMap[fmt.textAlign];
+    }
+
+    return styles;
+  }
+
   // ─── Data Sync ──────────────────────────────────────
 
   private _syncData(): void {
@@ -225,13 +412,24 @@ export class Y11nSpreadsheet extends LitElement {
       rawValue,
       displayValue: evaluated.displayValue,
       type: evaluated.type,
-      style: existing?.style,
+      format: existing?.format,
     });
   }
 
   private _applyRawValueByString(key: string, rawValue: string): void {
     if (rawValue === '') {
-      this._internalData.delete(key);
+      const existing = this._internalData.get(key);
+      if (existing?.format) {
+        // Preserve format on empty cells
+        this._internalData.set(key, {
+          rawValue: '',
+          displayValue: '',
+          type: 'text',
+          format: existing.format,
+        });
+      } else {
+        this._internalData.delete(key);
+      }
       return;
     }
     this._setCellRaw(key, rawValue);
@@ -309,6 +507,9 @@ export class Y11nSpreadsheet extends LitElement {
   private _applyBatch(batch: CommandBatch, source: ChangeSource): void {
     for (const delta of batch.deltas) {
       this._applyRawValueByString(delta.id, delta.after);
+      if ('formatAfter' in delta) {
+        this._applyCellFormat(delta.id, delta.formatAfter);
+      }
     }
     this._restoreSelection(batch.selectionAfter);
     this._finalizeBatch(batch, source, 'after');
@@ -317,9 +518,31 @@ export class Y11nSpreadsheet extends LitElement {
   private _revertBatch(batch: CommandBatch): void {
     for (const delta of batch.deltas) {
       this._applyRawValueByString(delta.id, delta.before);
+      if ('formatBefore' in delta) {
+        this._applyCellFormat(delta.id, delta.formatBefore);
+      }
     }
     this._restoreSelection(batch.selectionBefore);
     this._finalizeBatch(batch, 'undo', 'before');
+  }
+
+  /** Low-level: set or remove format on a cell */
+  private _applyCellFormat(cellId: string, format: CellFormat | undefined): void {
+    let cell = this._internalData.get(cellId);
+    if (!cell) {
+      // Create an empty cell to hold the format
+      cell = { rawValue: '', displayValue: '', type: 'text' };
+      this._internalData.set(cellId, cell);
+    }
+    if (format && Object.keys(format).length > 0) {
+      cell.format = format;
+    } else {
+      delete cell.format;
+      // Remove empty cells
+      if (cell.rawValue === '') {
+        this._internalData.delete(cellId);
+      }
+    }
   }
 
   private _executeUserBatch(batch: CommandBatch): void {
@@ -640,6 +863,27 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
 
+      case 'b':
+        if (ctrl) {
+          e.preventDefault();
+          this.toggleFormat('bold');
+        }
+        break;
+
+      case 'i':
+        if (ctrl) {
+          e.preventDefault();
+          this.toggleFormat('italic');
+        }
+        break;
+
+      case 'u':
+        if (ctrl) {
+          e.preventDefault();
+          this.toggleFormat('underline');
+        }
+        break;
+
       case 'z':
       case 'Z':
         if (ctrl) {
@@ -810,8 +1054,34 @@ export class Y11nSpreadsheet extends LitElement {
 
     if (updates && updates.length > 0) {
       const selection = this._snapshotSelection();
-      const batch = this._buildCommandBatch(updates, 'paste', selection, selection);
+
+      // Build value updates for the command batch
+      const valueUpdates = updates.map((u) => ({ id: u.id, value: u.value }));
+      const batch = this._buildCommandBatch(valueUpdates, 'paste', selection, selection);
+
+      // Inject format deltas into the batch
       if (batch) {
+        for (const delta of batch.deltas) {
+          const pasteUpdate = updates.find((u) => u.id === delta.id);
+          if (pasteUpdate?.format) {
+            const existing = this._internalData.get(delta.id);
+            delta.formatBefore = existing?.format ? { ...existing.format } : undefined;
+            delta.formatAfter = pasteUpdate.format;
+          }
+        }
+        // Also add format-only entries for cells that have format but unchanged value
+        for (const u of updates) {
+          if (u.format && !batch.deltas.some((d) => d.id === u.id)) {
+            const existing = this._internalData.get(u.id);
+            batch.deltas.push({
+              id: u.id,
+              before: existing?.rawValue ?? '',
+              after: u.value,
+              formatBefore: existing?.format ? { ...existing.format } : undefined,
+              formatAfter: u.format,
+            });
+          }
+        }
         this._executeUserBatch(batch);
       }
     }
@@ -899,6 +1169,12 @@ export class Y11nSpreadsheet extends LitElement {
     );
   }
 
+  private _dispatchFormatChange(detail: FormatChangeDetail): void {
+    this.dispatchEvent(
+      new CustomEvent('format-change', { detail, bubbles: true, composed: true })
+    );
+  }
+
   // ─── Virtual Rendering ──────────────────────────────
 
   /**
@@ -955,6 +1231,13 @@ export class Y11nSpreadsheet extends LitElement {
     const top = (row + 1) * cellHeight - this._scrollTop; // +1 for header, offset by scroll
     const left = headerWidth + col * cellWidth - this._scrollLeft;
 
+    // Inherit cell formatting into the editor
+    const fmtStyles = this._getCellStyles(row, col);
+    const extra = Object.entries(fmtStyles)
+      .filter(([k]) => k !== 'justify-content' && k !== 'background-color')
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('; ');
+
     return `
       display: block;
       position: absolute;
@@ -963,6 +1246,7 @@ export class Y11nSpreadsheet extends LitElement {
       width: ${cellWidth}px;
       height: ${cellHeight}px;
       z-index: 10;
+      ${extra}
     `;
   }
 
@@ -1244,6 +1528,8 @@ export class Y11nSpreadsheet extends LitElement {
       const display = this._getCellDisplay(row, c);
       const key = cellKey(row, c);
 
+      const cellStyles = this._getCellStyles(row, c);
+
       cells.push(html`
         <div
           class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''}"
@@ -1256,6 +1542,7 @@ export class Y11nSpreadsheet extends LitElement {
           data-col="${c}"
           data-key="${key}"
           tabindex="${isActive ? 0 : -1}"
+          style=${styleMap(cellStyles)}
           @pointerdown="${this._handleCellPointerDown}"
           @dblclick="${this._handleCellDblClick}"
         >

@@ -187,6 +187,137 @@ describe('ClipboardManager', () => {
     });
   });
 
+  describe('_serializeRangeAsHTML with formatting', () => {
+    it('includes inline style for formatted cells', () => {
+      const data: GridData = new Map();
+      data.set('0:0', { ...cell('hello'), format: { bold: true } });
+
+      const range: SelectionRange = {
+        start: { row: 0, col: 0 },
+        end: { row: 0, col: 0 },
+      };
+
+      // Access private method via any cast
+      const html = (manager as any)._serializeRangeAsHTML(data, range) as string;
+      expect(html).toContain('style="font-weight: bold"');
+    });
+
+    it('includes data-format attribute with JSON', () => {
+      const fmt = { bold: true, italic: true };
+      const data: GridData = new Map();
+      data.set('0:0', { ...cell('hello'), format: fmt });
+
+      const range: SelectionRange = {
+        start: { row: 0, col: 0 },
+        end: { row: 0, col: 0 },
+      };
+
+      const html = (manager as any)._serializeRangeAsHTML(data, range) as string;
+      expect(html).toContain('data-format=');
+      // Parse back the JSON from data-format attribute
+      const match = html.match(/data-format="([^"]+)"/);
+      expect(match).not.toBeNull();
+      const parsed = JSON.parse(match![1].replace(/&quot;/g, '"'));
+      expect(parsed).toEqual(fmt);
+    });
+
+    it('omits style and data-format when cell has no format', () => {
+      const data: GridData = new Map();
+      data.set('0:0', cell('hello'));
+
+      const range: SelectionRange = {
+        start: { row: 0, col: 0 },
+        end: { row: 0, col: 0 },
+      };
+
+      const html = (manager as any)._serializeRangeAsHTML(data, range) as string;
+      expect(html).not.toContain('style=');
+      expect(html).not.toContain('data-format=');
+    });
+
+    it('includes data-raw for formula cells', () => {
+      const data: GridData = new Map();
+      data.set('0:0', {
+        rawValue: '=A2+1',
+        displayValue: '42',
+        type: 'number',
+        format: { bold: true },
+      });
+
+      const range: SelectionRange = {
+        start: { row: 0, col: 0 },
+        end: { row: 0, col: 0 },
+      };
+
+      const html = (manager as any)._serializeRangeAsHTML(data, range) as string;
+      expect(html).toContain('data-raw="=A2+1"');
+      expect(html).toContain('>42</td>');
+    });
+  });
+
+  describe('_formatToInlineStyle (clipboard context)', () => {
+    it('produces combined style for bold + textColor', () => {
+      const style = manager._formatToInlineStyle({ bold: true, textColor: '#ff0000' });
+      expect(style).toContain('font-weight: bold');
+      expect(style).toContain('color: #ff0000');
+    });
+  });
+
+  describe('_parseStyleToFormat (clipboard context)', () => {
+    it('returns undefined for empty string', () => {
+      expect(manager._parseStyleToFormat('')).toBeUndefined();
+    });
+
+    it('parses external Sheets-style CSS', () => {
+      const style = 'font-weight: bold; color: rgb(255, 0, 0); background-color: #ffff00';
+      const fmt = manager._parseStyleToFormat(style);
+      expect(fmt?.bold).toBe(true);
+      expect(fmt?.textColor).toBe('rgb(255, 0, 0)');
+      expect(fmt?.backgroundColor).toBe('#ffff00');
+    });
+  });
+
+  describe('_pasteInternal carries format', () => {
+    it('includes format in paste updates for formatted cells', () => {
+      const data: GridData = new Map();
+      data.set('0:0', {
+        rawValue: 'hello',
+        displayValue: 'hello',
+        type: 'text',
+        format: { bold: true, textColor: '#333' },
+      });
+
+      // Set internal copy state
+      (manager as any)._copySourceRange = {
+        start: { row: 0, col: 0 },
+        end: { row: 0, col: 0 },
+      };
+      (manager as any)._copySourceData = data;
+
+      const updates = (manager as any)._pasteInternal(2, 0, 100, 26);
+      expect(updates).not.toBeNull();
+      expect(updates).toHaveLength(1);
+      expect(updates[0].id).toBe('2:0');
+      expect(updates[0].value).toBe('hello');
+      expect(updates[0].format).toEqual({ bold: true, textColor: '#333' });
+    });
+
+    it('omits format when source cell has no format', () => {
+      const data: GridData = new Map();
+      data.set('0:0', cell('plain'));
+
+      (manager as any)._copySourceRange = {
+        start: { row: 0, col: 0 },
+        end: { row: 0, col: 0 },
+      };
+      (manager as any)._copySourceData = data;
+
+      const updates = (manager as any)._pasteInternal(2, 0, 100, 26);
+      expect(updates).not.toBeNull();
+      expect(updates[0].format).toBeUndefined();
+    });
+  });
+
   describe('adjustFormulaReferences', () => {
     it('returns non-formula strings unchanged', () => {
       expect(manager.adjustFormulaReferences('hello', 2, 3)).toBe('hello');

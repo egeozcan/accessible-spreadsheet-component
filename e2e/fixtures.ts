@@ -148,6 +148,85 @@ export class SpreadsheetPage {
     await this.page.waitForTimeout(100);
   }
 
+  /** Set cell format via JS evaluation */
+  async setCellFormat(cellId: string, format: Record<string, any>) {
+    await this.page.evaluate(
+      ({ cellId, format }) => {
+        const sheet = document.querySelector('y11n-spreadsheet') as any;
+        sheet.setCellFormat(cellId, format);
+      },
+      { cellId, format }
+    );
+    await this.page.waitForTimeout(100);
+  }
+
+  /** Get cell format via JS evaluation */
+  async getCellFormat(cellId: string): Promise<Record<string, any> | undefined> {
+    return await this.page.evaluate((cellId) => {
+      const sheet = document.querySelector('y11n-spreadsheet') as any;
+      return sheet.getCellFormat(cellId);
+    }, cellId);
+  }
+
+  /** Get the inline style of a rendered cell */
+  async getCellInlineStyle(row: number, col: number): Promise<string> {
+    return await this.page.evaluate(
+      ({ row, col }) => {
+        const sheet = document.querySelector('y11n-spreadsheet');
+        const cell = sheet?.shadowRoot?.querySelector(
+          `[data-row="${row}"][data-col="${col}"]`
+        ) as HTMLElement | null;
+        return cell?.getAttribute('style') ?? '';
+      },
+      { row, col }
+    );
+  }
+
+  /** Set range format via JS evaluation */
+  async setRangeFormat(
+    startRow: number, startCol: number,
+    endRow: number, endCol: number,
+    format: Record<string, any>
+  ) {
+    await this.page.evaluate(
+      ({ startRow, startCol, endRow, endCol, format }) => {
+        const sheet = document.querySelector('y11n-spreadsheet') as any;
+        sheet.setRangeFormat(
+          { start: { row: startRow, col: startCol }, end: { row: endRow, col: endCol } },
+          format
+        );
+      },
+      { startRow, startCol, endRow, endCol, format }
+    );
+    await this.page.waitForTimeout(100);
+  }
+
+  /** Clear cell format via JS evaluation */
+  async clearCellFormat(cellId: string) {
+    await this.page.evaluate((cellId) => {
+      const sheet = document.querySelector('y11n-spreadsheet') as any;
+      sheet.clearCellFormat(cellId);
+    }, cellId);
+    await this.page.waitForTimeout(100);
+  }
+
+  /** Clear range format via JS evaluation */
+  async clearRangeFormat(
+    startRow: number, startCol: number,
+    endRow: number, endCol: number
+  ) {
+    await this.page.evaluate(
+      ({ startRow, startCol, endRow, endCol }) => {
+        const sheet = document.querySelector('y11n-spreadsheet') as any;
+        sheet.clearRangeFormat(
+          { start: { row: startRow, col: startCol }, end: { row: endRow, col: endCol } }
+        );
+      },
+      { startRow, startCol, endRow, endCol }
+    );
+    await this.page.waitForTimeout(100);
+  }
+
   /** Check if the editor is visible */
   async isEditorVisible(): Promise<boolean> {
     const style = await this.editor.getAttribute('style');

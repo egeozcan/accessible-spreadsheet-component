@@ -8,13 +8,27 @@ export interface CellCoord {
 }
 
 /**
+ * Cell-level formatting options
+ */
+export interface CellFormat {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  textColor?: string;
+  backgroundColor?: string;
+  textAlign?: 'left' | 'center' | 'right';
+  fontSize?: number;
+}
+
+/**
  * Data Structure for a Single Cell
  */
 export interface CellData {
   rawValue: string;
   displayValue: string;
   type: 'text' | 'number' | 'boolean' | 'error';
-  style?: Partial<CSSStyleDeclaration>;
+  format?: CellFormat;
 }
 
 /**
@@ -67,7 +81,16 @@ export interface SelectionChangeDetail {
 export interface DataChangeDetail {
   updates: Array<{ id: string; value: string }>;
   source?: 'user' | 'undo' | 'redo' | 'programmatic';
-  operation?: 'edit' | 'cut' | 'paste' | 'clear';
+  operation?: 'edit' | 'cut' | 'paste' | 'clear' | 'format';
+}
+
+/**
+ * Format change event detail
+ */
+export interface FormatChangeDetail {
+  cellIds: string[];
+  format: CellFormat;
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
 }
 
 /**

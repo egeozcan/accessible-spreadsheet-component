@@ -1,10 +1,17 @@
 import {
+  type CellFormat,
   type GridData,
   type SelectionRange,
   cellKey,
   colToLetter,
   letterToCol,
 } from '../types.js';
+
+export interface PasteUpdate {
+  id: string;
+  value: string;
+  format?: CellFormat;
+}
 
 /**
  * ClipboardManager - Handles copy, cut, and paste operations
@@ -69,7 +76,7 @@ export class ClipboardManager {
     targetCol: number,
     maxRows: number,
     maxCols: number
-  ): Promise<Array<{ id: string; value: string }> | null> {
+  ): Promise<PasteUpdate[] | null> {
     // Try internal paste with formula reference adjustment first
     if (this._copySourceRange && this._copySourceData) {
       const internalResult = this._pasteInternal(targetRow, targetCol, maxRows, maxCols);
@@ -83,9 +90,9 @@ export class ClipboardManager {
         if (item.types.includes('text/html')) {
           const blob = await item.getType('text/html');
           const htmlText = await blob.text();
-          const parsed = this.parseHTMLTable(htmlText);
+          const parsed = this.parseHTMLTableWithFormat(htmlText);
           if (parsed) {
-            return this._applyParsedRows(parsed, targetRow, targetCol, maxRows, maxCols);
+            return this._applyParsedRowsWithFormat(parsed, targetRow, targetCol, maxRows, maxCols);
           }
         }
       }
@@ -113,14 +120,14 @@ export class ClipboardManager {
     targetCol: number,
     maxRows: number,
     maxCols: number
-  ): Array<{ id: string; value: string }> | null {
+  ): PasteUpdate[] | null {
     const srcRange = this._copySourceRange;
     const srcData = this._copySourceData;
     if (!srcRange || !srcData) return null;
 
     const rowOffset = targetRow - srcRange.start.row;
     const colOffset = targetCol - srcRange.start.col;
-    const updates: Array<{ id: string; value: string }> = [];
+    const updates: PasteUpdate[] = [];
 
     for (let r = srcRange.start.row; r <= srcRange.end.row; r++) {
       for (let c = srcRange.start.col; c <= srcRange.end.col; c++) {
@@ -136,7 +143,11 @@ export class ClipboardManager {
           value = this.adjustFormulaReferences(value, rowOffset, colOffset);
         }
 
-        updates.push({ id: cellKey(newRow, newCol), value });
+        const update: PasteUpdate = { id: cellKey(newRow, newCol), value };
+        if (cell?.format) {
+          update.format = { ...cell.format };
+        }
+        updates.push(update);
       }
     }
 
@@ -169,6 +180,80 @@ export class ClipboardManager {
     }
 
     return rows.length > 0 ? rows : null;
+  }
+
+  /**
+   * Parse an HTML string and extract table data with format information.
+   * Prefers data-format (lossless) over inline styles (best-effort).
+   */
+  parseHTMLTableWithFormat(html: string): Array<Array<{ value: string; format?: CellFormat }>> | null {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const table = doc.querySelector('table');
+    if (!table) return null;
+
+    const rows: Array<Array<{ value: string; format?: CellFormat }>> = [];
+    const trElements = table.querySelectorAll('tr');
+
+    for (const tr of trElements) {
+      const cells: Array<{ value: string; format?: CellFormat }> = [];
+      const cellElements = tr.querySelectorAll('td, th');
+      for (const cellEl of cellElements) {
+        const el = cellEl as Element;
+        const raw = el.getAttribute('data-raw');
+        const value = raw ?? (cellEl.textContent ?? '').trim();
+
+        // Try lossless data-format first, then parse inline styles
+        let format: CellFormat | undefined;
+        const dataFormat = el.getAttribute('data-format');
+        if (dataFormat) {
+          try {
+            format = JSON.parse(dataFormat) as CellFormat;
+          } catch {
+            // Invalid JSON, ignore
+          }
+        }
+        if (!format) {
+          const style = el.getAttribute('style');
+          if (style) {
+            format = this._parseStyleToFormat(style);
+          }
+        }
+
+        cells.push({ value, format });
+      }
+      if (cells.length > 0) {
+        rows.push(cells);
+      }
+    }
+
+    return rows.length > 0 ? rows : null;
+  }
+
+  /**
+   * Convert format-aware parsed rows into PasteUpdate array.
+   */
+  private _applyParsedRowsWithFormat(
+    rows: Array<Array<{ value: string; format?: CellFormat }>>,
+    targetRow: number,
+    targetCol: number,
+    maxRows: number,
+    maxCols: number
+  ): PasteUpdate[] {
+    const updates: PasteUpdate[] = [];
+    for (let r = 0; r < rows.length; r++) {
+      for (let c = 0; c < rows[r].length; c++) {
+        const row = targetRow + r;
+        const col = targetCol + c;
+        if (row < maxRows && col < maxCols) {
+          const { value, format } = rows[r][c];
+          const update: PasteUpdate = { id: cellKey(row, col), value };
+          if (format) update.format = format;
+          updates.push(update);
+        }
+      }
+    }
+    return updates;
   }
 
   /**
@@ -274,30 +359,6 @@ export class ClipboardManager {
     return rows;
   }
 
-  /**
-   * Convert a 2D string array of parsed rows into cell updates
-   * starting at the given target position, clipped to grid bounds.
-   */
-  private _applyParsedRows(
-    rows: string[][],
-    targetRow: number,
-    targetCol: number,
-    maxRows: number,
-    maxCols: number
-  ): Array<{ id: string; value: string }> {
-    const updates: Array<{ id: string; value: string }> = [];
-    for (let r = 0; r < rows.length; r++) {
-      for (let c = 0; c < rows[r].length; c++) {
-        const row = targetRow + r;
-        const col = targetCol + c;
-        if (row < maxRows && col < maxCols) {
-          updates.push({ id: cellKey(row, col), value: rows[r][c] });
-        }
-      }
-    }
-    return updates;
-  }
-
   // ─── Reference Adjustment ─────────────────────────
 
   /**
@@ -359,7 +420,7 @@ export class ClipboardManager {
 
   /**
    * Convert a selection range to an HTML table string.
-   * Escapes &, <, > for safe HTML embedding.
+   * Includes inline styles for visual formatting and data-format for lossless round-trip.
    */
   private _serializeRangeAsHTML(data: GridData, range: SelectionRange): string {
     const rows: string[] = [];
@@ -370,15 +431,88 @@ export class ClipboardManager {
         const cell = data.get(cellKey(r, c));
         const value = cell?.displayValue ?? '';
         const rawValue = cell?.rawValue ?? '';
-        const rawAttr = rawValue && rawValue !== value
-          ? ` data-raw="${this._escapeHTML(rawValue)}"`
-          : '';
-        cells.push(`<td${rawAttr}>${this._escapeHTML(value)}</td>`);
+        const attrs: string[] = [];
+
+        if (rawValue && rawValue !== value) {
+          attrs.push(`data-raw="${this._escapeHTML(rawValue)}"`);
+        }
+
+        if (cell?.format) {
+          const inlineStyle = this._formatToInlineStyle(cell.format);
+          if (inlineStyle) {
+            attrs.push(`style="${this._escapeHTML(inlineStyle)}"`);
+          }
+          attrs.push(`data-format="${this._escapeHTML(JSON.stringify(cell.format))}"`);
+        }
+
+        const attrStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
+        cells.push(`<td${attrStr}>${this._escapeHTML(value)}</td>`);
       }
       rows.push(`<tr>${cells.join('')}</tr>`);
     }
 
     return `<table>${rows.join('')}</table>`;
+  }
+
+  /** Convert CellFormat to a CSS inline style string */
+  _formatToInlineStyle(format: CellFormat): string {
+    const parts: string[] = [];
+    if (format.bold) parts.push('font-weight: bold');
+    if (format.italic) parts.push('font-style: italic');
+    const decorations: string[] = [];
+    if (format.underline) decorations.push('underline');
+    if (format.strikethrough) decorations.push('line-through');
+    if (decorations.length > 0) parts.push(`text-decoration: ${decorations.join(' ')}`);
+    if (format.textColor) parts.push(`color: ${format.textColor}`);
+    if (format.backgroundColor) parts.push(`background-color: ${format.backgroundColor}`);
+    if (format.textAlign) parts.push(`text-align: ${format.textAlign}`);
+    if (format.fontSize) parts.push(`font-size: ${format.fontSize}px`);
+    return parts.join('; ');
+  }
+
+  /** Parse a CSS inline style string into a CellFormat (best-effort for external sources) */
+  _parseStyleToFormat(style: string): CellFormat | undefined {
+    if (!style) return undefined;
+    const fmt: CellFormat = {};
+
+    const fontWeight = this._extractStyleProp(style, 'font-weight');
+    if (fontWeight === 'bold' || fontWeight === '700') fmt.bold = true;
+
+    const fontStyle = this._extractStyleProp(style, 'font-style');
+    if (fontStyle === 'italic') fmt.italic = true;
+
+    const textDecoration = this._extractStyleProp(style, 'text-decoration');
+    if (textDecoration) {
+      if (textDecoration.includes('underline')) fmt.underline = true;
+      if (textDecoration.includes('line-through')) fmt.strikethrough = true;
+    }
+
+    const color = this._extractStyleProp(style, 'color');
+    if (color) fmt.textColor = color;
+
+    const bgColor = this._extractStyleProp(style, 'background-color');
+    if (bgColor) fmt.backgroundColor = bgColor;
+
+    const textAlign = this._extractStyleProp(style, 'text-align');
+    if (textAlign === 'left' || textAlign === 'center' || textAlign === 'right') {
+      fmt.textAlign = textAlign;
+    }
+
+    const fontSize = this._extractStyleProp(style, 'font-size');
+    if (fontSize) {
+      const px = parseInt(fontSize, 10);
+      if (!isNaN(px)) fmt.fontSize = px;
+    }
+
+    return Object.keys(fmt).length > 0 ? fmt : undefined;
+  }
+
+  private _extractStyleProp(style: string, prop: string): string | undefined {
+    // Match "prop: value" stopping at ; or end of string.
+    // Use negative lookbehind to avoid matching "color" inside "background-color".
+    const regex = new RegExp(`(?<![\\w-])${prop}\\s*:\\s*([^;]+)`, 'i');
+    const match = style.match(regex);
+    return match ? match[1].trim() : undefined;
   }
 
   /** Escape special HTML characters */
