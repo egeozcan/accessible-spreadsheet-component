@@ -90,11 +90,13 @@ describe('ClipboardManager', () => {
     });
 
     it('handles bare \\r line endings (old Mac style)', () => {
-      // parseTSV uses /\r?\n/ so bare \r is treated as part of the value
-      // This documents the current behavior
+      // The robust _parseTSVRows parser treats bare \r as a row separator (RFC 4180)
       const result = manager.parseTSV('a\rb\rc', 0, 0, 100, 26);
-      // Bare \r is NOT split as newlines in the current implementation
-      expect(result).toEqual([{ id: '0:0', value: 'a\rb\rc' }]);
+      expect(result).toEqual([
+        { id: '0:0', value: 'a' },
+        { id: '1:0', value: 'b' },
+        { id: '2:0', value: 'c' },
+      ]);
     });
 
     it('handles multi-row multi-col grid', () => {
