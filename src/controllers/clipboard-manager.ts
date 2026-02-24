@@ -459,11 +459,13 @@ export class ClipboardManager {
       if (textDecoration.includes('line-through')) fmt.strikethrough = true;
     }
 
+    const validColorPattern = /^[a-zA-Z0-9#(),.\s%/-]+$/;
+
     const color = this._extractStyleProp(style, 'color');
-    if (color) fmt.textColor = color;
+    if (color && color.length <= 100 && validColorPattern.test(color)) fmt.textColor = color;
 
     const bgColor = this._extractStyleProp(style, 'background-color');
-    if (bgColor) fmt.backgroundColor = bgColor;
+    if (bgColor && bgColor.length <= 100 && validColorPattern.test(bgColor)) fmt.backgroundColor = bgColor;
 
     const textAlign = this._extractStyleProp(style, 'text-align');
     if (textAlign === 'left' || textAlign === 'center' || textAlign === 'right') {
@@ -473,7 +475,7 @@ export class ClipboardManager {
     const fontSize = this._extractStyleProp(style, 'font-size');
     if (fontSize) {
       const px = parseInt(fontSize, 10);
-      if (!isNaN(px)) fmt.fontSize = px;
+      if (!isNaN(px) && px > 0 && px <= 200) fmt.fontSize = px;
     }
 
     return Object.keys(fmt).length > 0 ? fmt : undefined;
@@ -485,7 +487,7 @@ export class ClipboardManager {
 
     const obj = raw as Record<string, unknown>;
     const fmt: CellFormat = {};
-    const validColorPattern = /^[a-zA-Z0-9#(),.\s%-]+$/;
+    const validColorPattern = /^[a-zA-Z0-9#(),.\s%/-]+$/;
     const validAligns = new Set(['left', 'center', 'right']);
 
     if (typeof obj.bold === 'boolean') fmt.bold = obj.bold;
@@ -493,10 +495,10 @@ export class ClipboardManager {
     if (typeof obj.underline === 'boolean') fmt.underline = obj.underline;
     if (typeof obj.strikethrough === 'boolean') fmt.strikethrough = obj.strikethrough;
 
-    if (typeof obj.textColor === 'string' && validColorPattern.test(obj.textColor)) {
+    if (typeof obj.textColor === 'string' && obj.textColor.length <= 100 && validColorPattern.test(obj.textColor)) {
       fmt.textColor = obj.textColor;
     }
-    if (typeof obj.backgroundColor === 'string' && validColorPattern.test(obj.backgroundColor)) {
+    if (typeof obj.backgroundColor === 'string' && obj.backgroundColor.length <= 100 && validColorPattern.test(obj.backgroundColor)) {
       fmt.backgroundColor = obj.backgroundColor;
     }
     if (typeof obj.textAlign === 'string' && validAligns.has(obj.textAlign)) {

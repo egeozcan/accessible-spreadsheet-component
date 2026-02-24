@@ -16,6 +16,7 @@ import {
   cellKey,
   colToLetter,
   coordToRef,
+  formatsEqual,
 } from './types.js';
 import { SelectionManager } from './controllers/selection-manager.js';
 import { FormulaEngine } from './engine/formula-engine.js';
@@ -281,7 +282,7 @@ export class Y11nSpreadsheet extends LitElement {
         if (merged[k] === undefined) delete merged[k];
       }
 
-      const formatChanged = !this._formatsEqual(existingFormat, merged);
+      const formatChanged = !formatsEqual(existingFormat, merged);
       if (formatChanged) {
         deltas.push({
           id,
@@ -330,16 +331,6 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     return styles;
-  }
-
-  /** Shallow-compare two CellFormat objects (key-order independent) */
-  private _formatsEqual(a: CellFormat | undefined, b: CellFormat | undefined): boolean {
-    if (a === b) return true;
-    if (!a || !b) return false;
-    const keysA = Object.keys(a) as (keyof CellFormat)[];
-    const keysB = Object.keys(b) as (keyof CellFormat)[];
-    if (keysA.length !== keysB.length) return false;
-    return keysA.every((k) => a[k] === b[k]);
   }
 
   // ─── Data Sync ──────────────────────────────────────
@@ -604,7 +595,11 @@ export class Y11nSpreadsheet extends LitElement {
     this._dispatchFormatChangeForBatch(batch, 'redo');
   }
 
-  /** Dispatch format-change for any batch that contains format deltas */
+  /** Dispatch format-change for any batch that contains format deltas.
+   *  NOTE: The event carries the format from the first delta only. For heterogeneous
+   *  batches (e.g., paste with varied per-cell formatting), this is an approximation —
+   *  the cellIds are accurate but the format may not represent every cell. Consumers
+   *  that need per-cell accuracy should read cell data directly. */
   private _dispatchFormatChangeForBatch(batch: CommandBatch, source: 'undo' | 'redo'): void {
     const formatDeltas = batch.deltas.filter(
       (d) => d.formatBefore !== undefined || d.formatAfter !== undefined

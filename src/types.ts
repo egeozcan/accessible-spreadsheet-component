@@ -94,6 +94,18 @@ export interface FormatChangeDetail {
 }
 
 /**
+ * Shallow-compare two CellFormat objects (key-order independent)
+ */
+export function formatsEqual(a: CellFormat | undefined, b: CellFormat | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const keysA = Object.keys(a) as (keyof CellFormat)[];
+  const keysB = Object.keys(b) as (keyof CellFormat)[];
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((k) => a[k] === b[k]);
+}
+
+/**
  * Creates a cell key from row and col indices
  */
 export function cellKey(row: number, col: number): string {

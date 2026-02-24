@@ -561,39 +561,42 @@ test.describe('Formula Engine', () => {
 
   // ─── HTML Table Parsing Tests ────────────────────────
 
-  test('parseHTMLTable extracts data from HTML table', async ({ spreadsheet }) => {
-    // Use page.evaluate to test parseHTMLTable (needs DOMParser, browser-only)
+  test('parseHTMLTableWithFormat extracts data from HTML table', async ({ spreadsheet }) => {
     const result = await spreadsheet.page.evaluate(() => {
-      // Access the ClipboardManager through the component
       const sheet = document.querySelector('y11n-spreadsheet') as any;
       const cm = sheet._clipboardManager;
-      return cm.parseHTMLTable(
+      return cm.parseHTMLTableWithFormat(
         '<table><tr><td>Hello</td><td>World</td></tr><tr><td>1</td><td>2</td></tr></table>'
       );
     });
 
-    expect(result).toEqual([['Hello', 'World'], ['1', '2']]);
+    expect(result).toEqual([
+      [{ value: 'Hello' }, { value: 'World' }],
+      [{ value: '1' }, { value: '2' }],
+    ]);
   });
 
-  test('parseHTMLTable returns null for non-table HTML', async ({ spreadsheet }) => {
+  test('parseHTMLTableWithFormat returns null for non-table HTML', async ({ spreadsheet }) => {
     const result = await spreadsheet.page.evaluate(() => {
       const sheet = document.querySelector('y11n-spreadsheet') as any;
       const cm = sheet._clipboardManager;
-      return cm.parseHTMLTable('<div>No table here</div>');
+      return cm.parseHTMLTableWithFormat('<div>No table here</div>');
     });
 
     expect(result).toBeNull();
   });
 
-  test('parseHTMLTable uses data-raw attribute for formula round-tripping', async ({ spreadsheet }) => {
+  test('parseHTMLTableWithFormat uses data-raw attribute for formula round-tripping', async ({ spreadsheet }) => {
     const result = await spreadsheet.page.evaluate(() => {
       const sheet = document.querySelector('y11n-spreadsheet') as any;
       const cm = sheet._clipboardManager;
-      return cm.parseHTMLTable(
+      return cm.parseHTMLTableWithFormat(
         '<table><tr><td data-raw="=SUM(A1:A3)">15</td><td>plain</td></tr></table>'
       );
     });
 
-    expect(result).toEqual([['=SUM(A1:A3)', 'plain']]);
+    expect(result).toEqual([
+      [{ value: '=SUM(A1:A3)' }, { value: 'plain' }],
+    ]);
   });
 });

@@ -19,4 +19,4 @@ export type {
   DataChangeDetail,
   FormatChangeDetail,
 } from './types.js';
-export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef } from './types.js';
+export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual } from './types.js';
