@@ -142,6 +142,9 @@ describe('ClipboardManager', () => {
     });
   });
 
+  // parseHTMLTable uses DOMParser which is a browser API not available in
+  // Node. These code paths are covered by E2E tests (Playwright).
+
   describe('cut', () => {
     it('returns keys for all cells in range', async () => {
       const data: GridData = new Map();
@@ -162,6 +165,7 @@ describe('ClipboardManager', () => {
           clipboard: {
             writeText: async () => {},
             readText: async () => '',
+            write: async () => {},
           },
         },
         writable: true,

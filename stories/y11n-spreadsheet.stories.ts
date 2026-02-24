@@ -2,7 +2,14 @@ import { html } from 'lit';
 import type { Meta, StoryObj } from '@storybook/web-components';
 import '../src/y11n-spreadsheet.js';
 import type { Y11nSpreadsheet } from '../src/y11n-spreadsheet.js';
-import { gridFromRows } from './helpers.js';
+import {
+  gridFromRows,
+  generateProductCatalog,
+  generateExpenseData,
+  generateLogicData,
+  generateStringData,
+  generateAbsoluteRefData,
+} from './helpers.js';
 
 const meta: Meta = {
   title: 'Components/y11n-spreadsheet',
@@ -829,6 +836,241 @@ export const APIMethods: StoryObj = {
 - **setData(data)**: Replaces all grid data — useful for loading saved state or switching datasets
 
 Click the buttons above the grid to interact with the API. The output panel shows the result of \`getData()\`.`,
+      },
+    },
+  },
+};
+
+// ─── 17. Lookup Functions ───────────────────────────────
+
+export const LookupFunctions: StoryObj = {
+  name: 'Lookup Functions',
+  render: () => {
+    const catalog = generateProductCatalog();
+    const rows = [
+      ...catalog,
+      ['', '', '', '', ''],
+      ['Lookup ID', 'Found Name',              'Found Price',             'Found Category'],
+      ['P003',      '=VLOOKUP(A11, A2:E9, 2)', '=VLOOKUP(A11, A2:E9, 4)', '=VLOOKUP(A11, A2:E9, 3)'],
+      ['P006',      '=VLOOKUP(A12, A2:E9, 2)', '=VLOOKUP(A12, A2:E9, 4)', '=VLOOKUP(A12, A2:E9, 3)'],
+      ['',          '',                         '',                        ''],
+      ['INDEX/MATCH Demo', '',                  '',                        ''],
+      ['Row 3 Col 2',      '=INDEX(A2:E9, 3, 2)', '',                    ''],
+      ['MATCH "Office"',   '=MATCH("Office", C2:C9, 0)', '',             ''],
+    ];
+
+    const data = gridFromRows(rows);
+
+    return html`
+      <y11n-spreadsheet
+        .rows=${25}
+        .cols=${8}
+        .data=${data}
+        style="--ls-cell-width: 140px;"
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Demonstrates lookup functions with a product catalog:
+
+- **VLOOKUP(lookup, range, col_index)**: Searches the first column of a range and returns a value from a specified column
+- **INDEX(range, row, col)**: Returns the value at a given row/column position in a range
+- **MATCH(value, range, type)**: Returns the position of a value in a range
+
+Try changing the Lookup ID values (A11, A12) to look up different products.
+
+*Note: These functions require Agent 2's formula additions to render correctly.*`,
+      },
+    },
+  },
+};
+
+// ─── 18. Conditional Aggregation ─────────────────────────
+
+export const ConditionalAggregation: StoryObj = {
+  name: 'Conditional Aggregation',
+  render: () => {
+    const expenses = generateExpenseData();
+    const rows = [
+      ...expenses,
+      ['', '', '', ''],
+      ['Summary', '', '', ''],
+      ['Category',    'Total',                                  'Count',                                   'Average'],
+      ['Technology',  '=SUMIF(C2:C11, "Technology", D2:D11)',   '=COUNTIF(C2:C11, "Technology")',           '=AVERAGEIF(C2:C11, "Technology", D2:D11)'],
+      ['Office',      '=SUMIF(C2:C11, "Office", D2:D11)',       '=COUNTIF(C2:C11, "Office")',               '=AVERAGEIF(C2:C11, "Office", D2:D11)'],
+      ['Food',        '=SUMIF(C2:C11, "Food", D2:D11)',         '=COUNTIF(C2:C11, "Food")',                 '=AVERAGEIF(C2:C11, "Food", D2:D11)'],
+      ['', '', '', ''],
+      ['Grand Total', '=SUM(D2:D11)', '=COUNTA(D2:D11)', '=AVERAGE(D2:D11)'],
+    ];
+
+    const data = gridFromRows(rows);
+
+    return html`
+      <y11n-spreadsheet
+        .rows=${25}
+        .cols=${6}
+        .data=${data}
+        style="--ls-cell-width: 140px;"
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Demonstrates conditional aggregation with categorized expense data:
+
+- **SUMIF(range, criteria, sum_range)**: Sums values where the criteria matches
+- **COUNTIF(range, criteria)**: Counts cells matching a criteria
+- **AVERAGEIF(range, criteria, avg_range)**: Averages values where the criteria matches
+
+The summary table below the data shows totals, counts, and averages per category.
+
+*Note: SUMIF/COUNTIF/AVERAGEIF require Agent 2's formula additions to render correctly.*`,
+      },
+    },
+  },
+};
+
+// ─── 19. Logic Functions ─────────────────────────────────
+
+export const LogicFunctions: StoryObj = {
+  name: 'Logic Functions',
+  render: () => {
+    const logic = generateLogicData();
+    const rows = [
+      // Original columns A-E, then computed columns F-I
+      [...logic[0], 'Pass All (>=70)?',                        'Pass Any (>=70)?',                     'Good Attendance?',                      'Safe Division'],
+      [...logic[1], '=AND(B2>=70, C2>=70, D2>=70)',            '=OR(B2>=70, C2>=70, D2>=70)',          '=NOT(E2<90)',                           '=IFERROR(B2/0, "N/A")'],
+      [...logic[2], '=AND(B3>=70, C3>=70, D3>=70)',            '=OR(B3>=70, C3>=70, D3>=70)',          '=NOT(E3<90)',                           '=IFERROR(B3/0, "N/A")'],
+      [...logic[3], '=AND(B4>=70, C4>=70, D4>=70)',            '=OR(B4>=70, C4>=70, D4>=70)',          '=NOT(E4<90)',                           '=IFERROR(B4/0, "N/A")'],
+      [...logic[4], '=AND(B5>=70, C5>=70, D5>=70)',            '=OR(B5>=70, C5>=70, D5>=70)',          '=NOT(E5<90)',                           '=IFERROR(B5/0, "N/A")'],
+      [...logic[5], '=AND(B6>=70, C6>=70, D6>=70)',            '=OR(B6>=70, C6>=70, D6>=70)',          '=NOT(E6<90)',                           '=IFERROR(B6/0, "N/A")'],
+      [...logic[6], '=AND(B7>=70, C7>=70, D7>=70)',            '=OR(B7>=70, C7>=70, D7>=70)',          '=NOT(E7<90)',                           '=IFERROR(B7/0, "N/A")'],
+    ];
+
+    const data = gridFromRows(rows);
+
+    return html`
+      <y11n-spreadsheet
+        .rows=${15}
+        .cols=${12}
+        .data=${data}
+        style="--ls-cell-width: 130px;"
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Demonstrates logical functions with student grade data:
+
+- **AND(cond1, cond2, ...)**: Returns TRUE only if ALL conditions are true
+- **OR(cond1, cond2, ...)**: Returns TRUE if ANY condition is true
+- **NOT(condition)**: Inverts a boolean value
+- **IFERROR(value, fallback)**: Returns fallback if value produces an error
+
+Column F checks if a student passes all subjects (>=70). Column G checks if they pass at least one. Column H checks attendance. Column I shows IFERROR catching a division-by-zero.
+
+*Note: AND/OR/NOT/IFERROR require Agent 2's formula additions to render correctly.*`,
+      },
+    },
+  },
+};
+
+// ─── 20. Extended String Functions ──────────────────────
+
+export const ExtendedStringFunctions: StoryObj = {
+  name: 'Extended String Functions',
+  render: () => {
+    const strings = generateStringData();
+    const rows = [
+      // Original columns A-C, then computed columns D-I
+      [...strings[0], 'First Name',        'Last Name',             'Domain',                                   'Area Code',           'Cleaned Phone',                          'Name Swap'],
+      [...strings[1], '=LEFT(A2, FIND(" ", A2)-1)',  '=MID(A2, FIND(" ", A2)+1, 100)',  '=MID(B2, FIND("@", B2)+1, 100)',  '=MID(C2, 2, 3)',  '=SUBSTITUTE(SUBSTITUTE(C2, "(", ""), ")", "")',  '=SUBSTITUTE(A2, LEFT(A2, FIND(" ", A2)-1), MID(A2, FIND(" ", A2)+1, 100))'],
+      [...strings[2], '=LEFT(A3, FIND(" ", A3)-1)',  '=MID(A3, FIND(" ", A3)+1, 100)',  '=MID(B3, FIND("@", B3)+1, 100)',  '=MID(C3, 2, 3)',  '=SUBSTITUTE(SUBSTITUTE(C3, "(", ""), ")", "")',  '=SUBSTITUTE(A3, LEFT(A3, FIND(" ", A3)-1), MID(A3, FIND(" ", A3)+1, 100))'],
+      [...strings[3], '=LEFT(A4, FIND(" ", A4)-1)',  '=MID(A4, FIND(" ", A4)+1, 100)',  '=MID(B4, FIND("@", B4)+1, 100)',  '=MID(C4, 2, 3)',  '=SUBSTITUTE(SUBSTITUTE(C4, "(", ""), ")", "")',  '=SUBSTITUTE(A4, LEFT(A4, FIND(" ", A4)-1), MID(A4, FIND(" ", A4)+1, 100))'],
+      [...strings[4], '=LEFT(A5, FIND(" ", A5)-1)',  '=MID(A5, FIND(" ", A5)+1, 100)',  '=MID(B5, FIND("@", B5)+1, 100)',  '=MID(C5, 2, 3)',  '=SUBSTITUTE(SUBSTITUTE(C5, "(", ""), ")", "")',  '=SUBSTITUTE(A5, LEFT(A5, FIND(" ", A5)-1), MID(A5, FIND(" ", A5)+1, 100))'],
+      [...strings[5], '=LEFT(A6, FIND(" ", A6)-1)',  '=MID(A6, FIND(" ", A6)+1, 100)',  '=MID(B6, FIND("@", B6)+1, 100)',  '=MID(C6, 2, 3)',  '=SUBSTITUTE(SUBSTITUTE(C6, "(", ""), ")", "")',  '=SUBSTITUTE(A6, LEFT(A6, FIND(" ", A6)-1), MID(A6, FIND(" ", A6)+1, 100))'],
+    ];
+
+    const data = gridFromRows(rows);
+
+    return html`
+      <y11n-spreadsheet
+        .rows=${12}
+        .cols=${12}
+        .data=${data}
+        style="--ls-cell-width: 160px;"
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Demonstrates extended string functions for text manipulation:
+
+- **LEFT(text, num)**: Extracts characters from the start
+- **RIGHT(text, num)**: Extracts characters from the end
+- **MID(text, start, length)**: Extracts characters from the middle
+- **FIND(search, text)**: Returns the position of a substring
+- **SUBSTITUTE(text, old, new)**: Replaces occurrences of a substring
+
+Examples include extracting first/last names from full names, parsing email domains, extracting area codes from phone numbers, and swapping name parts.
+
+*Note: LEFT/RIGHT/MID/FIND/SUBSTITUTE require Agent 2's formula additions to render correctly.*`,
+      },
+    },
+  },
+};
+
+// ─── 21. Absolute References ─────────────────────────────
+
+export const AbsoluteReferences: StoryObj = {
+  name: 'Absolute References',
+  render: () => {
+    const base = generateAbsoluteRefData();
+    const rows = [
+      ...base,
+      ['', '', '', '', ''],
+      ['Tax Rate:', '0.08', '', '', ''],
+      ['', '', '', '', ''],
+      ['', 'Jan', 'Feb', 'Mar', 'Apr'],
+      ['Revenue After Tax', '=B2*(1-$B$5)', '=C2*(1-$B$5)', '=D2*(1-$B$5)', '=E2*(1-$B$5)'],
+      ['Profit',            '=B2-B3',       '=C2-C3',       '=D2-D3',       '=E2-E3'],
+      ['Profit After Tax',  '=B9*(1-$B$5)', '=C9*(1-$B$5)', '=D9*(1-$B$5)', '=E9*(1-$B$5)'],
+      ['',                  '',             '',             '',             ''],
+      ['Pct of Jan Sales',  '=B2/B2',       '=C2/$B$2',    '=D2/$B$2',    '=E2/$B$2'],
+    ];
+
+    const data = gridFromRows(rows);
+
+    return html`
+      <y11n-spreadsheet
+        .rows=${18}
+        .cols=${8}
+        .data=${data}
+        style="--ls-cell-width: 130px;"
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Demonstrates absolute vs relative cell references:
+
+- **Relative reference** (\`B2\`): Adjusts when copied to other cells
+- **Absolute reference** (\`$B$5\`): Always refers to the same cell regardless of position
+
+In this example:
+- Row 8 uses \`$B$5\` (absolute) to reference the tax rate in every column
+- Row 12 uses \`$B$2\` (absolute) to always compare against January sales
+- Row 9 uses relative references for column-specific profit calculations
+
+Try changing the Tax Rate in B5 to see all tax-dependent formulas update.
+
+*Note: Absolute references (\`$\` notation) require Agent 2's formula additions to render correctly.*`,
       },
     },
   },

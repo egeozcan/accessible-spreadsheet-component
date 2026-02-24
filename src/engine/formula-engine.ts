@@ -152,6 +152,9 @@ export class FormulaEngine {
   private _reverseDeps: Map<string, Set<string>> = new Map();
   private _trackingCellKey: string | null = null;
 
+  // Formula result cache for performance
+  private _cache: Map<string, { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' }> = new Map();
+
   constructor() {
     this.registerBuiltins();
   }
@@ -166,6 +169,7 @@ export class FormulaEngine {
     this.data = data;
     this._deps.clear();
     this._reverseDeps.clear();
+    this._cache.clear();
   }
 
   /**
@@ -179,13 +183,27 @@ export class FormulaEngine {
     forCellKey?: string
   ): { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' } {
     if (!rawValue || rawValue.trim() === '') {
-      if (forCellKey) this._clearDepsFor(forCellKey);
+      if (forCellKey) {
+        this._clearDepsFor(forCellKey);
+        this._cache.delete(forCellKey);
+      }
       return { displayValue: '', type: 'text' };
     }
 
     if (!rawValue.startsWith('=')) {
-      if (forCellKey) this._clearDepsFor(forCellKey);
+      if (forCellKey) {
+        this._clearDepsFor(forCellKey);
+        this._cache.delete(forCellKey);
+      }
       return this.coerceValue(rawValue);
+    }
+
+    // Check cache for formula cells
+    if (forCellKey) {
+      const cached = this._cache.get(forCellKey);
+      if (cached) {
+        return { displayValue: cached.displayValue, type: cached.type };
+      }
     }
 
     try {
@@ -195,14 +213,26 @@ export class FormulaEngine {
       }
       const formula = rawValue.substring(1);
       const result = this.parseExpression(formula);
-      return this.coerceValue(String(result));
+      const evaluated = this.coerceValue(String(result));
+
+      // Store in cache for formula cells
+      if (forCellKey) {
+        this._cache.set(forCellKey, { displayValue: evaluated.displayValue, type: evaluated.type });
+      }
+
+      return evaluated;
     } catch (e) {
       // Preserve specific error codes (#DIV/0!, #NAME?, #CIRC!)
       const msg = e instanceof Error ? e.message : '';
-      if (msg.startsWith('#')) {
-        return { displayValue: msg, type: 'error' };
+      const errorResult = msg.startsWith('#')
+        ? { displayValue: msg, type: 'error' as const }
+        : { displayValue: '#ERROR!', type: 'error' as const };
+
+      if (forCellKey) {
+        this._cache.set(forCellKey, errorResult);
       }
-      return { displayValue: '#ERROR!', type: 'error' };
+
+      return errorResult;
     } finally {
       this._trackingCellKey = null;
     }
@@ -215,6 +245,7 @@ export class FormulaEngine {
   recalculate(): Set<string> {
     this._deps.clear();
     this._reverseDeps.clear();
+    this._cache.clear();
 
     const changed = new Set<string>();
 
@@ -245,6 +276,11 @@ export class FormulaEngine {
 
     const changed = new Set<string>();
     const changedSet = new Set(changedKeys);
+
+    // Clear cache entries for directly changed keys before re-evaluating
+    for (const key of changedKeys) {
+      this._cache.delete(key);
+    }
 
     // Re-evaluate changed cells that are formulas (they may have been
     // evaluated with stale sibling values during batch application)
@@ -279,6 +315,11 @@ export class FormulaEngine {
       }
     }
 
+    // Clear cache entries for BFS dependents before re-evaluating
+    for (const key of toRecalc) {
+      this._cache.delete(key);
+    }
+
     // Recalculate each dependent formula in BFS order
     for (const key of toRecalc) {
       const cell = this.data.get(key);
@@ -305,6 +346,7 @@ export class FormulaEngine {
       }
       this._deps.delete(targetKey);
     }
+    this._cache.delete(targetKey);
   }
 
   private _trackDep(referencedKey: string): void {
