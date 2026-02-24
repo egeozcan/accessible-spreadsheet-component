@@ -339,30 +339,35 @@ export class FormulaEngine {
       }
 
       // Identifiers: cell references, function names, booleans
-      if (/[A-Za-z_]/.test(ch)) {
+      // Also match $ for absolute/mixed references like $A$1, $A1, A$1
+      if (/[A-Za-z_$]/.test(ch)) {
         let ident = '';
-        while (i < input.length && /[A-Za-z0-9_]/.test(input[i])) {
+        while (i < input.length && /[A-Za-z0-9_$]/.test(input[i])) {
           ident += input[i];
           i++;
         }
 
-        const upper = ident.toUpperCase();
+        // Strip $ for structure checks, but keep original for token value
+        const stripped = ident.replace(/\$/g, '');
+        const hasDollar = stripped !== ident;
+        const upper = stripped.toUpperCase();
 
-        // Check if boolean
-        if (upper === 'TRUE' || upper === 'FALSE') {
+        // Check if boolean (only when no $ is present)
+        if (!hasDollar && (upper === 'TRUE' || upper === 'FALSE')) {
           tokens.push({ type: 'BOOLEAN', value: upper });
           continue;
         }
 
-        // Check for range (e.g. A1:B2) - look ahead for colon
-        if (i < input.length && input[i] === ':' && /^[A-Z]+\d+$/i.test(ident)) {
+        // Check for range (e.g. A1:B2 or $A$1:$B$2) - look ahead for colon
+        if (i < input.length && input[i] === ':' && /^[A-Z]+\d+$/i.test(stripped)) {
           i++; // skip colon
           let end = '';
-          while (i < input.length && /[A-Za-z0-9]/.test(input[i])) {
+          while (i < input.length && /[A-Za-z0-9$]/.test(input[i])) {
             end += input[i];
             i++;
           }
-          if (/^[A-Z]+\d+$/i.test(end)) {
+          const endStripped = end.replace(/\$/g, '');
+          if (/^[A-Z]+\d+$/i.test(endStripped)) {
             tokens.push({ type: 'RANGE', value: `${ident.toUpperCase()}:${end.toUpperCase()}` });
             continue;
           }
@@ -370,23 +375,29 @@ export class FormulaEngine {
           throw new Error(`Invalid range: ${ident}:${end}`);
         }
 
-        // Check if function call (next non-space is '(')
-        let lookAhead = i;
-        while (lookAhead < input.length && /\s/.test(input[lookAhead])) lookAhead++;
-        if (lookAhead < input.length && input[lookAhead] === '(') {
-          tokens.push({ type: 'FUNC', value: upper });
-          continue;
+        // Check if function call (next non-space is '(') - only when no $ is present
+        if (!hasDollar) {
+          let lookAhead = i;
+          while (lookAhead < input.length && /\s/.test(input[lookAhead])) lookAhead++;
+          if (lookAhead < input.length && input[lookAhead] === '(') {
+            tokens.push({ type: 'FUNC', value: upper });
+            continue;
+          }
         }
 
         // Cell reference
-        if (/^[A-Z]+\d+$/i.test(ident)) {
+        if (/^[A-Z]+\d+$/i.test(stripped)) {
           tokens.push({ type: 'REF', value: ident.toUpperCase() });
           continue;
         }
 
-        // Unknown identifier - treat as function name or error
-        tokens.push({ type: 'FUNC', value: upper });
-        continue;
+        // Unknown identifier - treat as function name or error (only without $)
+        if (!hasDollar) {
+          tokens.push({ type: 'FUNC', value: upper });
+          continue;
+        }
+
+        throw new Error(`Unexpected identifier: ${ident}`);
       }
 
       throw new Error(`Unexpected character: ${ch}`);
@@ -606,7 +617,7 @@ export class FormulaEngine {
   // own ParserState, so no save/restore is needed.
 
   private _resolveRef(ref: string): unknown {
-    const coord = refToCoord(ref);
+    const coord = refToCoord(ref.replace(/\$/g, ''));
     const key = cellKey(coord.row, coord.col);
 
     this._trackDep(key);
@@ -644,8 +655,8 @@ export class FormulaEngine {
 
   private _resolveRange(rangeStr: string): unknown[] {
     const [startRef, endRef] = rangeStr.split(':');
-    const start = refToCoord(startRef);
-    const end = refToCoord(endRef);
+    const start = refToCoord(startRef.replace(/\$/g, ''));
+    const end = refToCoord(endRef.replace(/\$/g, ''));
 
     const minRow = Math.min(start.row, end.row);
     const maxRow = Math.max(start.row, end.row);
