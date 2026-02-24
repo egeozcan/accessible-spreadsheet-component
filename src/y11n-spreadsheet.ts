@@ -144,11 +144,40 @@ export class Y11nSpreadsheet extends LitElement {
   // ─── Data Sync ──────────────────────────────────────
 
   private _syncData(): void {
-    this._internalData = new Map(this.data);
+    const oldData = this._internalData;
+    const newData = new Map(this.data);
+
+    // Diff old vs new to collect changed keys for future targeted recalc
+    const changedKeys: string[] = [];
+
+    // Keys in new data that are different or absent in old data
+    for (const [key, cell] of newData) {
+      const oldCell = oldData.get(key);
+      if (!oldCell || oldCell.rawValue !== cell.rawValue) {
+        changedKeys.push(key);
+      }
+    }
+
+    // Keys in old data that are absent in new data (deleted)
+    for (const key of oldData.keys()) {
+      if (!newData.has(key)) {
+        changedKeys.push(key);
+      }
+    }
+
+    this._internalData = newData;
     this._undoStack = [];
     this._redoStack = [];
     this._formulaEngine.setData(this._internalData);
+
+    // For now, still do a full recalculate. The diff infrastructure is
+    // in place for future targeted recalc support, and the formula
+    // caching from Part 2 provides the main performance win.
     this._recalcAll();
+
+    // changedKeys are available for future targeted recalc:
+    // this._recalcAffected(changedKeys);
+    void changedKeys;
   }
 
   private _recalcAll(): void {
