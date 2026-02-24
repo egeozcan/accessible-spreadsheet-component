@@ -96,13 +96,39 @@ describe('SelectionManager', () => {
       expect(manager.anchor).toEqual({ row: 0, col: 0 });
     });
 
-    it('clamps to grid bounds', () => {
+    it('clamps at top-left edge (row 0, col 0)', () => {
       manager.move(-1, -1);
       expect(manager.activeCell).toEqual({ row: 0, col: 0 });
+    });
 
+    it('clamps at bottom-right edge (maxRows-1, maxCols-1)', () => {
       manager.moveTo(99, 25);
       manager.move(1, 1);
       expect(manager.activeCell).toEqual({ row: 99, col: 25 });
+    });
+
+    it('clamps at top edge only', () => {
+      manager.moveTo(0, 5);
+      manager.move(-1, 0);
+      expect(manager.activeCell).toEqual({ row: 0, col: 5 });
+    });
+
+    it('clamps at left edge only', () => {
+      manager.moveTo(5, 0);
+      manager.move(0, -1);
+      expect(manager.activeCell).toEqual({ row: 5, col: 0 });
+    });
+
+    it('clamps at bottom edge only', () => {
+      manager.moveTo(99, 5);
+      manager.move(1, 0);
+      expect(manager.activeCell).toEqual({ row: 99, col: 5 });
+    });
+
+    it('clamps at right edge only', () => {
+      manager.moveTo(5, 25);
+      manager.move(0, 1);
+      expect(manager.activeCell).toEqual({ row: 5, col: 25 });
     });
 
     it('requests host update', () => {
@@ -125,9 +151,14 @@ describe('SelectionManager', () => {
       expect(manager.anchor).toEqual({ row: 0, col: 0 });
     });
 
-    it('clamps to bounds', () => {
+    it('clamps to bounds when out of range', () => {
       manager.moveTo(200, 50);
       expect(manager.activeCell).toEqual({ row: 99, col: 25 });
+    });
+
+    it('clamps negative values to 0', () => {
+      manager.moveTo(-5, -3);
+      expect(manager.activeCell).toEqual({ row: 0, col: 0 });
     });
   });
 
