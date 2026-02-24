@@ -155,34 +155,6 @@ export class ClipboardManager {
   }
 
   /**
-   * Parse an HTML string and extract table data as a 2D string array.
-   * Returns null if no <table> element is found.
-   */
-  parseHTMLTable(html: string): string[][] | null {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, 'text/html');
-    const table = doc.querySelector('table');
-    if (!table) return null;
-
-    const rows: string[][] = [];
-    const trElements = table.querySelectorAll('tr');
-
-    for (const tr of trElements) {
-      const cells: string[] = [];
-      const cellElements = tr.querySelectorAll('td, th');
-      for (const cell of cellElements) {
-        const raw = (cell as Element).getAttribute('data-raw');
-        cells.push(raw ?? (cell.textContent ?? '').trim());
-      }
-      if (cells.length > 0) {
-        rows.push(cells);
-      }
-    }
-
-    return rows.length > 0 ? rows : null;
-  }
-
-  /**
    * Parse an HTML string and extract table data with format information.
    * Prefers data-format (lossless) over inline styles (best-effort).
    */
@@ -208,7 +180,7 @@ export class ClipboardManager {
         const dataFormat = el.getAttribute('data-format');
         if (dataFormat) {
           try {
-            format = JSON.parse(dataFormat) as CellFormat;
+            format = this._sanitizeFormat(JSON.parse(dataFormat));
           } catch {
             // Invalid JSON, ignore
           }
@@ -455,7 +427,7 @@ export class ClipboardManager {
   }
 
   /** Convert CellFormat to a CSS inline style string */
-  _formatToInlineStyle(format: CellFormat): string {
+  private _formatToInlineStyle(format: CellFormat): string {
     const parts: string[] = [];
     if (format.bold) parts.push('font-weight: bold');
     if (format.italic) parts.push('font-style: italic');
@@ -471,12 +443,12 @@ export class ClipboardManager {
   }
 
   /** Parse a CSS inline style string into a CellFormat (best-effort for external sources) */
-  _parseStyleToFormat(style: string): CellFormat | undefined {
+  private _parseStyleToFormat(style: string): CellFormat | undefined {
     if (!style) return undefined;
     const fmt: CellFormat = {};
 
     const fontWeight = this._extractStyleProp(style, 'font-weight');
-    if (fontWeight === 'bold' || fontWeight === '700') fmt.bold = true;
+    if (fontWeight === 'bold' || (fontWeight && parseInt(fontWeight, 10) >= 600)) fmt.bold = true;
 
     const fontStyle = this._extractStyleProp(style, 'font-style');
     if (fontStyle === 'italic') fmt.italic = true;
@@ -502,6 +474,36 @@ export class ClipboardManager {
     if (fontSize) {
       const px = parseInt(fontSize, 10);
       if (!isNaN(px)) fmt.fontSize = px;
+    }
+
+    return Object.keys(fmt).length > 0 ? fmt : undefined;
+  }
+
+  /** Validate and sanitize a parsed CellFormat from an external source */
+  private _sanitizeFormat(raw: unknown): CellFormat | undefined {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+
+    const obj = raw as Record<string, unknown>;
+    const fmt: CellFormat = {};
+    const validColorPattern = /^[a-zA-Z0-9#(),.\s%-]+$/;
+    const validAligns = new Set(['left', 'center', 'right']);
+
+    if (typeof obj.bold === 'boolean') fmt.bold = obj.bold;
+    if (typeof obj.italic === 'boolean') fmt.italic = obj.italic;
+    if (typeof obj.underline === 'boolean') fmt.underline = obj.underline;
+    if (typeof obj.strikethrough === 'boolean') fmt.strikethrough = obj.strikethrough;
+
+    if (typeof obj.textColor === 'string' && validColorPattern.test(obj.textColor)) {
+      fmt.textColor = obj.textColor;
+    }
+    if (typeof obj.backgroundColor === 'string' && validColorPattern.test(obj.backgroundColor)) {
+      fmt.backgroundColor = obj.backgroundColor;
+    }
+    if (typeof obj.textAlign === 'string' && validAligns.has(obj.textAlign)) {
+      fmt.textAlign = obj.textAlign as CellFormat['textAlign'];
+    }
+    if (typeof obj.fontSize === 'number' && obj.fontSize > 0 && obj.fontSize <= 200) {
+      fmt.fontSize = obj.fontSize;
     }
 
     return Object.keys(fmt).length > 0 ? fmt : undefined;

@@ -281,7 +281,7 @@ export class Y11nSpreadsheet extends LitElement {
         if (merged[k] === undefined) delete merged[k];
       }
 
-      const formatChanged = JSON.stringify(existingFormat) !== JSON.stringify(merged);
+      const formatChanged = !this._formatsEqual(existingFormat, merged);
       if (formatChanged) {
         deltas.push({
           id,
@@ -304,7 +304,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   /** Convert CellFormat to inline styles for styleMap */
-  _getCellStyles(row: number, col: number): Record<string, string> {
+  private _getCellStyles(row: number, col: number): Record<string, string> {
     const cell = this._getCell(row, col);
     if (!cell?.format) return {};
 
@@ -330,6 +330,16 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     return styles;
+  }
+
+  /** Shallow-compare two CellFormat objects (key-order independent) */
+  private _formatsEqual(a: CellFormat | undefined, b: CellFormat | undefined): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    const keysA = Object.keys(a) as (keyof CellFormat)[];
+    const keysB = Object.keys(b) as (keyof CellFormat)[];
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((k) => a[k] === b[k]);
   }
 
   // ─── Data Sync ──────────────────────────────────────
@@ -577,6 +587,7 @@ export class Y11nSpreadsheet extends LitElement {
 
     this._revertBatch(batch);
     this._redoStack.push(batch);
+    this._dispatchFormatChangeForBatch(batch, 'undo');
   }
 
   private _redo(): void {
@@ -590,6 +601,22 @@ export class Y11nSpreadsheet extends LitElement {
     if (this._undoStack.length > this._maxHistory) {
       this._undoStack.shift();
     }
+    this._dispatchFormatChangeForBatch(batch, 'redo');
+  }
+
+  /** Dispatch format-change for any batch that contains format deltas */
+  private _dispatchFormatChangeForBatch(batch: CommandBatch, source: 'undo' | 'redo'): void {
+    const formatDeltas = batch.deltas.filter(
+      (d) => d.formatBefore !== undefined || d.formatAfter !== undefined
+    );
+    if (formatDeltas.length === 0) return;
+
+    const cellIds = formatDeltas.map((d) => d.id);
+    // For undo, the applied format is formatBefore; for redo, formatAfter
+    const format: CellFormat = source === 'undo'
+      ? (formatDeltas[0].formatBefore ?? {})
+      : (formatDeltas[0].formatAfter ?? {});
+    this._dispatchFormatChange({ cellIds, format, source });
   }
 
   // ─── Editing ────────────────────────────────────────
@@ -1061,17 +1088,19 @@ export class Y11nSpreadsheet extends LitElement {
 
       // Inject format deltas into the batch
       if (batch) {
+        const updateMap = new Map(updates.map((u) => [u.id, u]));
         for (const delta of batch.deltas) {
-          const pasteUpdate = updates.find((u) => u.id === delta.id);
+          const pasteUpdate = updateMap.get(delta.id);
           if (pasteUpdate?.format) {
             const existing = this._internalData.get(delta.id);
             delta.formatBefore = existing?.format ? { ...existing.format } : undefined;
             delta.formatAfter = pasteUpdate.format;
           }
         }
+        const deltaIds = new Set(batch.deltas.map((d) => d.id));
         // Also add format-only entries for cells that have format but unchanged value
         for (const u of updates) {
-          if (u.format && !batch.deltas.some((d) => d.id === u.id)) {
+          if (u.format && !deltaIds.has(u.id)) {
             const existing = this._internalData.get(u.id);
             batch.deltas.push({
               id: u.id,
@@ -1220,8 +1249,8 @@ export class Y11nSpreadsheet extends LitElement {
 
   // ─── Editor Positioning ─────────────────────────────
 
-  private _getEditorStyle(): string {
-    if (!this._isEditing) return 'display:none;';
+  private _getEditorStyle(): Record<string, string> {
+    if (!this._isEditing) return { display: 'none' };
 
     const { row, col } = this._selection.activeCell;
     const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
@@ -1231,23 +1260,25 @@ export class Y11nSpreadsheet extends LitElement {
     const top = (row + 1) * cellHeight - this._scrollTop; // +1 for header, offset by scroll
     const left = headerWidth + col * cellWidth - this._scrollLeft;
 
-    // Inherit cell formatting into the editor
-    const fmtStyles = this._getCellStyles(row, col);
-    const extra = Object.entries(fmtStyles)
-      .filter(([k]) => k !== 'justify-content' && k !== 'background-color')
-      .map(([k, v]) => `${k}: ${v}`)
-      .join('; ');
+    const styles: Record<string, string> = {
+      display: 'block',
+      position: 'absolute',
+      top: `${top}px`,
+      left: `${left}px`,
+      width: `${cellWidth}px`,
+      height: `${cellHeight}px`,
+      'z-index': '10',
+    };
 
-    return `
-      display: block;
-      position: absolute;
-      top: ${top}px;
-      left: ${left}px;
-      width: ${cellWidth}px;
-      height: ${cellHeight}px;
-      z-index: 10;
-      ${extra}
-    `;
+    // Inherit cell formatting into the editor (via styleMap for safety)
+    const fmtStyles = this._getCellStyles(row, col);
+    for (const [k, v] of Object.entries(fmtStyles)) {
+      if (k !== 'justify-content' && k !== 'background-color') {
+        styles[k] = v;
+      }
+    }
+
+    return styles;
   }
 
   // ─── Render ─────────────────────────────────────────
@@ -1440,7 +1471,7 @@ export class Y11nSpreadsheet extends LitElement {
           <input
             id="editor"
             part="editor"
-            style="${this._getEditorStyle()}"
+            style=${styleMap(this._getEditorStyle())}
             .value="${this._editValue}"
             @input="${this._handleEditorInput}"
             @keydown="${this._handleEditorKeydown}"

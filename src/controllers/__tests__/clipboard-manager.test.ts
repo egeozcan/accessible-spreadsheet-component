@@ -257,7 +257,7 @@ describe('ClipboardManager', () => {
 
   describe('_formatToInlineStyle (clipboard context)', () => {
     it('produces combined style for bold + textColor', () => {
-      const style = manager._formatToInlineStyle({ bold: true, textColor: '#ff0000' });
+      const style = (manager as any)._formatToInlineStyle({ bold: true, textColor: '#ff0000' });
       expect(style).toContain('font-weight: bold');
       expect(style).toContain('color: #ff0000');
     });
@@ -265,12 +265,12 @@ describe('ClipboardManager', () => {
 
   describe('_parseStyleToFormat (clipboard context)', () => {
     it('returns undefined for empty string', () => {
-      expect(manager._parseStyleToFormat('')).toBeUndefined();
+      expect((manager as any)._parseStyleToFormat('')).toBeUndefined();
     });
 
     it('parses external Sheets-style CSS', () => {
       const style = 'font-weight: bold; color: rgb(255, 0, 0); background-color: #ffff00';
-      const fmt = manager._parseStyleToFormat(style);
+      const fmt = (manager as any)._parseStyleToFormat(style);
       expect(fmt?.bold).toBe(true);
       expect(fmt?.textColor).toBe('rgb(255, 0, 0)');
       expect(fmt?.backgroundColor).toBe('#ffff00');

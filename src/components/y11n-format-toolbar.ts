@@ -162,6 +162,32 @@ export class Y11nFormatToolbar extends LitElement {
       gap: 0;
     }
 
+    .align-icon {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      width: 14px;
+    }
+
+    .align-icon span {
+      display: block;
+      height: 2px;
+      background: currentColor;
+      border-radius: 1px;
+    }
+
+    .align-left span:nth-child(1) { width: 100%; }
+    .align-left span:nth-child(2) { width: 70%; }
+    .align-left span:nth-child(3) { width: 85%; }
+
+    .align-center span:nth-child(1) { width: 100%; margin: 0 auto; }
+    .align-center span:nth-child(2) { width: 70%; margin: 0 auto; }
+    .align-center span:nth-child(3) { width: 85%; margin: 0 auto; }
+
+    .align-right span:nth-child(1) { width: 100%; margin-left: auto; }
+    .align-right span:nth-child(2) { width: 70%; margin-left: auto; }
+    .align-right span:nth-child(3) { width: 85%; margin-left: auto; }
+
     .font-size-select {
       width: 52px;
       height: 28px;
@@ -325,7 +351,7 @@ export class Y11nFormatToolbar extends LitElement {
             ?disabled=${d}
             tabindex="-1"
             @click=${() => this._dispatch('textAlign', 'left')}
-          >${'\u2261'}</button>
+          ><span class="align-icon align-left" aria-hidden="true"><span></span><span></span><span></span></span></button>
           <button
             type="button"
             aria-pressed="${this.textAlign === 'center'}"
@@ -334,7 +360,7 @@ export class Y11nFormatToolbar extends LitElement {
             ?disabled=${d}
             tabindex="-1"
             @click=${() => this._dispatch('textAlign', 'center')}
-          >${'\u2261'}</button>
+          ><span class="align-icon align-center" aria-hidden="true"><span></span><span></span><span></span></span></button>
           <button
             type="button"
             aria-pressed="${this.textAlign === 'right'}"
@@ -343,7 +369,7 @@ export class Y11nFormatToolbar extends LitElement {
             ?disabled=${d}
             tabindex="-1"
             @click=${() => this._dispatch('textAlign', 'right')}
-          >${'\u2261'}</button>
+          ><span class="align-icon align-right" aria-hidden="true"><span></span><span></span><span></span></span></button>
         </div>
 
         <div class="separator" role="separator"></div>
