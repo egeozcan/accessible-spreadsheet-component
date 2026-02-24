@@ -851,8 +851,8 @@ export const LookupFunctions: StoryObj = {
       ...catalog,
       ['', '', '', '', ''],
       ['Lookup ID', 'Found Name',              'Found Price',             'Found Category'],
-      ['P003',      '=VLOOKUP(A11, A2:E9, 2)', '=VLOOKUP(A11, A2:E9, 4)', '=VLOOKUP(A11, A2:E9, 3)'],
-      ['P006',      '=VLOOKUP(A12, A2:E9, 2)', '=VLOOKUP(A12, A2:E9, 4)', '=VLOOKUP(A12, A2:E9, 3)'],
+      ['P003',      '=VLOOKUP(A11, A2:E9, 2, FALSE)', '=VLOOKUP(A11, A2:E9, 4, FALSE)', '=VLOOKUP(A11, A2:E9, 3, FALSE)'],
+      ['P006',      '=VLOOKUP(A12, A2:E9, 2, FALSE)', '=VLOOKUP(A12, A2:E9, 4, FALSE)', '=VLOOKUP(A12, A2:E9, 3, FALSE)'],
       ['',          '',                         '',                        ''],
       ['INDEX/MATCH Demo', '',                  '',                        ''],
       ['Row 3 Col 2',      '=INDEX(A2:E9, 3, 2)', '',                    ''],
@@ -879,9 +879,7 @@ export const LookupFunctions: StoryObj = {
 - **INDEX(range, row, col)**: Returns the value at a given row/column position in a range
 - **MATCH(value, range, type)**: Returns the position of a value in a range
 
-Try changing the Lookup ID values (A11, A12) to look up different products.
-
-*Note: These functions require Agent 2's formula additions to render correctly.*`,
+Try changing the Lookup ID values (A11, A12) to look up different products.`,
       },
     },
   },
@@ -925,9 +923,7 @@ export const ConditionalAggregation: StoryObj = {
 - **COUNTIF(range, criteria)**: Counts cells matching a criteria
 - **AVERAGEIF(range, criteria, avg_range)**: Averages values where the criteria matches
 
-The summary table below the data shows totals, counts, and averages per category.
-
-*Note: SUMIF/COUNTIF/AVERAGEIF require Agent 2's formula additions to render correctly.*`,
+The summary table below the data shows totals, counts, and averages per category.`,
       },
     },
   },
@@ -971,9 +967,7 @@ export const LogicFunctions: StoryObj = {
 - **NOT(condition)**: Inverts a boolean value
 - **IFERROR(value, fallback)**: Returns fallback if value produces an error
 
-Column F checks if a student passes all subjects (>=70). Column G checks if they pass at least one. Column H checks attendance. Column I shows IFERROR catching a division-by-zero.
-
-*Note: AND/OR/NOT/IFERROR require Agent 2's formula additions to render correctly.*`,
+Column F checks if a student passes all subjects (>=70). Column G checks if they pass at least one. Column H checks attendance. Column I shows IFERROR catching a division-by-zero.`,
       },
     },
   },
@@ -1017,9 +1011,7 @@ export const ExtendedStringFunctions: StoryObj = {
 - **FIND(search, text)**: Returns the position of a substring
 - **SUBSTITUTE(text, old, new)**: Replaces occurrences of a substring
 
-Examples include extracting first/last names from full names, parsing email domains, extracting area codes from phone numbers, and swapping name parts.
-
-*Note: LEFT/RIGHT/MID/FIND/SUBSTITUTE require Agent 2's formula additions to render correctly.*`,
+Examples include extracting first/last names from full names, parsing email domains, extracting area codes from phone numbers, and swapping name parts.`,
       },
     },
   },
@@ -1068,9 +1060,7 @@ In this example:
 - Row 12 uses \`$B$2\` (absolute) to always compare against January sales
 - Row 9 uses relative references for column-specific profit calculations
 
-Try changing the Tax Rate in B5 to see all tax-dependent formulas update.
-
-*Note: Absolute references (\`$\` notation) require Agent 2's formula additions to render correctly.*`,
+Try changing the Tax Rate in B5 to see all tax-dependent formulas update.`,
       },
     },
   },

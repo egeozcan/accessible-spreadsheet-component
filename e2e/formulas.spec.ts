@@ -399,7 +399,7 @@ test.describe('Formula Engine', () => {
       '2:0': { rawValue: 'Cherry', displayValue: 'Cherry', type: 'text' },
       '2:1': { rawValue: '3.00', displayValue: '3', type: 'number' },
       '2:2': { rawValue: '50', displayValue: '50', type: 'number' },
-      '3:0': { rawValue: '=VLOOKUP("Banana",A1:C3,2)', displayValue: '', type: 'text' },
+      '3:0': { rawValue: '=VLOOKUP("Banana",A1:C3,2,FALSE)', displayValue: '', type: 'text' },
     });
 
     await spreadsheet.waitForCellText(3, 0, '0.75');

@@ -53,6 +53,9 @@ const AGGREGATE_FUNCTIONS = new Set([
   'SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'COUNTA', 'CONCAT',
 ]);
 
+/** Set of volatile function names whose results should never be cached */
+const VOLATILE_FUNCTIONS = new Set(['NOW']);
+
 /**
  * Represents a 2D range of values with shape information.
  * Used by lookup functions (VLOOKUP, INDEX, etc.) that need row/col structure.
@@ -121,30 +124,33 @@ function matchesCriteria(value: unknown, criteria: string): boolean {
   const bothNumeric = !isNaN(numTarget) && !isNaN(numValue)
     && target.trim() !== '' && String(value).trim() !== '';
 
+  const valLower = String(value).toLowerCase();
+  const targetLower = target.toLowerCase();
+
   switch (op) {
     case '=':
       if (bothNumeric) return numValue === numTarget;
-      return String(value).toLowerCase() === target.toLowerCase();
+      return valLower === targetLower;
     case '<>':
       if (bothNumeric) return numValue !== numTarget;
-      return String(value).toLowerCase() !== target.toLowerCase();
+      return valLower !== targetLower;
     case '>':
-      return bothNumeric ? numValue > numTarget : String(value) > target;
+      return bothNumeric ? numValue > numTarget : valLower > targetLower;
     case '<':
-      return bothNumeric ? numValue < numTarget : String(value) < target;
+      return bothNumeric ? numValue < numTarget : valLower < targetLower;
     case '>=':
-      return bothNumeric ? numValue >= numTarget : String(value) >= target;
+      return bothNumeric ? numValue >= numTarget : valLower >= targetLower;
     case '<=':
-      return bothNumeric ? numValue <= numTarget : String(value) <= target;
+      return bothNumeric ? numValue <= numTarget : valLower <= targetLower;
     default:
       return false;
   }
 }
 
 export class FormulaEngine {
-  private functions: Map<string, FormulaFunction> = new Map();
-  private data: GridData = new Map();
-  private evaluating: Set<string> = new Set(); // circular reference detection
+  private _functions: Map<string, FormulaFunction> = new Map();
+  private _data: GridData = new Map();
+  private _evaluating: Set<string> = new Set(); // circular reference detection
   private _evalDepth = 0;
 
   // Dependency tracking for targeted recalculation
@@ -161,12 +167,12 @@ export class FormulaEngine {
 
   /** Register a user-defined function */
   registerFunction(name: string, fn: FormulaFunction): void {
-    this.functions.set(name.toUpperCase(), fn);
+    this._functions.set(name.toUpperCase(), fn);
   }
 
   /** Update the data reference for evaluation */
   setData(data: GridData): void {
-    this.data = data;
+    this._data = data;
     this._deps.clear();
     this._reverseDeps.clear();
     this._cache.clear();
@@ -198,8 +204,12 @@ export class FormulaEngine {
       return this.coerceValue(rawValue);
     }
 
-    // Check cache for formula cells
-    if (forCellKey) {
+    // Check if the formula contains a volatile function (skip cache for those)
+    const formulaUpper = rawValue.substring(1).toUpperCase();
+    const isVolatile = [...VOLATILE_FUNCTIONS].some(fn => formulaUpper.includes(fn + '('));
+
+    // Check cache for formula cells (skip for volatile functions)
+    if (forCellKey && !isVolatile) {
       const cached = this._cache.get(forCellKey);
       if (cached) {
         return { displayValue: cached.displayValue, type: cached.type };
@@ -215,8 +225,8 @@ export class FormulaEngine {
       const result = this.parseExpression(formula);
       const evaluated = this.coerceValue(String(result));
 
-      // Store in cache for formula cells
-      if (forCellKey) {
+      // Store in cache for formula cells (skip for volatile functions)
+      if (forCellKey && !isVolatile) {
         this._cache.set(forCellKey, { displayValue: evaluated.displayValue, type: evaluated.type });
       }
 
@@ -228,7 +238,7 @@ export class FormulaEngine {
         ? { displayValue: msg, type: 'error' as const }
         : { displayValue: '#ERROR!', type: 'error' as const };
 
-      if (forCellKey) {
+      if (forCellKey && !isVolatile) {
         this._cache.set(forCellKey, errorResult);
       }
 
@@ -249,7 +259,7 @@ export class FormulaEngine {
 
     const changed = new Set<string>();
 
-    for (const [key, cell] of this.data) {
+    for (const [key, cell] of this._data) {
       if (cell.rawValue.startsWith('=')) {
         const result = this.evaluate(cell.rawValue, key);
         if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
@@ -270,7 +280,7 @@ export class FormulaEngine {
   recalculateAffected(changedKeys: string[]): Set<string> {
     // If the dependency graph is empty but data exists, fall back to a full
     // recalculate so we never silently skip dependents after a setData() call.
-    if (this._reverseDeps.size === 0 && this.data.size > 0) {
+    if (this._reverseDeps.size === 0 && this._data.size > 0) {
       return this.recalculate();
     }
 
@@ -285,7 +295,7 @@ export class FormulaEngine {
     // Re-evaluate changed cells that are formulas (they may have been
     // evaluated with stale sibling values during batch application)
     for (const key of changedKeys) {
-      const cell = this.data.get(key);
+      const cell = this._data.get(key);
       if (cell?.rawValue.startsWith('=')) {
         const result = this.evaluate(cell.rawValue, key);
         if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
@@ -322,7 +332,7 @@ export class FormulaEngine {
 
     // Recalculate each dependent formula in BFS order
     for (const key of toRecalc) {
-      const cell = this.data.get(key);
+      const cell = this._data.get(key);
       if (cell?.rawValue.startsWith('=')) {
         const result = this.evaluate(cell.rawValue, key);
         if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
@@ -702,7 +712,7 @@ export class FormulaEngine {
 
     this._consume(s, 'RPAREN');
 
-    const fn = this.functions.get(name);
+    const fn = this._functions.get(name);
     if (!fn) throw new Error(`#NAME?`);
 
     const ctx = this._createContext();
@@ -784,24 +794,24 @@ export class FormulaEngine {
     this._trackDep(key);
 
     // Circular reference detection
-    if (this.evaluating.has(key)) {
+    if (this._evaluating.has(key)) {
       throw new Error('#CIRC!');
     }
 
-    const cell = this.data.get(key);
+    const cell = this._data.get(key);
     if (!cell) return 0; // empty cells are 0
 
     // If this cell also has a formula, evaluate it in a fresh parser context.
     // Keep _trackingCellKey so transitive dependencies are recorded
     // (e.g. C1→B1→A1 means C1 depends on A1 too).
     if (cell.rawValue.startsWith('=')) {
-      this.evaluating.add(key);
+      this._evaluating.add(key);
       try {
         return this.parseExpression(cell.rawValue.substring(1));
       } catch {
         throw new Error('#ERROR!');
       } finally {
-        this.evaluating.delete(key);
+        this._evaluating.delete(key);
       }
     }
 
@@ -833,21 +843,21 @@ export class FormulaEngine {
 
         this._trackDep(key);
 
-        const cell = this.data.get(key);
+        const cell = this._data.get(key);
         if (cell) {
           if (cell.rawValue.startsWith('=')) {
             // Keep _trackingCellKey so transitive deps through ranges are tracked
-            if (this.evaluating.has(key)) {
+            if (this._evaluating.has(key)) {
               values.push('#CIRC!');
             } else {
-              this.evaluating.add(key);
+              this._evaluating.add(key);
               try {
                 values.push(this.parseExpression(cell.rawValue.substring(1)));
               } catch (e) {
                 const msg = e instanceof Error ? e.message : '';
                 values.push(msg.startsWith('#') ? msg : '#ERROR!');
               } finally {
-                this.evaluating.delete(key);
+                this._evaluating.delete(key);
               }
             }
           } else {
@@ -878,7 +888,7 @@ export class FormulaEngine {
       getCellValue: (ref: string) => {
         if (ref.includes(':') && !/[A-Z]/i.test(ref.charAt(0))) {
           // It's a key like "0:0"
-          const cell = this.data.get(ref);
+          const cell = this._data.get(ref);
           if (!cell) return 0;
           const num = Number(cell.rawValue);
           return !isNaN(num) && cell.rawValue.trim() !== '' ? num : cell.rawValue;
@@ -898,7 +908,7 @@ export class FormulaEngine {
         for (let r = minRow; r <= maxRow; r++) {
           for (let c = minCol; c <= maxCol; c++) {
             const key = cellKey(r, c);
-            const cell = this.data.get(key);
+            const cell = this._data.get(key);
             if (cell) {
               const num = Number(cell.rawValue);
               values.push(!isNaN(num) && cell.rawValue.trim() !== '' ? num : cell.rawValue);
@@ -1053,6 +1063,27 @@ export class FormulaEngine {
       return count;
     });
 
+    this.registerFunction('AVERAGEIF', (_ctx, range, criteria, avgRange?) => {
+      const criteriaStr = String(criteria);
+      const rangeArr: unknown[] = range instanceof RangeValue ? range.values : (Array.isArray(range) ? range : [range]);
+      const avgArr: unknown[] | undefined = avgRange instanceof RangeValue ? avgRange.values : (Array.isArray(avgRange) ? avgRange : undefined);
+
+      let total = 0;
+      let count = 0;
+      for (let i = 0; i < rangeArr.length; i++) {
+        const val = rangeArr[i];
+        if (val !== undefined && matchesCriteria(val, criteriaStr)) {
+          const numVal = avgArr ? Number(avgArr[i]) : Number(val);
+          if (!isNaN(numVal)) {
+            total += numVal;
+            count++;
+          }
+        }
+      }
+      if (count === 0) throw new Error('#DIV/0!');
+      return total / count;
+    });
+
     // ─── Lookup ─────────────────────────────────────────
 
     this.registerFunction('VLOOKUP', (_ctx, lookupValue, tableRange, colIndex, exactMatch?) => {
@@ -1063,7 +1094,8 @@ export class FormulaEngine {
       if (colIdx < 1 || colIdx > tableRange.cols) {
         throw new Error('#REF!');
       }
-      const isExact = exactMatch === undefined || exactMatch === true || exactMatch === 0;
+      // Excel convention: omitted or TRUE/1 = approximate match, FALSE/0 = exact match
+      const isExact = exactMatch === false || exactMatch === 0;
 
       // Search first column
       const firstCol = tableRange.getCol(0);
@@ -1099,7 +1131,8 @@ export class FormulaEngine {
       if (rowIdx < 1 || rowIdx > tableRange.rows) {
         throw new Error('#REF!');
       }
-      const isExact = exactMatch === undefined || exactMatch === true || exactMatch === 0;
+      // Excel convention: omitted or TRUE/1 = approximate match, FALSE/0 = exact match
+      const isExact = exactMatch === false || exactMatch === 0;
 
       // Search first row
       const firstRow = tableRange.getRow(0);
@@ -1317,7 +1350,7 @@ export class FormulaEngine {
       const now = new Date();
       const epoch = new Date(1899, 11, 30); // 1899-12-30
       const diff = now.getTime() - epoch.getTime();
-      return Math.round(diff / (1000 * 60 * 60 * 24));
+      return diff / (1000 * 60 * 60 * 24);
     });
   }
 }

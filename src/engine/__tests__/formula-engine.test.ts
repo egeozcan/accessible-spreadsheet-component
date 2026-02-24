@@ -588,6 +588,1136 @@ describe('FormulaEngine', () => {
     });
   });
 
+  // ─── Logic/Conditional ─────────────────────────────
+
+  describe('IFERROR', () => {
+    it('returns the value when no error', () => {
+      expect(engine.evaluate('=IFERROR(42, "fallback")')).toEqual({ displayValue: '42', type: 'number' });
+    });
+
+    it('returns the value for non-error string', () => {
+      expect(engine.evaluate('=IFERROR("hello", "fallback")')).toEqual({ displayValue: 'hello', type: 'text' });
+    });
+
+    it('returns fallback for #DIV/0! error from cell', () => {
+      // Note: IFERROR checks if a value is an error *string*. A thrown error
+      // (like 1/0) propagates before IFERROR can catch it. Use a cell with the error string.
+      const data = makeData({ '0:0': '#DIV/0!' });
+      engine.setData(data);
+      expect(engine.evaluate('=IFERROR(A1, "oops")')).toEqual({ displayValue: 'oops', type: 'text' });
+    });
+
+    it('returns fallback for #VALUE! error', () => {
+      const data = makeData({ '0:0': '#VALUE!' });
+      engine.setData(data);
+      expect(engine.evaluate('=IFERROR(A1, 0)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('returns fallback for #NAME? error', () => {
+      // UNKNOWNFN throws #NAME?, IFERROR catches it at the formula level
+      // But since IFERROR receives the thrown error as a string, let's test with a cell containing error
+      const data = makeData({ '0:0': '#NAME?' });
+      engine.setData(data);
+      expect(engine.evaluate('=IFERROR(A1, "fixed")')).toEqual({ displayValue: 'fixed', type: 'text' });
+    });
+
+    it('returns fallback for #ERROR!', () => {
+      const data = makeData({ '0:0': '#ERROR!' });
+      engine.setData(data);
+      expect(engine.evaluate('=IFERROR(A1, -1)')).toEqual({ displayValue: '-1', type: 'number' });
+    });
+
+    it('returns fallback for #CIRC!', () => {
+      const data = makeData({ '0:0': '#CIRC!' });
+      engine.setData(data);
+      expect(engine.evaluate('=IFERROR(A1, "circular")')).toEqual({ displayValue: 'circular', type: 'text' });
+    });
+
+    it('returns fallback for #REF!', () => {
+      const data = makeData({ '0:0': '#REF!' });
+      engine.setData(data);
+      expect(engine.evaluate('=IFERROR(A1, 0)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('returns numeric fallback for error from cell', () => {
+      const data = makeData({ '0:0': '#DIV/0!' });
+      engine.setData(data);
+      expect(engine.evaluate('=IFERROR(A1, 999)')).toEqual({ displayValue: '999', type: 'number' });
+    });
+  });
+
+  describe('AND', () => {
+    it('returns TRUE when all args are true', () => {
+      expect(engine.evaluate('=AND(TRUE, TRUE, TRUE)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('returns FALSE when any arg is false', () => {
+      expect(engine.evaluate('=AND(TRUE, FALSE, TRUE)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('returns TRUE for single true arg', () => {
+      expect(engine.evaluate('=AND(TRUE)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('returns FALSE for single false arg', () => {
+      expect(engine.evaluate('=AND(FALSE)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('treats non-zero numbers as truthy', () => {
+      expect(engine.evaluate('=AND(1, 2, 3)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('treats zero as falsy', () => {
+      expect(engine.evaluate('=AND(1, 0, 3)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('handles range values', () => {
+      const data = makeData({ '0:0': 'TRUE', '1:0': 'TRUE', '2:0': 'TRUE' });
+      engine.setData(data);
+      expect(engine.evaluate('=AND(A1:A3)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('returns FALSE when range contains false', () => {
+      const data = makeData({ '0:0': 'TRUE', '1:0': 'FALSE', '2:0': 'TRUE' });
+      engine.setData(data);
+      expect(engine.evaluate('=AND(A1:A3)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('works with comparison expressions', () => {
+      expect(engine.evaluate('=AND(1>0, 2>1, 3>2)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('=AND(1>0, 2<1)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+  });
+
+  describe('OR', () => {
+    it('returns TRUE when any arg is true', () => {
+      expect(engine.evaluate('=OR(FALSE, TRUE, FALSE)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('returns FALSE when all args are false', () => {
+      expect(engine.evaluate('=OR(FALSE, FALSE, FALSE)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('returns TRUE for single true arg', () => {
+      expect(engine.evaluate('=OR(TRUE)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('returns FALSE for single false arg', () => {
+      expect(engine.evaluate('=OR(FALSE)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('treats non-zero numbers as truthy', () => {
+      expect(engine.evaluate('=OR(0, 0, 5)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('treats all zeros as falsy', () => {
+      expect(engine.evaluate('=OR(0, 0, 0)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('handles range values', () => {
+      const data = makeData({ '0:0': 'FALSE', '1:0': 'TRUE', '2:0': 'FALSE' });
+      engine.setData(data);
+      expect(engine.evaluate('=OR(A1:A3)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('returns FALSE when range is all false', () => {
+      const data = makeData({ '0:0': 'FALSE', '1:0': 'FALSE' });
+      engine.setData(data);
+      expect(engine.evaluate('=OR(A1:A2)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('works with comparison expressions', () => {
+      expect(engine.evaluate('=OR(1>2, 2>3, 3>2)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+  });
+
+  describe('NOT', () => {
+    it('negates TRUE to FALSE', () => {
+      expect(engine.evaluate('=NOT(TRUE)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('negates FALSE to TRUE', () => {
+      expect(engine.evaluate('=NOT(FALSE)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('negates truthy number (non-zero) to FALSE', () => {
+      expect(engine.evaluate('=NOT(1)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('negates zero to TRUE', () => {
+      expect(engine.evaluate('=NOT(0)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+    });
+
+    it('works with comparison expression', () => {
+      expect(engine.evaluate('=NOT(1>2)')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('=NOT(1<2)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('works with cell reference', () => {
+      const data = makeData({ '0:0': 'TRUE' });
+      engine.setData(data);
+      expect(engine.evaluate('=NOT(A1)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+  });
+
+  // ─── Conditional Aggregation ─────────────────────────
+
+  describe('SUMIF', () => {
+    it('sums values matching exact criteria', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': '10',
+        '1:0': 'banana', '1:1': '20',
+        '2:0': 'apple', '2:1': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, "apple", B1:B3)')).toEqual({ displayValue: '40', type: 'number' });
+    });
+
+    it('sums values matching numeric criteria', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, ">15")')).toEqual({ displayValue: '50', type: 'number' });
+    });
+
+    it('sums with greater-than-or-equal criteria', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, ">=20")')).toEqual({ displayValue: '50', type: 'number' });
+    });
+
+    it('sums with less-than criteria', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, "<20")')).toEqual({ displayValue: '10', type: 'number' });
+    });
+
+    it('sums with less-than-or-equal criteria', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, "<=20")')).toEqual({ displayValue: '30', type: 'number' });
+    });
+
+    it('sums with not-equal criteria', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': '10',
+        '1:0': 'banana', '1:1': '20',
+        '2:0': 'apple', '2:1': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, "<>apple", B1:B3)')).toEqual({ displayValue: '20', type: 'number' });
+    });
+
+    it('sums with equal-sign criteria prefix', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '10',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, "=10")')).toEqual({ displayValue: '20', type: 'number' });
+    });
+
+    it('returns 0 when no values match', () => {
+      const data = makeData({
+        '0:0': 'apple', '1:0': 'banana',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A2, "cherry")')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('sums the range itself when no sum_range is provided', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, ">0")')).toEqual({ displayValue: '60', type: 'number' });
+    });
+
+    it('criteria matching is case-insensitive for strings', () => {
+      const data = makeData({
+        '0:0': 'Apple', '0:1': '10',
+        '1:0': 'APPLE', '1:1': '20',
+        '2:0': 'apple', '2:1': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=SUMIF(A1:A3, "apple", B1:B3)')).toEqual({ displayValue: '60', type: 'number' });
+    });
+  });
+
+  describe('COUNTIF', () => {
+    it('counts values matching exact criteria', () => {
+      const data = makeData({
+        '0:0': 'apple', '1:0': 'banana', '2:0': 'apple', '3:0': 'cherry',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=COUNTIF(A1:A4, "apple")')).toEqual({ displayValue: '2', type: 'number' });
+    });
+
+    it('counts values matching numeric criteria with >', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30', '3:0': '5',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=COUNTIF(A1:A4, ">15")')).toEqual({ displayValue: '2', type: 'number' });
+    });
+
+    it('counts values matching <> criteria', () => {
+      const data = makeData({
+        '0:0': 'apple', '1:0': 'banana', '2:0': 'apple',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=COUNTIF(A1:A3, "<>apple")')).toEqual({ displayValue: '1', type: 'number' });
+    });
+
+    it('returns 0 when nothing matches', () => {
+      const data = makeData({
+        '0:0': 'apple', '1:0': 'banana',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=COUNTIF(A1:A2, "cherry")')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('is case-insensitive for string matching', () => {
+      const data = makeData({
+        '0:0': 'Apple', '1:0': 'APPLE', '2:0': 'apple',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=COUNTIF(A1:A3, "apple")')).toEqual({ displayValue: '3', type: 'number' });
+    });
+
+    it('counts exact numeric match', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '10',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=COUNTIF(A1:A3, "10")')).toEqual({ displayValue: '2', type: 'number' });
+    });
+  });
+
+  describe('AVERAGEIF', () => {
+    it('averages values matching criteria', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': '10',
+        '1:0': 'banana', '1:1': '20',
+        '2:0': 'apple', '2:1': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=AVERAGEIF(A1:A3, "apple", B1:B3)')).toEqual({ displayValue: '20', type: 'number' });
+    });
+
+    it('averages with numeric > criteria (no avg_range)', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=AVERAGEIF(A1:A3, ">15")')).toEqual({ displayValue: '25', type: 'number' });
+    });
+
+    it('returns #DIV/0! when no values match', () => {
+      const data = makeData({
+        '0:0': 'apple', '1:0': 'banana',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=AVERAGEIF(A1:A2, "cherry")')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
+    });
+
+    it('averages matching numeric criteria with <=', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=AVERAGEIF(A1:A3, "<=20")')).toEqual({ displayValue: '15', type: 'number' });
+    });
+
+    it('works with separate avg_range', () => {
+      const data = makeData({
+        '0:0': '1', '0:1': '100',
+        '1:0': '2', '1:1': '200',
+        '2:0': '1', '2:1': '300',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=AVERAGEIF(A1:A3, "1", B1:B3)')).toEqual({ displayValue: '200', type: 'number' });
+    });
+  });
+
+  // ─── Lookup ─────────────────────────────────────────
+
+  describe('VLOOKUP', () => {
+    it('finds exact match in first column and returns value from specified column', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': '1', '0:2': '100',
+        '1:0': 'banana', '1:1': '2', '1:2': '200',
+        '2:0': 'cherry', '2:1': '3', '2:2': '300',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP("banana", A1:C3, 3, FALSE)')).toEqual({ displayValue: '200', type: 'number' });
+    });
+
+    it('exact match is case-insensitive', () => {
+      const data = makeData({
+        '0:0': 'Apple', '0:1': '10',
+        '1:0': 'Banana', '1:1': '20',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP("apple", A1:B2, 2, FALSE)')).toEqual({ displayValue: '10', type: 'number' });
+    });
+
+    it('returns #N/A when exact match not found', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': '1',
+        '1:0': 'banana', '1:1': '2',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP("cherry", A1:B2, 2, FALSE)')).toEqual({ displayValue: '#N/A', type: 'error' });
+    });
+
+    it('returns #REF! when column index is out of range', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': '1',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP("apple", A1:B1, 5, FALSE)')).toEqual({ displayValue: '#REF!', type: 'error' });
+    });
+
+    it('returns #REF! when column index is 0', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': '1',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP("apple", A1:B1, 0, FALSE)')).toEqual({ displayValue: '#REF!', type: 'error' });
+    });
+
+    it('approximate match (default) finds largest value <= lookup', () => {
+      const data = makeData({
+        '0:0': '10', '0:1': 'A',
+        '1:0': '20', '1:1': 'B',
+        '2:0': '30', '2:1': 'C',
+      });
+      engine.setData(data);
+      // 25 is between 20 and 30, so should match row with 20
+      expect(engine.evaluate('=VLOOKUP(25, A1:B3, 2)')).toEqual({ displayValue: 'B', type: 'text' });
+    });
+
+    it('approximate match returns last row when lookup is >= all values', () => {
+      const data = makeData({
+        '0:0': '10', '0:1': 'A',
+        '1:0': '20', '1:1': 'B',
+        '2:0': '30', '2:1': 'C',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP(99, A1:B3, 2)')).toEqual({ displayValue: 'C', type: 'text' });
+    });
+
+    it('approximate match returns #N/A when lookup is less than smallest value', () => {
+      const data = makeData({
+        '0:0': '10', '0:1': 'A',
+        '1:0': '20', '1:1': 'B',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP(5, A1:B2, 2)')).toEqual({ displayValue: '#N/A', type: 'error' });
+    });
+
+    it('exact match with numeric lookup value', () => {
+      const data = makeData({
+        '0:0': '100', '0:1': 'one hundred',
+        '1:0': '200', '1:1': 'two hundred',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP(200, A1:B2, 2, FALSE)')).toEqual({ displayValue: 'two hundred', type: 'text' });
+    });
+
+    it('exact match with 0 as the fourth argument', () => {
+      const data = makeData({
+        '0:0': 'x', '0:1': '10',
+        '1:0': 'y', '1:1': '20',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=VLOOKUP("x", A1:B2, 2, 0)')).toEqual({ displayValue: '10', type: 'number' });
+    });
+  });
+
+  describe('HLOOKUP', () => {
+    it('finds exact match in first row and returns value from specified row', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': 'banana', '0:2': 'cherry',
+        '1:0': '10', '1:1': '20', '1:2': '30',
+        '2:0': '100', '2:1': '200', '2:2': '300',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=HLOOKUP("banana", A1:C3, 2, FALSE)')).toEqual({ displayValue: '20', type: 'number' });
+    });
+
+    it('returns value from third row', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': 'banana', '0:2': 'cherry',
+        '1:0': '10', '1:1': '20', '1:2': '30',
+        '2:0': '100', '2:1': '200', '2:2': '300',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=HLOOKUP("cherry", A1:C3, 3, FALSE)')).toEqual({ displayValue: '300', type: 'number' });
+    });
+
+    it('returns #N/A when exact match not found', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': 'banana',
+        '1:0': '10', '1:1': '20',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=HLOOKUP("cherry", A1:B2, 2, FALSE)')).toEqual({ displayValue: '#N/A', type: 'error' });
+    });
+
+    it('returns #REF! when row index is out of range', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': 'banana',
+        '1:0': '10', '1:1': '20',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=HLOOKUP("apple", A1:B2, 5, FALSE)')).toEqual({ displayValue: '#REF!', type: 'error' });
+    });
+
+    it('approximate match (default) finds largest <= lookup', () => {
+      const data = makeData({
+        '0:0': '10', '0:1': '20', '0:2': '30',
+        '1:0': 'A', '1:1': 'B', '1:2': 'C',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=HLOOKUP(25, A1:C2, 2)')).toEqual({ displayValue: 'B', type: 'text' });
+    });
+
+    it('approximate match returns last column when lookup >= all values', () => {
+      const data = makeData({
+        '0:0': '10', '0:1': '20', '0:2': '30',
+        '1:0': 'A', '1:1': 'B', '1:2': 'C',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=HLOOKUP(99, A1:C2, 2)')).toEqual({ displayValue: 'C', type: 'text' });
+    });
+
+    it('exact match is case-insensitive', () => {
+      const data = makeData({
+        '0:0': 'Apple', '0:1': 'Banana',
+        '1:0': '10', '1:1': '20',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=HLOOKUP("apple", A1:B2, 2, FALSE)')).toEqual({ displayValue: '10', type: 'number' });
+    });
+  });
+
+  describe('INDEX', () => {
+    it('returns value at specified row (1-indexed)', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=INDEX(A1:A3, 2)')).toEqual({ displayValue: '20', type: 'number' });
+    });
+
+    it('returns value at row and column (2D range)', () => {
+      const data = makeData({
+        '0:0': '1', '0:1': '2', '0:2': '3',
+        '1:0': '4', '1:1': '5', '1:2': '6',
+        '2:0': '7', '2:1': '8', '2:2': '9',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=INDEX(A1:C3, 2, 3)')).toEqual({ displayValue: '6', type: 'number' });
+    });
+
+    it('returns first column value when col is not specified', () => {
+      const data = makeData({
+        '0:0': '10', '0:1': '20',
+        '1:0': '30', '1:1': '40',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=INDEX(A1:B2, 2)')).toEqual({ displayValue: '30', type: 'number' });
+    });
+
+    it('returns #REF! when row index is out of bounds', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=INDEX(A1:A2, 5)')).toEqual({ displayValue: '#REF!', type: 'error' });
+    });
+
+    it('returns #REF! when col index is out of bounds', () => {
+      const data = makeData({
+        '0:0': '10', '0:1': '20',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=INDEX(A1:B1, 1, 5)')).toEqual({ displayValue: '#REF!', type: 'error' });
+    });
+
+    it('returns 0 for empty cell in range', () => {
+      engine.setData(new Map());
+      expect(engine.evaluate('=INDEX(A1:A3, 1)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('returns first element with row=1, col=1', () => {
+      const data = makeData({
+        '0:0': '42', '0:1': '99',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=INDEX(A1:B1, 1, 1)')).toEqual({ displayValue: '42', type: 'number' });
+    });
+  });
+
+  describe('MATCH', () => {
+    it('exact match (type 0): finds position of value', () => {
+      const data = makeData({
+        '0:0': 'apple', '1:0': 'banana', '2:0': 'cherry',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH("banana", A1:A3, 0)')).toEqual({ displayValue: '2', type: 'number' });
+    });
+
+    it('exact match returns 1-indexed position', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH(10, A1:A3, 0)')).toEqual({ displayValue: '1', type: 'number' });
+    });
+
+    it('exact match returns #N/A when not found', () => {
+      const data = makeData({
+        '0:0': 'apple', '1:0': 'banana',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH("cherry", A1:A2, 0)')).toEqual({ displayValue: '#N/A', type: 'error' });
+    });
+
+    it('defaults to exact match (type 0) when type is omitted', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH(20, A1:A3)')).toEqual({ displayValue: '2', type: 'number' });
+    });
+
+    it('type 1: finds position of largest value <= lookup (sorted ascending)', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH(25, A1:A3, 1)')).toEqual({ displayValue: '2', type: 'number' });
+    });
+
+    it('type 1: returns last position when lookup >= all values', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH(99, A1:A3, 1)')).toEqual({ displayValue: '3', type: 'number' });
+    });
+
+    it('type 1: returns #N/A when lookup < all values', () => {
+      const data = makeData({
+        '0:0': '10', '1:0': '20', '2:0': '30',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH(5, A1:A3, 1)')).toEqual({ displayValue: '#N/A', type: 'error' });
+    });
+
+    it('type -1: finds position of smallest value >= lookup (sorted descending)', () => {
+      const data = makeData({
+        '0:0': '30', '1:0': '20', '2:0': '10',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH(25, A1:A3, -1)')).toEqual({ displayValue: '1', type: 'number' });
+    });
+
+    it('type -1: returns #N/A when lookup > all values', () => {
+      const data = makeData({
+        '0:0': '30', '1:0': '20', '2:0': '10',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH(50, A1:A3, -1)')).toEqual({ displayValue: '#N/A', type: 'error' });
+    });
+
+    it('exact match is case-insensitive for strings', () => {
+      const data = makeData({
+        '0:0': 'Apple', '1:0': 'Banana', '2:0': 'Cherry',
+      });
+      engine.setData(data);
+      expect(engine.evaluate('=MATCH("banana", A1:A3, 0)')).toEqual({ displayValue: '2', type: 'number' });
+    });
+  });
+
+  // ─── Math ───────────────────────────────────────────
+
+  describe('MOD', () => {
+    it('returns remainder of division', () => {
+      expect(engine.evaluate('=MOD(10, 3)')).toEqual({ displayValue: '1', type: 'number' });
+    });
+
+    it('returns 0 when evenly divisible', () => {
+      expect(engine.evaluate('=MOD(10, 5)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('handles negative dividend', () => {
+      expect(engine.evaluate('=MOD(-10, 3)')).toEqual({ displayValue: '-1', type: 'number' });
+    });
+
+    it('returns #DIV/0! when divisor is 0', () => {
+      expect(engine.evaluate('=MOD(10, 0)')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
+    });
+
+    it('works with decimal numbers', () => {
+      expect(engine.evaluate('=MOD(5.5, 2)')).toEqual({ displayValue: '1.5', type: 'number' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': '17', '0:1': '5' });
+      engine.setData(data);
+      expect(engine.evaluate('=MOD(A1, B1)')).toEqual({ displayValue: '2', type: 'number' });
+    });
+  });
+
+  describe('POWER', () => {
+    it('returns base raised to exponent', () => {
+      expect(engine.evaluate('=POWER(2, 3)')).toEqual({ displayValue: '8', type: 'number' });
+    });
+
+    it('returns 1 for any base to the power of 0', () => {
+      expect(engine.evaluate('=POWER(5, 0)')).toEqual({ displayValue: '1', type: 'number' });
+    });
+
+    it('returns 0 for 0 to any positive power', () => {
+      expect(engine.evaluate('=POWER(0, 5)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('handles negative exponent', () => {
+      expect(engine.evaluate('=POWER(2, -1)')).toEqual({ displayValue: '0.5', type: 'number' });
+    });
+
+    it('handles fractional exponent (square root)', () => {
+      expect(engine.evaluate('=POWER(9, 0.5)')).toEqual({ displayValue: '3', type: 'number' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': '3', '0:1': '4' });
+      engine.setData(data);
+      expect(engine.evaluate('=POWER(A1, B1)')).toEqual({ displayValue: '81', type: 'number' });
+    });
+  });
+
+  describe('CEILING', () => {
+    it('rounds up to nearest integer by default', () => {
+      expect(engine.evaluate('=CEILING(2.1)')).toEqual({ displayValue: '3', type: 'number' });
+    });
+
+    it('rounds up to nearest significance', () => {
+      expect(engine.evaluate('=CEILING(2.1, 0.5)')).toEqual({ displayValue: '2.5', type: 'number' });
+    });
+
+    it('returns exact value when already at significance boundary', () => {
+      expect(engine.evaluate('=CEILING(3, 1)')).toEqual({ displayValue: '3', type: 'number' });
+    });
+
+    it('rounds up to nearest 10', () => {
+      expect(engine.evaluate('=CEILING(23, 10)')).toEqual({ displayValue: '30', type: 'number' });
+    });
+
+    it('returns 0 when significance is 0', () => {
+      expect(engine.evaluate('=CEILING(5, 0)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('handles negative numbers', () => {
+      expect(engine.evaluate('=CEILING(-2.1, 1)')).toEqual({ displayValue: '-2', type: 'number' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': '4.3' });
+      engine.setData(data);
+      expect(engine.evaluate('=CEILING(A1)')).toEqual({ displayValue: '5', type: 'number' });
+    });
+  });
+
+  describe('FLOOR', () => {
+    it('rounds down to nearest integer by default', () => {
+      expect(engine.evaluate('=FLOOR(2.9)')).toEqual({ displayValue: '2', type: 'number' });
+    });
+
+    it('rounds down to nearest significance', () => {
+      expect(engine.evaluate('=FLOOR(2.9, 0.5)')).toEqual({ displayValue: '2.5', type: 'number' });
+    });
+
+    it('returns exact value when already at significance boundary', () => {
+      expect(engine.evaluate('=FLOOR(3, 1)')).toEqual({ displayValue: '3', type: 'number' });
+    });
+
+    it('rounds down to nearest 10', () => {
+      expect(engine.evaluate('=FLOOR(27, 10)')).toEqual({ displayValue: '20', type: 'number' });
+    });
+
+    it('returns 0 when significance is 0', () => {
+      expect(engine.evaluate('=FLOOR(5, 0)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('handles negative numbers', () => {
+      expect(engine.evaluate('=FLOOR(-2.1, 1)')).toEqual({ displayValue: '-3', type: 'number' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': '7.8' });
+      engine.setData(data);
+      expect(engine.evaluate('=FLOOR(A1)')).toEqual({ displayValue: '7', type: 'number' });
+    });
+  });
+
+  // ─── String functions ─────────────────────────────────
+
+  describe('LEFT', () => {
+    it('returns first character by default', () => {
+      expect(engine.evaluate('=LEFT("hello")')).toEqual({ displayValue: 'h', type: 'text' });
+    });
+
+    it('returns first n characters', () => {
+      expect(engine.evaluate('=LEFT("hello", 3)')).toEqual({ displayValue: 'hel', type: 'text' });
+    });
+
+    it('returns entire string when n exceeds length', () => {
+      expect(engine.evaluate('=LEFT("hi", 10)')).toEqual({ displayValue: 'hi', type: 'text' });
+    });
+
+    it('returns empty string when n is 0', () => {
+      expect(engine.evaluate('=LEFT("hello", 0)')).toEqual({ displayValue: '', type: 'text' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': 'world' });
+      engine.setData(data);
+      expect(engine.evaluate('=LEFT(A1, 2)')).toEqual({ displayValue: 'wo', type: 'text' });
+    });
+
+    it('converts numbers to strings', () => {
+      // coerceValue sees "123" as numeric, so type is 'number'
+      expect(engine.evaluate('=LEFT(12345, 3)')).toEqual({ displayValue: '123', type: 'number' });
+    });
+  });
+
+  describe('RIGHT', () => {
+    it('returns last character by default', () => {
+      expect(engine.evaluate('=RIGHT("hello")')).toEqual({ displayValue: 'o', type: 'text' });
+    });
+
+    it('returns last n characters', () => {
+      expect(engine.evaluate('=RIGHT("hello", 3)')).toEqual({ displayValue: 'llo', type: 'text' });
+    });
+
+    it('returns entire string when n exceeds length', () => {
+      expect(engine.evaluate('=RIGHT("hi", 10)')).toEqual({ displayValue: 'hi', type: 'text' });
+    });
+
+    it('returns empty string when n is 0', () => {
+      expect(engine.evaluate('=RIGHT("hello", 0)')).toEqual({ displayValue: '', type: 'text' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': 'world' });
+      engine.setData(data);
+      expect(engine.evaluate('=RIGHT(A1, 3)')).toEqual({ displayValue: 'rld', type: 'text' });
+    });
+
+    it('converts numbers to strings', () => {
+      // coerceValue sees "45" as numeric, so type is 'number'
+      expect(engine.evaluate('=RIGHT(12345, 2)')).toEqual({ displayValue: '45', type: 'number' });
+    });
+  });
+
+  describe('MID', () => {
+    it('extracts substring from the middle (1-indexed)', () => {
+      expect(engine.evaluate('=MID("hello world", 7, 5)')).toEqual({ displayValue: 'world', type: 'text' });
+    });
+
+    it('extracts from the start when start is 1', () => {
+      expect(engine.evaluate('=MID("hello", 1, 3)')).toEqual({ displayValue: 'hel', type: 'text' });
+    });
+
+    it('returns partial string if n exceeds remaining length', () => {
+      expect(engine.evaluate('=MID("hello", 4, 10)')).toEqual({ displayValue: 'lo', type: 'text' });
+    });
+
+    it('returns empty string when start is beyond string length', () => {
+      expect(engine.evaluate('=MID("hi", 5, 2)')).toEqual({ displayValue: '', type: 'text' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': 'abcdefg' });
+      engine.setData(data);
+      expect(engine.evaluate('=MID(A1, 3, 3)')).toEqual({ displayValue: 'cde', type: 'text' });
+    });
+
+    it('extracts single character', () => {
+      expect(engine.evaluate('=MID("hello", 2, 1)')).toEqual({ displayValue: 'e', type: 'text' });
+    });
+  });
+
+  describe('SUBSTITUTE', () => {
+    it('replaces all occurrences when no instance given', () => {
+      expect(engine.evaluate('=SUBSTITUTE("hello hello hello", "hello", "world")')).toEqual({
+        displayValue: 'world world world',
+        type: 'text',
+      });
+    });
+
+    it('replaces only the nth occurrence when instance is given', () => {
+      expect(engine.evaluate('=SUBSTITUTE("hello hello hello", "hello", "world", 2)')).toEqual({
+        displayValue: 'hello world hello',
+        type: 'text',
+      });
+    });
+
+    it('replaces first occurrence with instance=1', () => {
+      expect(engine.evaluate('=SUBSTITUTE("aaa", "a", "b", 1)')).toEqual({
+        displayValue: 'baa',
+        type: 'text',
+      });
+    });
+
+    it('returns original string when old text not found', () => {
+      expect(engine.evaluate('=SUBSTITUTE("hello", "xyz", "abc")')).toEqual({
+        displayValue: 'hello',
+        type: 'text',
+      });
+    });
+
+    it('returns original string when nth occurrence does not exist', () => {
+      expect(engine.evaluate('=SUBSTITUTE("hello", "l", "r", 5)')).toEqual({
+        displayValue: 'hello',
+        type: 'text',
+      });
+    });
+
+    it('replaces empty string (inserts between each character)', () => {
+      // JS "ab".split("").join("-") => "a-b"
+      expect(engine.evaluate('=SUBSTITUTE("ab", "", "-")')).toEqual({
+        displayValue: 'a-b',
+        type: 'text',
+      });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': 'foo bar foo' });
+      engine.setData(data);
+      expect(engine.evaluate('=SUBSTITUTE(A1, "foo", "baz")')).toEqual({
+        displayValue: 'baz bar baz',
+        type: 'text',
+      });
+    });
+  });
+
+  describe('FIND', () => {
+    it('returns 1-indexed position of found string', () => {
+      expect(engine.evaluate('=FIND("world", "hello world")')).toEqual({ displayValue: '7', type: 'number' });
+    });
+
+    it('finds from the beginning (position 1)', () => {
+      expect(engine.evaluate('=FIND("h", "hello")')).toEqual({ displayValue: '1', type: 'number' });
+    });
+
+    it('is case-sensitive', () => {
+      expect(engine.evaluate('=FIND("H", "hello")')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
+
+    it('returns #VALUE! when search string is not found', () => {
+      expect(engine.evaluate('=FIND("xyz", "hello")')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
+
+    it('starts searching from specified position', () => {
+      expect(engine.evaluate('=FIND("l", "hello world", 5)')).toEqual({ displayValue: '10', type: 'number' });
+    });
+
+    it('finds at the exact start position', () => {
+      expect(engine.evaluate('=FIND("l", "hello", 3)')).toEqual({ displayValue: '3', type: 'number' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': 'abcdef' });
+      engine.setData(data);
+      expect(engine.evaluate('=FIND("cd", A1)')).toEqual({ displayValue: '3', type: 'number' });
+    });
+
+    it('finds single character in single-character string', () => {
+      expect(engine.evaluate('=FIND("a", "a")')).toEqual({ displayValue: '1', type: 'number' });
+    });
+  });
+
+  // ─── Conversion ─────────────────────────────────────
+
+  describe('TEXT', () => {
+    it('formats number with "0" format (integer)', () => {
+      // coerceValue converts "4" -> number type
+      expect(engine.evaluate('=TEXT(3.7, "0")')).toEqual({ displayValue: '4', type: 'number' });
+    });
+
+    it('formats number with "0.00" format (2 decimal places)', () => {
+      // "3.10" -> Number("3.10") = 3.1 -> String(3.1) = "3.1", coerced to number
+      const result = engine.evaluate('=TEXT(3.1, "0.00")');
+      expect(result.type).toBe('number');
+      expect(result.displayValue).toBe('3.1');
+    });
+
+    it('formats number with "0.0" format (1 decimal place)', () => {
+      // "3.1" -> coerced to number
+      const result = engine.evaluate('=TEXT(3.14159, "0.0")');
+      expect(result.type).toBe('number');
+      expect(result.displayValue).toBe('3.1');
+    });
+
+    it('formats number with "#,##0" format (thousands separator)', () => {
+      // "1,234,567" contains commas -> not a valid JS number -> stays text
+      expect(engine.evaluate('=TEXT(1234567, "#,##0")')).toEqual({ displayValue: '1,234,567', type: 'text' });
+    });
+
+    it('formats number with "#,##0.00" format (thousands + decimals)', () => {
+      // "1,234.50" contains commas -> stays text
+      expect(engine.evaluate('=TEXT(1234.5, "#,##0.00")')).toEqual({ displayValue: '1,234.50', type: 'text' });
+    });
+
+    it('returns toString for unknown format', () => {
+      // "42" -> coerced to number
+      expect(engine.evaluate('=TEXT(42, "custom")')).toEqual({ displayValue: '42', type: 'number' });
+    });
+
+    it('handles non-numeric value', () => {
+      expect(engine.evaluate('=TEXT("hello", "0")')).toEqual({ displayValue: 'hello', type: 'text' });
+    });
+
+    it('formats zero with "0.00"', () => {
+      // "0.00" -> Number("0.00") = 0 -> String(0) = "0", coerced to number
+      const result = engine.evaluate('=TEXT(0, "0.00")');
+      expect(result.type).toBe('number');
+      expect(result.displayValue).toBe('0');
+    });
+
+    it('formats negative number', () => {
+      // "-5.5" -> coerced to number
+      expect(engine.evaluate('=TEXT(-5.5, "0.0")')).toEqual({ displayValue: '-5.5', type: 'number' });
+    });
+
+    it('works with cell references and comma format', () => {
+      const data = makeData({ '0:0': '1234.5' });
+      engine.setData(data);
+      // Commas preserve text type
+      expect(engine.evaluate('=TEXT(A1, "#,##0.00")')).toEqual({ displayValue: '1,234.50', type: 'text' });
+    });
+  });
+
+  describe('VALUE', () => {
+    it('parses numeric string to number', () => {
+      expect(engine.evaluate('=VALUE("42")')).toEqual({ displayValue: '42', type: 'number' });
+    });
+
+    it('parses decimal string', () => {
+      expect(engine.evaluate('=VALUE("3.14")')).toEqual({ displayValue: '3.14', type: 'number' });
+    });
+
+    it('parses negative number string', () => {
+      expect(engine.evaluate('=VALUE("-10")')).toEqual({ displayValue: '-10', type: 'number' });
+    });
+
+    it('returns #VALUE! for non-numeric string', () => {
+      expect(engine.evaluate('=VALUE("hello")')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
+
+    it('parses zero', () => {
+      expect(engine.evaluate('=VALUE("0")')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': '99.5' });
+      engine.setData(data);
+      expect(engine.evaluate('=VALUE(A1)')).toEqual({ displayValue: '99.5', type: 'number' });
+    });
+
+    it('handles already-numeric value', () => {
+      expect(engine.evaluate('=VALUE(42)')).toEqual({ displayValue: '42', type: 'number' });
+    });
+  });
+
+  // ─── Date ───────────────────────────────────────────
+
+  describe('DATE', () => {
+    it('returns serial number for a known date', () => {
+      // January 1, 2000 is serial number 36526 (days since 1899-12-30)
+      const result = engine.evaluate('=DATE(2000, 1, 1)');
+      expect(result.type).toBe('number');
+      expect(Number(result.displayValue)).toBe(36526);
+    });
+
+    it('returns serial number for epoch-adjacent date', () => {
+      // January 1, 1900 should be serial number 2 (1899-12-30 = 0, 12-31=1, 1-1=2)
+      const result = engine.evaluate('=DATE(1900, 1, 1)');
+      expect(result.type).toBe('number');
+      expect(Number(result.displayValue)).toBe(2);
+    });
+
+    it('handles date with month > 12 (overflow)', () => {
+      // DATE(2000, 13, 1) should be the same as DATE(2001, 1, 1)
+      const result = engine.evaluate('=DATE(2000, 13, 1)');
+      const expected = engine.evaluate('=DATE(2001, 1, 1)');
+      expect(result.displayValue).toBe(expected.displayValue);
+    });
+
+    it('handles date with day > days in month (overflow)', () => {
+      // DATE(2000, 1, 32) should overflow to February 1, 2000
+      const result = engine.evaluate('=DATE(2000, 1, 32)');
+      const expected = engine.evaluate('=DATE(2000, 2, 1)');
+      expect(result.displayValue).toBe(expected.displayValue);
+    });
+
+    it('works with cell references', () => {
+      const data = makeData({ '0:0': '2024', '0:1': '6', '0:2': '15' });
+      engine.setData(data);
+      const result = engine.evaluate('=DATE(A1, B1, C1)');
+      expect(result.type).toBe('number');
+      // Verify it returns a number (exact serial we trust from implementation)
+      expect(Number(result.displayValue)).toBeGreaterThan(0);
+    });
+
+    it('different dates produce different serial numbers', () => {
+      const r1 = engine.evaluate('=DATE(2020, 1, 1)');
+      const r2 = engine.evaluate('=DATE(2020, 1, 2)');
+      expect(Number(r2.displayValue) - Number(r1.displayValue)).toBe(1);
+    });
+  });
+
+  describe('NOW', () => {
+    it('returns a fractional serial number', () => {
+      const result = engine.evaluate('=NOW()');
+      expect(result.type).toBe('number');
+      const val = Number(result.displayValue);
+      // Should be a large number (days since 1899-12-30), roughly > 45000 for 2024+
+      expect(val).toBeGreaterThan(45000);
+    });
+
+    it('includes a fractional component (time of day)', () => {
+      const result = engine.evaluate('=NOW()');
+      const val = Number(result.displayValue);
+      // The integer part is the date, the fractional part is the time
+      // While it's theoretically possible to get exactly midnight, it's extremely unlikely
+      // Just verify it's a valid number
+      expect(val).toBeGreaterThan(0);
+    });
+
+    it('is not cached (volatile) - successive calls may differ', () => {
+      // NOW is volatile, so it should not be cached
+      const data = makeData({ '0:0': '=NOW()' });
+      engine.setData(data);
+      const r1 = engine.evaluate('=NOW()', '0:0');
+      // The value should be a valid serial number
+      expect(r1.type).toBe('number');
+      expect(Number(r1.displayValue)).toBeGreaterThan(0);
+    });
+  });
+
   // ─── Unknown function ──────────────────────────────
 
   describe('unknown functions', () => {

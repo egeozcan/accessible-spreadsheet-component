@@ -2,6 +2,8 @@ import {
   type GridData,
   type SelectionRange,
   cellKey,
+  colToLetter,
+  letterToCol,
 } from '../types.js';
 
 /**
@@ -9,11 +11,17 @@ import {
  * using the system clipboard API with TSV and HTML table formats.
  */
 export class ClipboardManager {
+  /** Source range and data from the last internal copy/cut, used for reference adjustment on paste */
+  private _copySourceRange: SelectionRange | null = null;
+  private _copySourceData: GridData | null = null;
+
   /**
    * Copy the selected range to the clipboard as both HTML table and TSV.
    * Falls back to text-only if ClipboardItem API is unavailable.
    */
   async copy(data: GridData, range: SelectionRange): Promise<void> {
+    this._copySourceRange = range;
+    this._copySourceData = data;
     const tsv = this.serializeRange(data, range);
     const htmlStr = this._serializeRangeAsHTML(data, range);
 
@@ -52,7 +60,8 @@ export class ClipboardManager {
 
   /**
    * Parse clipboard content and return the updates to apply.
-   * Tries HTML table format first, then falls back to TSV text.
+   * If data was copied internally, uses raw values with reference adjustment.
+   * Otherwise tries HTML table format first, then falls back to TSV text.
    * The target is the top-left cell where paste begins.
    */
   async paste(
@@ -61,6 +70,12 @@ export class ClipboardManager {
     maxRows: number,
     maxCols: number
   ): Promise<Array<{ id: string; value: string }> | null> {
+    // Try internal paste with formula reference adjustment first
+    if (this._copySourceRange && this._copySourceData) {
+      const internalResult = this._pasteInternal(targetRow, targetCol, maxRows, maxCols);
+      if (internalResult) return internalResult;
+    }
+
     // Try reading HTML from clipboard first
     try {
       const items = await navigator.clipboard.read();
@@ -87,6 +102,45 @@ export class ClipboardManager {
     }
 
     return this.parseTSV(text, targetRow, targetCol, maxRows, maxCols);
+  }
+
+  /**
+   * Paste using internally stored copy data with formula reference adjustment.
+   * Returns null if no internal data is available.
+   */
+  private _pasteInternal(
+    targetRow: number,
+    targetCol: number,
+    maxRows: number,
+    maxCols: number
+  ): Array<{ id: string; value: string }> | null {
+    const srcRange = this._copySourceRange;
+    const srcData = this._copySourceData;
+    if (!srcRange || !srcData) return null;
+
+    const rowOffset = targetRow - srcRange.start.row;
+    const colOffset = targetCol - srcRange.start.col;
+    const updates: Array<{ id: string; value: string }> = [];
+
+    for (let r = srcRange.start.row; r <= srcRange.end.row; r++) {
+      for (let c = srcRange.start.col; c <= srcRange.end.col; c++) {
+        const newRow = r + rowOffset;
+        const newCol = c + colOffset;
+        if (newRow >= maxRows || newCol >= maxCols) continue;
+
+        const cell = srcData.get(cellKey(r, c));
+        let value = cell?.rawValue ?? '';
+
+        // Adjust formula references
+        if (value.startsWith('=')) {
+          value = this.adjustFormulaReferences(value, rowOffset, colOffset);
+        }
+
+        updates.push({ id: cellKey(newRow, newCol), value });
+      }
+    }
+
+    return updates;
   }
 
   /**
@@ -243,6 +297,39 @@ export class ClipboardManager {
     return updates;
   }
 
+  // ─── Reference Adjustment ─────────────────────────
+
+  /**
+   * Adjust cell references in a formula by the given row/col offset.
+   * Absolute references ($A$1) are not adjusted.
+   * Mixed references ($A1, A$1) only adjust the non-absolute part.
+   */
+  adjustFormulaReferences(formula: string, rowOffset: number, colOffset: number): string {
+    if (!formula.startsWith('=')) return formula;
+
+    // Match cell references including optional $ markers
+    // Pattern: optional $ + column letters + optional $ + row digits
+    // Handles ranges like $A$1:$B$2 by matching each ref separately
+    const refPattern = /(\$?)([A-Z]+)(\$?)(\d+)/gi;
+
+    const adjusted = formula.replace(refPattern, (_match, colDollar: string, colLetters: string, rowDollar: string, rowDigits: string) => {
+      const col = letterToCol(colLetters.toUpperCase());
+      const row = parseInt(rowDigits, 10) - 1; // 1-indexed to 0-indexed
+
+      const newCol = colDollar === '$' ? col : col + colOffset;
+      const newRow = rowDollar === '$' ? row : row + rowOffset;
+
+      // Clamp to valid range (don't produce negative indices)
+      if (newCol < 0 || newRow < 0) {
+        return '#REF!';
+      }
+
+      return `${colDollar}${colToLetter(newCol)}${rowDollar}${newRow + 1}`;
+    });
+
+    return adjusted;
+  }
+
   // ─── Serialization ──────────────────────────────────
 
   private serializeRange(data: GridData, range: SelectionRange): string {
@@ -294,7 +381,8 @@ export class ClipboardManager {
     return str
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   // ─── Fallback ───────────────────────────────────────

@@ -174,14 +174,11 @@ export class Y11nSpreadsheet extends LitElement {
     this._redoStack = [];
     this._formulaEngine.setData(this._internalData);
 
-    // For now, still do a full recalculate. The diff infrastructure is
-    // in place for future targeted recalc support, and the formula
-    // caching from Part 2 provides the main performance win.
-    this._recalcAll();
-
-    // changedKeys are available for future targeted recalc:
-    // this._recalcAffected(changedKeys);
-    void changedKeys;
+    if (changedKeys.length > 0 && oldData.size > 0) {
+      this._recalcAffected(changedKeys);
+    } else {
+      this._recalcAll();
+    }
   }
 
   private _recalcAll(): void {
@@ -467,6 +464,61 @@ export class Y11nSpreadsheet extends LitElement {
     this._refMode = false;
   }
 
+  /**
+   * Cycle the cell reference at/before the cursor through reference modes:
+   * A1 → $A$1 → A$1 → $A1 → A1
+   */
+  private _cycleReferenceMode(): void {
+    const cursorPos = this._editor?.selectionStart ?? this._editValue.length;
+    const text = this._editValue;
+
+    // Find the reference at or just before the cursor
+    const refPattern = /(\$?)([A-Z]+)(\$?)(\d+)/gi;
+    let match: RegExpExecArray | null;
+    let bestMatch: RegExpExecArray | null = null;
+
+    while ((match = refPattern.exec(text)) !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      // The ref contains or is immediately before the cursor
+      if (start <= cursorPos && end >= cursorPos - 1) {
+        bestMatch = match;
+      }
+    }
+
+    if (!bestMatch) return;
+
+    const [full, colDollar, colLetters, rowDollar, rowDigits] = bestMatch;
+    const start = bestMatch.index;
+    const hasColDollar = colDollar === '$';
+    const hasRowDollar = rowDollar === '$';
+
+    let newRef: string;
+    if (!hasColDollar && !hasRowDollar) {
+      // A1 → $A$1
+      newRef = `$${colLetters}$${rowDigits}`;
+    } else if (hasColDollar && hasRowDollar) {
+      // $A$1 → A$1
+      newRef = `${colLetters}$${rowDigits}`;
+    } else if (!hasColDollar && hasRowDollar) {
+      // A$1 → $A1
+      newRef = `$${colLetters}${rowDigits}`;
+    } else {
+      // $A1 → A1
+      newRef = `${colLetters}${rowDigits}`;
+    }
+
+    this._editValue = text.substring(0, start) + newRef + text.substring(start + full.length);
+
+    // Adjust cursor position to stay at the end of the reference
+    const newCursorPos = start + newRef.length;
+    this.updateComplete.then(() => {
+      if (this._editor) {
+        this._editor.setSelectionRange(newCursorPos, newCursorPos);
+      }
+    });
+  }
+
   // ─── Focus Management ───────────────────────────────
 
   private _focusActiveCell(): void {
@@ -647,6 +699,13 @@ export class Y11nSpreadsheet extends LitElement {
         if (this._refMode || this._isRefPositionInFormula()) {
           e.preventDefault();
           this._handleRefArrow(e.key);
+        }
+        break;
+
+      case 'F4':
+        if (this._editValue.startsWith('=')) {
+          e.preventDefault();
+          this._cycleReferenceMode();
         }
         break;
     }
