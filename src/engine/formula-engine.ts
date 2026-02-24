@@ -170,12 +170,24 @@ export class FormulaEngine {
     this._functions.set(name.toUpperCase(), fn);
   }
 
-  /** Update the data reference for evaluation */
+  /** Update the data reference for evaluation (full reset of dep graph and cache) */
   setData(data: GridData): void {
     this._data = data;
     this._deps.clear();
     this._reverseDeps.clear();
     this._cache.clear();
+  }
+
+  /**
+   * Update the data reference while preserving the dependency graph for
+   * unchanged cells. Only clears deps and cache for the specified changed keys,
+   * allowing recalculateAffected() to use the existing graph for BFS traversal.
+   */
+  updateData(data: GridData, changedKeys: string[]): void {
+    this._data = data;
+    for (const key of changedKeys) {
+      this._clearDepsFor(key);
+    }
   }
 
   /**
@@ -768,7 +780,7 @@ export class FormulaEngine {
       }
     }
 
-    // String comparison (case-insensitive for = and <>, lexicographic for ordering)
+    // String comparison (case-sensitive for all operators)
     const ls = String(left ?? '');
     const rs = String(right ?? '');
     switch (op) {

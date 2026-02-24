@@ -160,7 +160,8 @@ export class ClipboardManager {
       const cells: string[] = [];
       const cellElements = tr.querySelectorAll('td, th');
       for (const cell of cellElements) {
-        cells.push((cell.textContent ?? '').trim());
+        const raw = (cell as Element).getAttribute('data-raw');
+        cells.push(raw ?? (cell.textContent ?? '').trim());
       }
       if (cells.length > 0) {
         rows.push(cells);
@@ -368,7 +369,11 @@ export class ClipboardManager {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const cell = data.get(cellKey(r, c));
         const value = cell?.displayValue ?? '';
-        cells.push(`<td>${this._escapeHTML(value)}</td>`);
+        const rawValue = cell?.rawValue ?? '';
+        const rawAttr = rawValue && rawValue !== value
+          ? ` data-raw="${this._escapeHTML(rawValue)}"`
+          : '';
+        cells.push(`<td${rawAttr}>${this._escapeHTML(value)}</td>`);
       }
       rows.push(`<tr>${cells.join('')}</tr>`);
     }

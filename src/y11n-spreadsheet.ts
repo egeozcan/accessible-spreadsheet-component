@@ -172,11 +172,14 @@ export class Y11nSpreadsheet extends LitElement {
     this._internalData = newData;
     this._undoStack = [];
     this._redoStack = [];
-    this._formulaEngine.setData(this._internalData);
 
     if (changedKeys.length > 0 && oldData.size > 0) {
+      // Incremental update: preserve dep graph for unchanged cells
+      this._formulaEngine.updateData(this._internalData, changedKeys);
       this._recalcAffected(changedKeys);
     } else {
+      // Full reset: first load or complete replacement
+      this._formulaEngine.setData(this._internalData);
       this._recalcAll();
     }
   }

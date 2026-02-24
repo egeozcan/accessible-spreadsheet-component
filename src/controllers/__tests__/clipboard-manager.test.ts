@@ -186,4 +186,64 @@ describe('ClipboardManager', () => {
       }
     });
   });
+
+  describe('adjustFormulaReferences', () => {
+    it('returns non-formula strings unchanged', () => {
+      expect(manager.adjustFormulaReferences('hello', 2, 3)).toBe('hello');
+      expect(manager.adjustFormulaReferences('123', 1, 1)).toBe('123');
+      expect(manager.adjustFormulaReferences('', 1, 1)).toBe('');
+    });
+
+    it('adjusts relative references by offset', () => {
+      // A1 (col=0, row=0) + rowOffset=2, colOffset=1 → B3 (col=1, row=2)
+      expect(manager.adjustFormulaReferences('=A1', 2, 1)).toBe('=B3');
+    });
+
+    it('does not adjust absolute column reference ($A1)', () => {
+      // $A1 with colOffset=3 → col stays A, row 1+2=3
+      expect(manager.adjustFormulaReferences('=$A1', 2, 3)).toBe('=$A3');
+    });
+
+    it('does not adjust absolute row reference (A$1)', () => {
+      // A$1 with rowOffset=5 → row stays 1, col A+2=C
+      expect(manager.adjustFormulaReferences('=A$1', 5, 2)).toBe('=C$1');
+    });
+
+    it('does not adjust fully absolute reference ($A$1)', () => {
+      expect(manager.adjustFormulaReferences('=$A$1', 3, 4)).toBe('=$A$1');
+    });
+
+    it('adjusts mixed reference $A1 - only row adjusts', () => {
+      // $A1: col locked at A, row 1+3=4
+      expect(manager.adjustFormulaReferences('=$A1', 3, 5)).toBe('=$A4');
+    });
+
+    it('adjusts mixed reference A$1 - only col adjusts', () => {
+      // A$1: row locked at 1, col A+2=C
+      expect(manager.adjustFormulaReferences('=A$1', 3, 2)).toBe('=C$1');
+    });
+
+    it('adjusts references in ranges', () => {
+      // SUM(A1:B2) with rowOffset=1, colOffset=1
+      // A1 → B2, B2 → C3
+      expect(manager.adjustFormulaReferences('=SUM(A1:B2)', 1, 1)).toBe('=SUM(B2:C3)');
+    });
+
+    it('produces #REF! when adjustment would go negative', () => {
+      // A1 (col=0, row=0) with colOffset=-1 → col would be -1
+      expect(manager.adjustFormulaReferences('=A1', 0, -1)).toBe('=#REF!');
+      // A1 with rowOffset=-1 → row would be -1
+      expect(manager.adjustFormulaReferences('=A1', -1, 0)).toBe('=#REF!');
+    });
+
+    it('handles multiple references in one formula', () => {
+      // A1+B2 with rowOffset=1, colOffset=1 → B2+C3
+      expect(manager.adjustFormulaReferences('=A1+B2', 1, 1)).toBe('=B2+C3');
+    });
+
+    it('handles zero offset (no change)', () => {
+      expect(manager.adjustFormulaReferences('=A1', 0, 0)).toBe('=A1');
+      expect(manager.adjustFormulaReferences('=SUM(A1:B2)', 0, 0)).toBe('=SUM(A1:B2)');
+    });
+  });
 });

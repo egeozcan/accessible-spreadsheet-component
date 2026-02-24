@@ -521,4 +521,79 @@ test.describe('Formula Engine', () => {
 
     await spreadsheet.waitForCellText(0, 0, '1,234,567');
   });
+
+  // ─── F4 Reference Cycling Tests ──────────────────────
+
+  test('F4 cycles reference from relative to absolute', async ({ spreadsheet }) => {
+    // Enter a formula with a relative reference
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('Enter');
+    await spreadsheet.typeInEditor('=A1');
+
+    // Press F4 to cycle: A1 → $A$1
+    await spreadsheet.editor.press('F4');
+
+    const value = await spreadsheet.editor.inputValue();
+    expect(value).toBe('=$A$1');
+  });
+
+  test('F4 cycles through all reference modes', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('Enter');
+    await spreadsheet.typeInEditor('=B2');
+
+    // Cycle: B2 → $B$2
+    await spreadsheet.editor.press('F4');
+    expect(await spreadsheet.editor.inputValue()).toBe('=$B$2');
+
+    // Cycle: $B$2 → B$2
+    await spreadsheet.editor.press('F4');
+    expect(await spreadsheet.editor.inputValue()).toBe('=B$2');
+
+    // Cycle: B$2 → $B2
+    await spreadsheet.editor.press('F4');
+    expect(await spreadsheet.editor.inputValue()).toBe('=$B2');
+
+    // Cycle: $B2 → B2 (back to relative)
+    await spreadsheet.editor.press('F4');
+    expect(await spreadsheet.editor.inputValue()).toBe('=B2');
+  });
+
+  // ─── HTML Table Parsing Tests ────────────────────────
+
+  test('parseHTMLTable extracts data from HTML table', async ({ spreadsheet }) => {
+    // Use page.evaluate to test parseHTMLTable (needs DOMParser, browser-only)
+    const result = await spreadsheet.page.evaluate(() => {
+      // Access the ClipboardManager through the component
+      const sheet = document.querySelector('y11n-spreadsheet') as any;
+      const cm = sheet._clipboardManager;
+      return cm.parseHTMLTable(
+        '<table><tr><td>Hello</td><td>World</td></tr><tr><td>1</td><td>2</td></tr></table>'
+      );
+    });
+
+    expect(result).toEqual([['Hello', 'World'], ['1', '2']]);
+  });
+
+  test('parseHTMLTable returns null for non-table HTML', async ({ spreadsheet }) => {
+    const result = await spreadsheet.page.evaluate(() => {
+      const sheet = document.querySelector('y11n-spreadsheet') as any;
+      const cm = sheet._clipboardManager;
+      return cm.parseHTMLTable('<div>No table here</div>');
+    });
+
+    expect(result).toBeNull();
+  });
+
+  test('parseHTMLTable uses data-raw attribute for formula round-tripping', async ({ spreadsheet }) => {
+    const result = await spreadsheet.page.evaluate(() => {
+      const sheet = document.querySelector('y11n-spreadsheet') as any;
+      const cm = sheet._clipboardManager;
+      return cm.parseHTMLTable(
+        '<table><tr><td data-raw="=SUM(A1:A3)">15</td><td>plain</td></tr></table>'
+      );
+    });
+
+    expect(result).toEqual([['=SUM(A1:A3)', 'plain']]);
+  });
 });
