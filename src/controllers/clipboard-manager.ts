@@ -36,7 +36,18 @@ export class ClipboardManager {
    */
   async copy(data: GridData, range: SelectionRange): Promise<void> {
     this._copySourceRange = range;
-    this._copySourceData = data;
+    // Snapshot only the cells in the range so later mutations (e.g. cut) don't invalidate the data
+    const snapshot: GridData = new Map();
+    for (let r = range.start.row; r <= range.end.row; r++) {
+      for (let c = range.start.col; c <= range.end.col; c++) {
+        const key = cellKey(r, c);
+        const cell = data.get(key);
+        if (cell) {
+          snapshot.set(key, { ...cell });
+        }
+      }
+    }
+    this._copySourceData = snapshot;
     const tsv = this.serializeRange(data, range);
     const htmlStr = this._serializeRangeAsHTML(data, range);
 
