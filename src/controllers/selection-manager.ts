@@ -151,7 +151,7 @@ export class SelectionManager implements ReactiveController {
 
   // ─── Helpers ────────────────────────────────────────
 
-  private clamp(coord: CellCoord): CellCoord {
+  clamp(coord: CellCoord): CellCoord {
     return {
       row: Math.max(0, Math.min(coord.row, this._maxRows - 1)),
       col: Math.max(0, Math.min(coord.col, this._maxCols - 1)),

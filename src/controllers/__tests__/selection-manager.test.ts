@@ -258,6 +258,23 @@ describe('SelectionManager', () => {
     });
   });
 
+  describe('clamp (public)', () => {
+    it('clamps negative coordinates to zero', () => {
+      const manager = new SelectionManager(createMockHost(), 10, 5);
+      expect(manager.clamp({ row: -1, col: -3 })).toEqual({ row: 0, col: 0 });
+    });
+
+    it('clamps coordinates exceeding max bounds', () => {
+      const manager = new SelectionManager(createMockHost(), 10, 5);
+      expect(manager.clamp({ row: 15, col: 8 })).toEqual({ row: 9, col: 4 });
+    });
+
+    it('returns coordinates within bounds unchanged', () => {
+      const manager = new SelectionManager(createMockHost(), 10, 5);
+      expect(manager.clamp({ row: 5, col: 3 })).toEqual({ row: 5, col: 3 });
+    });
+  });
+
   describe('hostDisconnected', () => {
     it('stops dragging', () => {
       manager.startSelection(0, 0);

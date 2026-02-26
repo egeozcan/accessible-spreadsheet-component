@@ -678,8 +678,9 @@ export class Y11nSpreadsheet extends LitElement {
     if (!this._refMode) {
       // Enter reference mode - start from the editing cell and move
       const { row, col } = this._selection.activeCell;
-      this._refCursorRow = Math.max(0, Math.min(row + dRow, this.rows - 1));
-      this._refCursorCol = Math.max(0, Math.min(col + dCol, this.cols - 1));
+      const clamped = this._selection.clamp({ row: row + dRow, col: col + dCol });
+      this._refCursorRow = clamped.row;
+      this._refCursorCol = clamped.col;
       this._refMode = true;
       this._modeAnnouncement = `Reference selection mode. Selecting ${coordToRef({ row: this._refCursorRow, col: this._refCursorCol })}`;
 
@@ -693,8 +694,9 @@ export class Y11nSpreadsheet extends LitElement {
       this._refInsertEnd = cursorPos + ref.length;
     } else {
       // Already in reference mode - move the reference cursor
-      this._refCursorRow = Math.max(0, Math.min(this._refCursorRow + dRow, this.rows - 1));
-      this._refCursorCol = Math.max(0, Math.min(this._refCursorCol + dCol, this.cols - 1));
+      const moved = this._selection.clamp({ row: this._refCursorRow + dRow, col: this._refCursorCol + dCol });
+      this._refCursorRow = moved.row;
+      this._refCursorCol = moved.col;
 
       const ref = coordToRef({ row: this._refCursorRow, col: this._refCursorCol });
       this._modeAnnouncement = `Selecting ${ref}`;
