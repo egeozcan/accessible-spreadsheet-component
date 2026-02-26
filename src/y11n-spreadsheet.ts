@@ -1631,7 +1631,7 @@ export class Y11nSpreadsheet extends LitElement {
 
     return html`
       <div class="ls-header-row" role="row" aria-rowindex="1">
-        <div class="ls-corner-header" role="columnheader"></div>
+        <div class="ls-corner-header" role="columnheader" aria-label="Select all"></div>
         ${startCol > 0
           ? html`<div style="grid-column: span ${startCol};"></div>`
           : nothing}
@@ -1641,6 +1641,7 @@ export class Y11nSpreadsheet extends LitElement {
               class="ls-col-header"
               role="columnheader"
               aria-colindex="${h.index + 2}"
+              aria-label="Column ${h.letter}"
             >
               ${h.letter}
             </div>
@@ -1702,7 +1703,7 @@ export class Y11nSpreadsheet extends LitElement {
 
     return html`
       <div class="ls-row" role="row" aria-rowindex="${row + 2}">
-        <div class="ls-row-header" role="rowheader">${row + 1}</div>
+        <div class="ls-row-header" role="rowheader" aria-label="Row ${row + 1}">${row + 1}</div>
         ${startCol > 0
           ? html`<div style="grid-column: span ${startCol};"></div>`
           : nothing}

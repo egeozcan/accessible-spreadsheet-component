@@ -88,4 +88,19 @@ test.describe('Rendering & Accessibility', () => {
   test('editor input has aria-label', async ({ spreadsheet }) => {
     await expect(spreadsheet.editor).toHaveAttribute('aria-label', 'Cell editor');
   });
+
+  test('column headers have aria-label', async ({ spreadsheet }) => {
+    const firstHeader = spreadsheet.shadow('.ls-col-header').first();
+    await expect(firstHeader).toHaveAttribute('aria-label', 'Column A');
+  });
+
+  test('row headers have aria-label', async ({ spreadsheet }) => {
+    const firstRow = spreadsheet.shadow('.ls-row-header').first();
+    await expect(firstRow).toHaveAttribute('aria-label', 'Row 1');
+  });
+
+  test('corner header has aria-label', async ({ spreadsheet }) => {
+    const corner = spreadsheet.shadow('.ls-corner-header');
+    await expect(corner).toHaveAttribute('aria-label', 'Select all');
+  });
 });
