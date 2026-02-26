@@ -32,19 +32,26 @@ interface ParserState {
 }
 
 /**
- * FormulaEngine - A recursive descent parser for Excel-like formula syntax.
+ * FormulaEngine -- Recursive descent parser and evaluator for Excel-like formulas.
  *
- * Supports:
- * - Cell references: A1, B2, etc.
- * - Range references: A1:B5
- * - Functions: SUM(A1:A5), AVERAGE(...), etc.
- * - Arithmetic: +, -, *, /
- * - String literals: "hello"
- * - Numeric literals: 123, 3.14
- * - Boolean literals: TRUE, FALSE
- * - Comparison: =, <>, <, >, <=, >=
- * - String concatenation: &
+ * Supports cell references (A1, $B$3), range references (A1:B5),
+ * functions (SUM, IF, VLOOKUP, ...), arithmetic (+, -, *, /),
+ * comparison (=, <>, <, >, <=, >=), string concatenation (&),
+ * and boolean/string/numeric literals.
+ *
+ * Grammar:
+ *   expression     = comparison
+ *   comparison     = concat (("=" | "<>" | "<" | ">" | "<=" | ">=") concat)*
+ *   concat         = additive ("&" additive)*
+ *   additive       = multiplicative (("+" | "-") multiplicative)*
+ *   multiplicative = unary (("*" | "/") unary)*
+ *   unary          = ("-" unary) | primary
+ *   primary        = NUMBER | STRING | BOOLEAN | REF | RANGE | FUNC "(" args ")" | "(" expression ")"
+ *
+ * Dependency tracking: forward/reverse dep graph enables targeted BFS recalculation.
+ * Circular references are detected at evaluation time via a re-entrancy set.
  */
+
 /** Maximum nesting depth for formula evaluation to prevent stack overflow from deeply nested formulas */
 const MAX_EVAL_DEPTH = 64;
 
@@ -165,7 +172,13 @@ export class FormulaEngine {
     this.registerBuiltins();
   }
 
-  /** Register a user-defined function */
+  /**
+   * Register a user-defined formula function.
+   * The name is normalized to uppercase for case-insensitive lookup.
+   *
+   * @param name - Function name (e.g. "MYFUNC"); stored as uppercase
+   * @param fn - The function implementation
+   */
   registerFunction(name: string, fn: FormulaFunction): void {
     this._functions.set(name.toUpperCase(), fn);
   }
@@ -191,10 +204,13 @@ export class FormulaEngine {
   }
 
   /**
-   * Evaluate a raw value. If it starts with '=', parse and execute the formula.
-   * Otherwise, return the value as-is (possibly coerced).
+   * Evaluate a raw value. If it starts with `=`, parse and execute the formula.
+   * Otherwise, return the value as-is (possibly coerced to number/boolean).
    *
-   * @param forCellKey - If provided, tracks formula dependencies for this cell key.
+   * @param rawValue - The raw cell value (formula or literal)
+   * @param forCellKey - If provided, registers dependencies for this cell key
+   *   (side-effect: updates the forward/reverse dep graph and result cache)
+   * @returns The display value and resolved type
    */
   evaluate(
     rawValue: string,
@@ -262,7 +278,9 @@ export class FormulaEngine {
 
   /**
    * Re-evaluate all formula cells in the grid.
-   * Rebuilds the dependency graph. Returns a set of cell keys that changed.
+   * Clears and rebuilds the entire dependency graph and result cache.
+   *
+   * @returns Set of cell keys whose display value or type changed
    */
   recalculate(): Set<string> {
     this._deps.clear();
@@ -287,7 +305,11 @@ export class FormulaEngine {
 
   /**
    * Recalculate only formulas affected by the given changed cell keys.
-   * Uses the dependency graph for targeted recalculation (BFS order).
+   * Uses BFS traversal of the reverse dependency graph for targeted recalculation.
+   * Falls back to full `recalculate()` if the dep graph is empty.
+   *
+   * @param changedKeys - Cell keys whose raw values changed
+   * @returns Set of cell keys whose display value or type changed
    */
   recalculateAffected(changedKeys: string[]): Set<string> {
     // If the dependency graph is empty but data exists, fall back to a full

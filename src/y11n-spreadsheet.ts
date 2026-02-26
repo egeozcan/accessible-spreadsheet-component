@@ -50,19 +50,36 @@ interface CommandBatch {
 }
 
 /**
- * <y11n-spreadsheet> - An accessible spreadsheet web component.
+ * `<y11n-spreadsheet>` -- An accessible spreadsheet web component.
  *
- * Implements the WAI-ARIA Grid pattern with roving tabindex,
- * keyboard navigation, formula support, and clipboard operations.
+ * Implements the WAI-ARIA Grid pattern with:
+ * - Roving tabindex and full keyboard navigation (arrows, Tab, Home/End, Ctrl+arrows)
+ * - Recursive-descent formula engine (`=SUM(A1:B5)`, `=IF(...)`, etc.)
+ * - Copy/cut/paste via the Clipboard API (HTML table + TSV formats)
+ * - Undo/redo command history (up to 100 entries)
+ * - Virtual rendering for large grids (only visible cells + buffer are in the DOM)
+ * - Cell formatting (bold, italic, colors, number formats, etc.)
+ *
+ * @fires cell-change - When a single cell value is edited
+ * @fires selection-change - When the selected range changes
+ * @fires data-change - On bulk updates (paste, cut, clear, undo/redo)
+ * @fires format-change - When cell formatting is modified
+ *
+ * @csspart editor - The inline cell editor input element
  */
 @customElement('y11n-spreadsheet')
 export class Y11nSpreadsheet extends LitElement {
   // ─── Public Properties ──────────────────────────────
 
+  /** Number of rows in the grid. Default: 100 */
   @property({ type: Number }) rows = 100;
+  /** Number of columns in the grid. Default: 26 */
   @property({ type: Number }) cols = 26;
+  /** The sparse grid data map. Set externally or via `setData()`. */
   @property({ attribute: false }) data: GridData = new Map();
+  /** When true, all editing is disabled. Default: false */
   @property({ type: Boolean, attribute: 'read-only', reflect: true }) readOnly = false;
+  /** Record of custom formula functions to register, keyed by name. */
   @property({ attribute: false }) functions: Record<string, FormulaFunction> = {};
 
   // ─── Internal State ─────────────────────────────────
@@ -142,19 +159,33 @@ export class Y11nSpreadsheet extends LitElement {
 
   // ─── Public API Methods ─────────────────────────────
 
-  /** Returns the current state of the grid data */
+  /**
+   * Returns a shallow copy of the current grid data.
+   *
+   * @returns A new Map containing all cell data
+   */
   getData(): GridData {
     return new Map(this._internalData);
   }
 
-  /** Hard reset of the grid data */
+  /**
+   * Replaces the entire grid data and resets undo/redo history.
+   *
+   * @param data - The new sparse grid data map
+   */
   setData(data: GridData): void {
     this.data = data;
     this._syncData();
     this.requestUpdate();
   }
 
-  /** Dynamically register a formula function */
+  /**
+   * Register a custom formula function at runtime.
+   * Triggers a full recalculation of all formulas.
+   *
+   * @param name - Function name (will be uppercased for lookup)
+   * @param fn - The function implementation
+   */
   registerFunction(name: string, fn: FormulaFunction): void {
     this._formulaEngine.registerFunction(name, fn);
     this._recalcAll();
@@ -162,17 +193,32 @@ export class Y11nSpreadsheet extends LitElement {
 
   // ─── Format API ──────────────────────────────────────
 
-  /** Returns the format for a cell, or undefined if unformatted */
+  /**
+   * Returns the format for a cell, or undefined if unformatted.
+   *
+   * @param cellId - Cell key in `"row:col"` format
+   * @returns The cell's format, or undefined
+   */
   getCellFormat(cellId: string): CellFormat | undefined {
     return this._internalData.get(cellId)?.format;
   }
 
-  /** Merges format into a cell (creates cell if needed). Pass undefined to unset a property. */
+  /**
+   * Merges format properties into a cell. Creates the cell if it does not exist.
+   *
+   * @param cellId - Cell key in `"row:col"` format
+   * @param format - Format properties to merge
+   */
   setCellFormat(cellId: string, format: CellFormat): void {
     this._applyFormat([cellId], format, 'programmatic');
   }
 
-  /** Applies format to all cells in a range (creates empty cells if needed) */
+  /**
+   * Applies format to all cells in a rectangular range.
+   *
+   * @param range - The selection range to format
+   * @param format - Format properties to apply
+   */
   setRangeFormat(range: SelectionRange, format: CellFormat): void {
     const cellIds: string[] = [];
     for (let r = range.start.row; r <= range.end.row; r++) {
@@ -183,12 +229,20 @@ export class Y11nSpreadsheet extends LitElement {
     this._applyFormat(cellIds, format, 'programmatic');
   }
 
-  /** Removes all formatting from a cell */
+  /**
+   * Removes all formatting from a single cell.
+   *
+   * @param cellId - Cell key in `"row:col"` format
+   */
   clearCellFormat(cellId: string): void {
     this._clearFormat([cellId], 'programmatic');
   }
 
-  /** Removes all formatting from a range */
+  /**
+   * Removes all formatting from every cell in a range.
+   *
+   * @param range - The selection range to clear formatting from
+   */
   clearRangeFormat(range: SelectionRange): void {
     const cellIds: string[] = [];
     for (let r = range.start.row; r <= range.end.row; r++) {
@@ -199,7 +253,12 @@ export class Y11nSpreadsheet extends LitElement {
     this._clearFormat(cellIds, 'programmatic');
   }
 
-  /** Toggles a boolean format property on the current selection */
+  /**
+   * Toggles a boolean format property on the current selection.
+   * If all selected cells have the property set, it is removed; otherwise it is applied to all.
+   *
+   * @param prop - The boolean format property to toggle
+   */
   toggleFormat(prop: 'bold' | 'italic' | 'underline' | 'strikethrough'): void {
     if (this.readOnly) return;
     const range = this._selection.range;

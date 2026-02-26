@@ -7,9 +7,13 @@ import {
   letterToCol,
 } from '../types.js';
 
+/** A single cell update produced by a paste operation. */
 export interface PasteUpdate {
+  /** Cell key in `"row:col"` format */
   id: string;
+  /** Raw value to write to the cell */
   value: string;
+  /** Optional format to apply (from HTML or internal paste) */
   format?: CellFormat;
 }
 
@@ -23,8 +27,12 @@ export class ClipboardManager {
   private _copySourceData: GridData | null = null;
 
   /**
-   * Copy the selected range to the clipboard as both HTML table and TSV.
-   * Falls back to text-only if ClipboardItem API is unavailable.
+   * Copy the selected range to the system clipboard.
+   * Writes two formats: `text/html` (table with inline styles and data-format attributes)
+   * and `text/plain` (TSV). Falls back to text-only if ClipboardItem API is unavailable.
+   *
+   * @param data - The grid data to read cell values from
+   * @param range - The rectangular range to copy
    */
   async copy(data: GridData, range: SelectionRange): Promise<void> {
     this._copySourceRange = range;
@@ -52,7 +60,11 @@ export class ClipboardManager {
   }
 
   /**
-   * Cut: copy to clipboard and return the keys that should be cleared.
+   * Cut: copy to clipboard and return the cell keys that should be cleared by the caller.
+   *
+   * @param data - The grid data to read cell values from
+   * @param range - The rectangular range to cut
+   * @returns Array of cell keys (in `"row:col"` format) that were included in the cut
    */
   async cut(data: GridData, range: SelectionRange): Promise<string[]> {
     await this.copy(data, range);
@@ -66,10 +78,15 @@ export class ClipboardManager {
   }
 
   /**
-   * Parse clipboard content and return the updates to apply.
-   * If data was copied internally, uses raw values with reference adjustment.
-   * Otherwise tries HTML table format first, then falls back to TSV text.
-   * The target is the top-left cell where paste begins.
+   * Read from the system clipboard and return cell updates for pasting.
+   * Priority chain: internal copy data (with formula reference adjustment)
+   * -> HTML table -> plain text TSV.
+   *
+   * @param targetRow - 0-indexed row of the top-left paste destination
+   * @param targetCol - 0-indexed column of the top-left paste destination
+   * @param maxRows - Grid row count (for bounds clamping)
+   * @param maxCols - Grid column count (for bounds clamping)
+   * @returns Array of cell updates to apply, or null if clipboard is empty/inaccessible
    */
   async paste(
     targetRow: number,
@@ -232,9 +249,14 @@ export class ClipboardManager {
    * Parse a TSV string and generate cell updates.
    * Handles RFC 4180-style quoting: fields containing tabs, newlines, or
    * double-quotes are wrapped in double-quotes, with internal quotes escaped
-   * as "". This is the format Excel and Google Sheets use on the clipboard.
+   * as `""`. This is the format Excel and Google Sheets use on the clipboard.
    *
-   * Exported for testability with paste events where text is already available.
+   * @param text - The TSV text to parse
+   * @param targetRow - 0-indexed row of the top-left paste destination
+   * @param targetCol - 0-indexed column of the top-left paste destination
+   * @param maxRows - Grid row count (for bounds clamping)
+   * @param maxCols - Grid column count (for bounds clamping)
+   * @returns Array of cell updates with keys and values
    */
   parseTSV(
     text: string,
@@ -335,8 +357,14 @@ export class ClipboardManager {
 
   /**
    * Adjust cell references in a formula by the given row/col offset.
-   * Absolute references ($A$1) are not adjusted.
-   * Mixed references ($A1, A$1) only adjust the non-absolute part.
+   * Absolute references (`$A$1`) are not adjusted.
+   * Mixed references (`$A1`, `A$1`) only adjust the non-absolute component.
+   * References inside string literals are left untouched.
+   *
+   * @param formula - The formula string (must start with "=")
+   * @param rowOffset - Number of rows to shift relative references
+   * @param colOffset - Number of columns to shift relative references
+   * @returns The adjusted formula string, with `#REF!` for out-of-bounds refs
    */
   adjustFormulaReferences(formula: string, rowOffset: number, colOffset: number): string {
     if (!formula.startsWith('=')) return formula;

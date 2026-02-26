@@ -1,7 +1,9 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
+/** Detail for the `format-action` custom event dispatched by the format toolbar. */
 export interface FormatActionDetail {
+  /** The formatting action to perform */
   action:
     | 'bold'
     | 'italic'
@@ -12,14 +14,16 @@ export interface FormatActionDetail {
     | 'textAlign'
     | 'fontSize'
     | 'clearFormat';
+  /** The new value for the action (e.g. true/false for toggles, color string, font size number) */
   value?: string | number | boolean;
 }
 
 /**
- * <y11n-format-toolbar> - A companion toolbar for cell formatting.
+ * `<y11n-format-toolbar>` -- A companion toolbar for cell formatting.
  *
- * Connected to <y11n-spreadsheet> via properties and events.
- * Consumer wires them together:
+ * This component does not manage state internally. The consumer wires it
+ * to `<y11n-spreadsheet>` by binding selection-derived properties and
+ * handling the `format-action` event:
  *
  * ```html
  * <y11n-format-toolbar
@@ -27,6 +31,8 @@ export interface FormatActionDetail {
  *   @format-action=${handle}
  * ></y11n-format-toolbar>
  * ```
+ *
+ * @fires format-action - Dispatched when the user clicks a formatting button or changes a value
  */
 @customElement('y11n-format-toolbar')
 export class Y11nFormatToolbar extends LitElement {
@@ -406,7 +412,14 @@ export class Y11nFormatToolbar extends LitElement {
   }
 }
 
-/** Compute consensus format from a selection range */
+/**
+ * Compute the consensus format from all cells in a selection range.
+ * For each property, returns the common value if all cells agree, or undefined if mixed.
+ *
+ * @param getData - Callback to retrieve cell data by key
+ * @param range - The selection range to inspect
+ * @returns A CellFormat with only the unanimously shared properties set
+ */
 export function computeSelectionFormat(
   getData: (cellId: string) => { format?: import('../types.js').CellFormat } | undefined,
   range: import('../types.js').SelectionRange

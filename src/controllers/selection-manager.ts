@@ -80,7 +80,13 @@ export class SelectionManager implements ReactiveController {
 
   // ─── Mouse Interaction ──────────────────────────────
 
-  /** Called on mousedown/pointerdown on a cell */
+  /**
+   * Begin a new selection (mousedown/pointerdown on a cell).
+   *
+   * @param row - Row index of the clicked cell
+   * @param col - Column index of the clicked cell
+   * @param extend - If true (Shift+click), keeps the anchor and moves the head
+   */
   startSelection(row: number, col: number, extend = false): void {
     if (extend) {
       // Shift+click: keep anchor, move head
@@ -94,14 +100,19 @@ export class SelectionManager implements ReactiveController {
     this.host.requestUpdate();
   }
 
-  /** Called on mousemove during drag */
+  /**
+   * Extend the selection during a drag (mousemove while dragging).
+   *
+   * @param row - Row index the mouse is over
+   * @param col - Column index the mouse is over
+   */
   extendSelection(row: number, col: number): void {
     if (!this._isDragging) return;
     this.head = this.clamp({ row, col });
     this.host.requestUpdate();
   }
 
-  /** Called on mouseup */
+  /** Finalize the drag selection (mouseup). Clears the dragging flag. */
   endSelection(): void {
     this._isDragging = false;
   }
@@ -112,7 +123,13 @@ export class SelectionManager implements ReactiveController {
 
   // ─── Keyboard Navigation ────────────────────────────
 
-  /** Move the active cell by delta. If extend=true, extends selection. */
+  /**
+   * Move the active cell by a delta offset.
+   *
+   * @param dRow - Row delta (-1 = up, +1 = down)
+   * @param dCol - Column delta (-1 = left, +1 = right)
+   * @param extend - If true, keeps the anchor and extends the selection (Shift+arrow)
+   */
   move(dRow: number, dCol: number, extend = false): void {
     const newHead = this.clamp({
       row: this.head.row + dRow,
@@ -126,7 +143,13 @@ export class SelectionManager implements ReactiveController {
     this.host.requestUpdate();
   }
 
-  /** Move to a specific cell */
+  /**
+   * Move to a specific cell by absolute position.
+   *
+   * @param row - Target row index
+   * @param col - Target column index
+   * @param extend - If true, keeps the anchor and extends the selection
+   */
   moveTo(row: number, col: number, extend = false): void {
     const clamped = this.clamp({ row, col });
     this.head = clamped;
@@ -151,6 +174,12 @@ export class SelectionManager implements ReactiveController {
 
   // ─── Helpers ────────────────────────────────────────
 
+  /**
+   * Clamp a coordinate to the valid grid bounds.
+   *
+   * @param coord - The coordinate to clamp
+   * @returns A new coordinate within `[0, maxRows-1]` x `[0, maxCols-1]`
+   */
   clamp(coord: CellCoord): CellCoord {
     return {
       row: Math.max(0, Math.min(coord.row, this._maxRows - 1)),

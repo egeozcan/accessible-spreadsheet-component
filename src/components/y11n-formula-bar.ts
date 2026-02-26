@@ -1,20 +1,33 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
+/** Display mode for the formula bar input. */
 export type FormulaBarMode = 'raw' | 'formatted';
 
+/** Detail for the `formula-bar-commit` event. */
 interface FormulaBarCommitDetail {
+  /** The committed value from the input field */
   value: string;
+  /** The cell reference the value applies to (e.g. "A1") */
   cellRef: string;
 }
 
+/** Detail for the `formula-bar-mode-change` event. */
 interface FormulaBarModeChangeDetail {
+  /** The newly selected display mode */
   mode: FormulaBarMode;
 }
 
 /**
- * Reusable formula bar that supports raw/formatted value display.
- * Emits commit + mode-change events and leaves data persistence to parent components.
+ * `<y11n-formula-bar>` -- Reusable formula bar sub-component.
+ *
+ * Displays the active cell reference and an input for editing cell values.
+ * Supports toggling between raw (formula) and formatted (display) modes.
+ * All data persistence is handled by the parent component; this component
+ * communicates via two custom events:
+ *
+ * @fires formula-bar-commit - Fired on Enter or blur when the draft differs from the source value
+ * @fires formula-bar-mode-change - Fired when the user toggles between raw and formatted mode
  */
 @customElement('y11n-formula-bar')
 export class Y11nFormulaBar extends LitElement {
