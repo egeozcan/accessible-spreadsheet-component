@@ -376,5 +376,21 @@ describe('ClipboardManager', () => {
       expect(manager.adjustFormulaReferences('=A1', 0, 0)).toBe('=A1');
       expect(manager.adjustFormulaReferences('=SUM(A1:B2)', 0, 0)).toBe('=SUM(A1:B2)');
     });
+
+    it('does not adjust references inside string literals', () => {
+      expect(manager.adjustFormulaReferences('=INDIRECT("A1")', 2, 1)).toBe('=INDIRECT("A1")');
+    });
+
+    it('adjusts references outside strings but preserves strings', () => {
+      expect(manager.adjustFormulaReferences('=A1&"B2"', 1, 1)).toBe('=B2&"B2"');
+    });
+
+    it('handles multiple strings in a formula', () => {
+      expect(manager.adjustFormulaReferences('="prefix"&A1&"A2 suffix"', 1, 0)).toBe('="prefix"&A2&"A2 suffix"');
+    });
+
+    it('handles formula with only string content', () => {
+      expect(manager.adjustFormulaReferences('="A1"', 5, 5)).toBe('="A1"');
+    });
   });
 });

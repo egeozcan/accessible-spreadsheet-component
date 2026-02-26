@@ -152,6 +152,50 @@ describe('Y11nFormulaBar', () => {
       const event = handler.mock.calls[0][0] as CustomEvent;
       expect(event.detail.value).toBe('test value');
     });
+
+    it('includes cellRef in commit event detail', async () => {
+      const el = await createFormulaBar({ cellRef: 'C3', rawValue: 'hello' });
+      const handler = vi.fn();
+      el.addEventListener('formula-bar-commit', handler);
+
+      const input = getInput(el);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      const event = handler.mock.calls[0][0] as CustomEvent;
+      expect(event.detail.cellRef).toBe('C3');
+    });
+  });
+
+  describe('commit on blur', () => {
+    it('does not commit on blur when value has not changed', async () => {
+      const el = await createFormulaBar({ rawValue: 'unchanged', mode: 'raw' });
+      const handler = vi.fn();
+      el.addEventListener('formula-bar-commit', handler);
+
+      const input = getInput(el);
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('commits on blur when value has been modified', async () => {
+      const el = await createFormulaBar({ rawValue: 'original', cellRef: 'B2', mode: 'raw' });
+      const handler = vi.fn();
+      el.addEventListener('formula-bar-commit', handler);
+
+      const input = getInput(el);
+      input.value = 'modified';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      const event = handler.mock.calls[0][0] as CustomEvent;
+      expect(event.detail.value).toBe('modified');
+      expect(event.detail.cellRef).toBe('B2');
+    });
   });
 
   describe('revert on Escape', () => {

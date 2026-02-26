@@ -230,6 +230,32 @@ describe('SelectionManager', () => {
       manager.moveTo(20, 10);
       expect(manager.activeCell).toEqual({ row: 9, col: 4 });
     });
+
+    it('clamps selection when bounds shrink below current position', () => {
+      manager.moveTo(9, 9);
+      expect(manager.activeCell).toEqual({ row: 9, col: 9 });
+
+      manager.setBounds(5, 5);
+      expect(manager.activeCell).toEqual({ row: 4, col: 4 });
+      expect(manager.anchor).toEqual({ row: 4, col: 4 });
+    });
+
+    it('clamps extended selection when bounds shrink', () => {
+      manager.moveTo(2, 2);
+      manager.moveTo(8, 8, true); // extend selection
+      expect(manager.anchor).toEqual({ row: 2, col: 2 });
+      expect(manager.head).toEqual({ row: 8, col: 8 });
+
+      manager.setBounds(5, 5);
+      expect(manager.anchor).toEqual({ row: 2, col: 2 });
+      expect(manager.head).toEqual({ row: 4, col: 4 });
+    });
+
+    it('does not change selection that is already within new bounds', () => {
+      manager.moveTo(2, 2);
+      manager.setBounds(5, 5);
+      expect(manager.activeCell).toEqual({ row: 2, col: 2 });
+    });
   });
 
   describe('hostDisconnected', () => {

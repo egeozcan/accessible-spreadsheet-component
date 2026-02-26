@@ -5,6 +5,7 @@ export type FormulaBarMode = 'raw' | 'formatted';
 
 interface FormulaBarCommitDetail {
   value: string;
+  cellRef: string;
 }
 
 interface FormulaBarModeChangeDetail {
@@ -131,7 +132,7 @@ export class Y11nFormulaBar extends LitElement {
   private _commit(): void {
     this.dispatchEvent(
       new CustomEvent<FormulaBarCommitDetail>('formula-bar-commit', {
-        detail: { value: this._draft },
+        detail: { value: this._draft, cellRef: this.cellRef },
         bubbles: true,
         composed: true,
       })
@@ -154,7 +155,9 @@ export class Y11nFormulaBar extends LitElement {
       this._suppressNextBlur = false;
       return;
     }
-    this._commit();
+    if (this._draft !== this._sourceValue()) {
+      this._commit();
+    }
   }
 
   render() {

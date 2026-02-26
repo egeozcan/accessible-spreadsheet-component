@@ -168,6 +168,15 @@ describe('FormulaEngine', () => {
     it('returns #ERROR! for invalid formulas', () => {
       expect(engine.evaluate('=***')).toEqual({ displayValue: '#ERROR!', type: 'error' });
     });
+
+    it('rejects trailing tokens after a valid expression', () => {
+      expect(engine.evaluate('=1 2')).toEqual({ displayValue: '#ERROR!', type: 'error' });
+      expect(engine.evaluate('=SUM(1,2)3')).toEqual({ displayValue: '#ERROR!', type: 'error' });
+    });
+
+    it('rejects unterminated string literals', () => {
+      expect(engine.evaluate('="hello')).toEqual({ displayValue: '#ERROR!', type: 'error' });
+    });
   });
 
   // ─── String operations ──────────────────────────────

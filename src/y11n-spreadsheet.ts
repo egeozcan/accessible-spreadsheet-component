@@ -17,6 +17,7 @@ import {
   colToLetter,
   coordToRef,
   formatsEqual,
+  refToCoord,
 } from './types.js';
 import { SelectionManager } from './controllers/selection-manager.js';
 import { FormulaEngine } from './engine/formula-engine.js';
@@ -1160,11 +1161,18 @@ export class Y11nSpreadsheet extends LitElement {
     this._formulaBarMode = e.detail.mode;
   }
 
-  private _handleFormulaBarCommit(e: CustomEvent<{ value: string }>): void {
+  private _handleFormulaBarCommit(e: CustomEvent<{ value: string; cellRef: string }>): void {
     if (this.readOnly) return;
 
-    // If editing via the grid editor, commit to that cell specifically
-    const targetKey = this._editingCellKey ?? this._getActiveCellKey();
+    // Use the cell key from the event (which cell the formula bar was showing)
+    // rather than the current active cell, which may have changed due to clicking.
+    let targetKey: string;
+    if (this._editingCellKey) {
+      targetKey = this._editingCellKey;
+    } else {
+      const coord = refToCoord(e.detail.cellRef);
+      targetKey = coord ? cellKey(coord.row, coord.col) : this._getActiveCellKey();
+    }
 
     if (this._isEditing) {
       this._isEditing = false;

@@ -341,27 +341,64 @@ export class ClipboardManager {
   adjustFormulaReferences(formula: string, rowOffset: number, colOffset: number): string {
     if (!formula.startsWith('=')) return formula;
 
+    // Split formula into string-literal and non-string segments
+    // so that references inside strings (e.g. =INDIRECT("A1")) are not adjusted.
+    const segments: string[] = [];
+    const isString: boolean[] = [];
+    let i = 0;
+    let current = '';
+
+    while (i < formula.length) {
+      if (formula[i] === '"') {
+        if (current) {
+          segments.push(current);
+          isString.push(false);
+          current = '';
+        }
+        let str = '"';
+        i++;
+        while (i < formula.length && formula[i] !== '"') {
+          str += formula[i];
+          i++;
+        }
+        if (i < formula.length) {
+          str += '"';
+          i++;
+        }
+        segments.push(str);
+        isString.push(true);
+      } else {
+        current += formula[i];
+        i++;
+      }
+    }
+    if (current) {
+      segments.push(current);
+      isString.push(false);
+    }
+
     // Match cell references including optional $ markers
     // Pattern: optional $ + column letters + optional $ + row digits
     // Handles ranges like $A$1:$B$2 by matching each ref separately
     const refPattern = /(\$?)([A-Z]+)(\$?)(\d+)/gi;
 
-    const adjusted = formula.replace(refPattern, (_match, colDollar: string, colLetters: string, rowDollar: string, rowDigits: string) => {
-      const col = letterToCol(colLetters.toUpperCase());
-      const row = parseInt(rowDigits, 10) - 1; // 1-indexed to 0-indexed
+    return segments.map((seg, idx) => {
+      if (isString[idx]) return seg;
+      return seg.replace(refPattern, (_match, colDollar: string, colLetters: string, rowDollar: string, rowDigits: string) => {
+        const col = letterToCol(colLetters.toUpperCase());
+        const row = parseInt(rowDigits, 10) - 1; // 1-indexed to 0-indexed
 
-      const newCol = colDollar === '$' ? col : col + colOffset;
-      const newRow = rowDollar === '$' ? row : row + rowOffset;
+        const newCol = colDollar === '$' ? col : col + colOffset;
+        const newRow = rowDollar === '$' ? row : row + rowOffset;
 
-      // Clamp to valid range (don't produce negative indices)
-      if (newCol < 0 || newRow < 0) {
-        return '#REF!';
-      }
+        // Clamp to valid range (don't produce negative indices)
+        if (newCol < 0 || newRow < 0) {
+          return '#REF!';
+        }
 
-      return `${colDollar}${colToLetter(newCol)}${rowDollar}${newRow + 1}`;
-    });
-
-    return adjusted;
+        return `${colDollar}${colToLetter(newCol)}${rowDollar}${newRow + 1}`;
+      });
+    }).join('');
   }
 
   // ─── Serialization ──────────────────────────────────

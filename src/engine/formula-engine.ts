@@ -433,6 +433,9 @@ export class FormulaEngine {
           str += input[i];
           i++;
         }
+        if (i >= input.length) {
+          throw new Error('Unterminated string literal');
+        }
         i++; // skip closing quote
         tokens.push({ type: 'STRING', value: str });
         continue;
@@ -591,7 +594,11 @@ export class FormulaEngine {
     }
     try {
       const s: ParserState = { tokens: this.tokenize(input), pos: 0 };
-      return this._parseComparison(s);
+      const result = this._parseComparison(s);
+      if (this._peek(s).type !== 'EOF') {
+        throw new Error(`Unexpected token: ${this._peek(s).value}`);
+      }
+      return result;
     } finally {
       this._evalDepth--;
     }

@@ -44,6 +44,8 @@ export class SelectionManager implements ReactiveController {
   setBounds(maxRows: number, maxCols: number): void {
     this._maxRows = maxRows;
     this._maxCols = maxCols;
+    this.anchor = this.clamp(this.anchor);
+    this.head = this.clamp(this.head);
   }
 
   /** Get the normalized selection range (top-left to bottom-right) */
