@@ -1323,6 +1323,7 @@ export class Y11nSpreadsheet extends LitElement {
     .ls-grid {
       display: grid;
       grid-template-columns: var(--_row-header-width) repeat(var(--cols), var(--_cell-width));
+      align-content: start;
       overflow: auto;
       position: relative;
       width: 100%;
