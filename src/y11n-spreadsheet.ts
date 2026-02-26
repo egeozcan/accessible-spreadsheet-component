@@ -110,6 +110,12 @@ export class Y11nSpreadsheet extends LitElement {
   private _refInsertStart = 0;
   private _refInsertEnd = 0;
 
+  /** Whether an async paste operation is currently in progress */
+  private _pasteInProgress = false;
+
+  /** Number of cells to process per animation frame during large pastes */
+  private static readonly PASTE_CHUNK_SIZE = 500;
+
   // ─── Lifecycle ──────────────────────────────────────
 
   connectedCallback(): void {
@@ -1125,46 +1131,95 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private async _handlePaste(): Promise<void> {
-    if (this.readOnly) return;
+    if (this.readOnly || this._pasteInProgress) return;
 
     const { row, col } = this._selection.activeCell;
     const updates = await this._clipboardManager.paste(row, col, this.rows, this.cols);
 
-    if (updates && updates.length > 0) {
-      const selection = this._snapshotSelection();
+    if (!updates || updates.length === 0) return;
 
-      // Build value updates for the command batch
-      const valueUpdates = updates.map((u) => ({ id: u.id, value: u.value }));
-      const batch = this._buildCommandBatch(valueUpdates, 'paste', selection, selection);
+    const selection = this._snapshotSelection();
 
-      // Inject format deltas into the batch
-      if (batch) {
-        const updateMap = new Map(updates.map((u) => [u.id, u]));
-        for (const delta of batch.deltas) {
-          const pasteUpdate = updateMap.get(delta.id);
-          if (pasteUpdate?.format) {
-            const existing = this._internalData.get(delta.id);
-            delta.formatBefore = existing?.format ? { ...existing.format } : undefined;
-            delta.formatAfter = pasteUpdate.format;
-          }
-        }
-        const deltaIds = new Set(batch.deltas.map((d) => d.id));
-        // Also add format-only entries for cells that have format but unchanged value
-        for (const u of updates) {
-          if (u.format && !deltaIds.has(u.id)) {
-            const existing = this._internalData.get(u.id);
-            batch.deltas.push({
-              id: u.id,
-              before: existing?.rawValue ?? '',
-              after: u.value,
-              formatBefore: existing?.format ? { ...existing.format } : undefined,
-              formatAfter: u.format,
-            });
-          }
-        }
-        this._executeUserBatch(batch);
+    // Build the full command batch (for undo) before applying anything
+    const valueUpdates = updates.map((u) => ({ id: u.id, value: u.value }));
+    const batch = this._buildCommandBatch(valueUpdates, 'paste', selection, selection);
+    if (!batch) return;
+
+    // Inject format deltas
+    const updateMap = new Map(updates.map((u) => [u.id, u]));
+    for (const delta of batch.deltas) {
+      const pasteUpdate = updateMap.get(delta.id);
+      if (pasteUpdate?.format) {
+        const existing = this._internalData.get(delta.id);
+        delta.formatBefore = existing?.format ? { ...existing.format } : undefined;
+        delta.formatAfter = pasteUpdate.format;
       }
     }
+    const deltaIds = new Set(batch.deltas.map((d) => d.id));
+    for (const u of updates) {
+      if (u.format && !deltaIds.has(u.id)) {
+        const existing = this._internalData.get(u.id);
+        batch.deltas.push({
+          id: u.id,
+          before: existing?.rawValue ?? '',
+          after: u.value,
+          formatBefore: existing?.format ? { ...existing.format } : undefined,
+          formatAfter: u.format,
+        });
+      }
+    }
+
+    // Small paste: apply synchronously (no overhead)
+    if (batch.deltas.length <= Y11nSpreadsheet.PASTE_CHUNK_SIZE) {
+      this._executeUserBatch(batch);
+      return;
+    }
+
+    // Large paste: apply in chunks with rAF yields
+    this._pasteInProgress = true;
+    try {
+      await this._applyBatchProgressive(batch);
+      this._pushHistory(batch);
+    } finally {
+      this._pasteInProgress = false;
+    }
+  }
+
+  /**
+   * Apply a command batch progressively in chunks, yielding to the event loop
+   * between chunks via requestAnimationFrame to keep the UI responsive.
+   */
+  private _applyBatchProgressive(batch: CommandBatch): Promise<void> {
+    return new Promise((resolve) => {
+      const deltas = batch.deltas;
+      let offset = 0;
+
+      const applyChunk = () => {
+        const end = Math.min(offset + Y11nSpreadsheet.PASTE_CHUNK_SIZE, deltas.length);
+
+        for (let i = offset; i < end; i++) {
+          const delta = deltas[i];
+          this._applyRawValueByString(delta.id, delta.after);
+          if ('formatAfter' in delta) {
+            this._applyCellFormat(delta.id, delta.formatAfter);
+          }
+        }
+
+        offset = end;
+
+        if (offset < deltas.length) {
+          this.requestUpdate();
+          requestAnimationFrame(applyChunk);
+        } else {
+          // Final: restore selection, recalc, dispatch events
+          this._restoreSelection(batch.selectionAfter);
+          this._finalizeBatch(batch, 'user', 'after');
+          resolve();
+        }
+      };
+
+      applyChunk();
+    });
   }
 
   // ─── Cell Clearing ──────────────────────────────────
