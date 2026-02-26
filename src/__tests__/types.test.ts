@@ -131,6 +131,9 @@ describe('formatNumber', () => {
   it('formats scientific notation', () => {
     expect(formatNumber(1234.5, { type: 'scientific' })).toBe('1.23e+3');
   });
+  it('formats negative number with thousands separator', () => {
+    expect(formatNumber(-1234567.89, { type: 'number' })).toBe('-1,234,567.89');
+  });
   it('formats zero', () => {
     expect(formatNumber(0, { type: 'number' })).toBe('0.00');
   });

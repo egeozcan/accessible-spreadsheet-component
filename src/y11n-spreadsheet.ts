@@ -376,10 +376,21 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _recalcAll(): void {
     this._formulaEngine.recalculate();
+    this._reapplyNumberFormats();
   }
 
   private _recalcAffected(changedKeys: string[]): void {
     this._formulaEngine.recalculateAffected(changedKeys);
+    this._reapplyNumberFormats();
+  }
+
+  /** Re-apply number formatting to all cells that have a numberFormat */
+  private _reapplyNumberFormats(): void {
+    for (const [, cell] of this._internalData) {
+      if (cell.type === 'number' && cell.format?.numberFormat) {
+        cell.displayValue = formatNumber(Number(cell.displayValue), cell.format.numberFormat);
+      }
+    }
   }
 
   // ─── Cell Access ────────────────────────────────────
@@ -556,8 +567,14 @@ export class Y11nSpreadsheet extends LitElement {
     }
     // Re-apply number format to display value
     if (cell.type === 'number' && cell.format?.numberFormat) {
-      cell.displayValue = formatNumber(Number(cell.rawValue.startsWith('=')
-        ? cell.displayValue : cell.rawValue), cell.format.numberFormat);
+      // For formula cells, re-evaluate to get the raw numeric value
+      // (displayValue may already be formatted, e.g., "$1,234.50")
+      if (cell.rawValue.startsWith('=')) {
+        const evaluated = this._formulaEngine.evaluate(cell.rawValue, cellId);
+        cell.displayValue = formatNumber(Number(evaluated.displayValue), cell.format.numberFormat);
+      } else {
+        cell.displayValue = formatNumber(Number(cell.rawValue), cell.format.numberFormat);
+      }
     } else if (cell.type === 'number' && !cell.format?.numberFormat) {
       // Remove number formatting — re-evaluate to get plain display
       const evaluated = this._formulaEngine.evaluate(cell.rawValue, cellId);
