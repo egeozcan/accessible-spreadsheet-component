@@ -408,7 +408,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   /** Apply number formatting to a single cell using rawValue for robustness */
-  private _applyNumberFormatToCell(key: string, cell: CellData): void {
+  private _applyNumberFormatToCell(_key: string, cell: CellData): void {
     if (cell.type === 'number' && cell.format?.numberFormat) {
       const numericValue = cell.rawValue.startsWith('=')
         ? Number(this._formulaEngine.evaluate(cell.rawValue).displayValue)
