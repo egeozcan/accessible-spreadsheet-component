@@ -1,6 +1,6 @@
 {
   "name": "y11n-spreadsheet",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Accessible spreadsheet web component built with Lit 3.0",
   "type": "module",
   "main": "dist/index.js",
