@@ -380,16 +380,34 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _recalcAffected(changedKeys: string[]): void {
-    this._formulaEngine.recalculateAffected(changedKeys);
-    this._reapplyNumberFormats();
+    const changed = this._formulaEngine.recalculateAffected(changedKeys);
+    this._applyNumberFormatsToKeys(changed);
   }
 
   /** Re-apply number formatting to all cells that have a numberFormat */
   private _reapplyNumberFormats(): void {
-    for (const [, cell] of this._internalData) {
-      if (cell.type === 'number' && cell.format?.numberFormat) {
-        cell.displayValue = formatNumber(Number(cell.displayValue), cell.format.numberFormat);
+    for (const [key, cell] of this._internalData) {
+      this._applyNumberFormatToCell(key, cell);
+    }
+  }
+
+  /** Re-apply number formatting only to the given set of cell keys */
+  private _applyNumberFormatsToKeys(keys: Set<string>): void {
+    for (const key of keys) {
+      const cell = this._internalData.get(key);
+      if (cell) {
+        this._applyNumberFormatToCell(key, cell);
       }
+    }
+  }
+
+  /** Apply number formatting to a single cell using rawValue for robustness */
+  private _applyNumberFormatToCell(key: string, cell: CellData): void {
+    if (cell.type === 'number' && cell.format?.numberFormat) {
+      const numericValue = cell.rawValue.startsWith('=')
+        ? Number(this._formulaEngine.evaluate(cell.rawValue).displayValue)
+        : Number(cell.rawValue);
+      cell.displayValue = formatNumber(numericValue, cell.format.numberFormat);
     }
   }
 
@@ -570,14 +588,14 @@ export class Y11nSpreadsheet extends LitElement {
       // For formula cells, re-evaluate to get the raw numeric value
       // (displayValue may already be formatted, e.g., "$1,234.50")
       if (cell.rawValue.startsWith('=')) {
-        const evaluated = this._formulaEngine.evaluate(cell.rawValue, cellId);
+        const evaluated = this._formulaEngine.evaluate(cell.rawValue);
         cell.displayValue = formatNumber(Number(evaluated.displayValue), cell.format.numberFormat);
       } else {
         cell.displayValue = formatNumber(Number(cell.rawValue), cell.format.numberFormat);
       }
     } else if (cell.type === 'number' && !cell.format?.numberFormat) {
       // Remove number formatting — re-evaluate to get plain display
-      const evaluated = this._formulaEngine.evaluate(cell.rawValue, cellId);
+      const evaluated = this._formulaEngine.evaluate(cell.rawValue);
       cell.displayValue = evaluated.displayValue;
     }
   }
