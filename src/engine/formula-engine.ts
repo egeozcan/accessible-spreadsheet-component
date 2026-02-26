@@ -403,7 +403,8 @@ export class FormulaEngine {
 
     const num = Number(val);
     if (val.trim() !== '' && !isNaN(num)) {
-      return { displayValue: String(num), type: 'number' };
+      const clean = Number.isFinite(num) ? parseFloat(num.toPrecision(15)) : num;
+      return { displayValue: String(clean), type: 'number' };
     }
 
     return { displayValue: val, type: 'text' };

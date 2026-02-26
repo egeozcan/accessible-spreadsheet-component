@@ -12,28 +12,21 @@ test.describe('Virtual Scrolling', () => {
   });
 
   test('scrolling reveals new rows', async ({ spreadsheet }) => {
-    // Get initial visible rows
-    const initialRows = await spreadsheet.shadow('[data-row]').evaluateAll(
-      (elements) => elements.map((el) => parseInt((el as HTMLElement).dataset.row!))
-    );
+    // Row 45 should not be rendered initially (virtual rendering limits initial rows)
+    const row45Before = await spreadsheet.shadow('[data-row="45"]').count();
+    expect(row45Before).toBe(0);
 
-    // Scroll down
+    // Scroll far enough to bring row 45 into view
     await spreadsheet.grid.evaluate((grid) => {
-      grid.scrollTop = 500;
+      grid.scrollTop = 1000;
     });
 
-    // Wait for scroll event to process
+    // Wait for scroll event and re-render
     await spreadsheet.page.waitForTimeout(200);
 
-    // Get new visible rows
-    const scrolledRows = await spreadsheet.shadow('[data-row]').evaluateAll(
-      (elements) => elements.map((el) => parseInt((el as HTMLElement).dataset.row!))
-    );
-
-    // The scrolled view should contain rows that weren't in the initial view
-    const maxInitial = Math.max(...initialRows);
-    const maxScrolled = Math.max(...scrolledRows);
-    expect(maxScrolled).toBeGreaterThan(maxInitial);
+    // Row 45 should now be rendered
+    const row45After = await spreadsheet.shadow('[data-row="45"]').count();
+    expect(row45After).toBeGreaterThan(0);
   });
 
   test('scrolled-to cells are accessible and clickable', async ({ spreadsheet }) => {

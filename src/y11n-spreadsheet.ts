@@ -1281,6 +1281,7 @@ export class Y11nSpreadsheet extends LitElement {
   static styles = css`
     :host {
       display: block;
+      height: 100%;
       position: relative;
       font-family: var(--ls-font-family, system-ui, -apple-system, sans-serif);
       font-size: var(--ls-font-size, 13px);
@@ -1325,7 +1326,8 @@ export class Y11nSpreadsheet extends LitElement {
       overflow: auto;
       position: relative;
       width: 100%;
-      height: 100%;
+      height: round(down, 100%, var(--_cell-height));
+      scroll-snap-type: y mandatory;
       outline: none;
     }
 
@@ -1357,6 +1359,7 @@ export class Y11nSpreadsheet extends LitElement {
       position: sticky;
       left: 0;
       z-index: 4;
+      scroll-snap-align: start;
     }
 
     .ls-row-header {
@@ -1372,6 +1375,7 @@ export class Y11nSpreadsheet extends LitElement {
       border-bottom: 1px solid var(--_border-color);
       font-weight: 600;
       user-select: none;
+      scroll-snap-align: start;
     }
 
     .ls-cell {

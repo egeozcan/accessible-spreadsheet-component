@@ -713,7 +713,7 @@ export const ConditionalLogic: StoryObj = {
       ['Rivets',      '300',   '200',            '=IF(B6>C6, "OK", "REORDER")',       '=IF(B6>C6, 0, C6-B6+50)'],
       ['Springs',     '90',    '150',            '=IF(B7>C7, "OK", "REORDER")',       '=IF(B7>C7, 0, C7-B7+50)'],
       ['',            '',      '',               '',                                  ''],
-      ['Items to reorder', '', '',               '=COUNTA(D2:D7)-COUNT(D2:D7)',       ''],
+      ['Items to reorder', '', '',               '=COUNTIF(D2:D7,"REORDER")',         ''],
     ]);
 
     return html`
@@ -851,8 +851,8 @@ export const LookupFunctions: StoryObj = {
       ...catalog,
       ['', '', '', '', ''],
       ['Lookup ID', 'Found Name',              'Found Price',             'Found Category'],
-      ['P003',      '=VLOOKUP(A11, A2:E9, 2, FALSE)', '=VLOOKUP(A11, A2:E9, 4, FALSE)', '=VLOOKUP(A11, A2:E9, 3, FALSE)'],
-      ['P006',      '=VLOOKUP(A12, A2:E9, 2, FALSE)', '=VLOOKUP(A12, A2:E9, 4, FALSE)', '=VLOOKUP(A12, A2:E9, 3, FALSE)'],
+      ['P003',      '=VLOOKUP(A12, A2:E9, 2, FALSE)', '=VLOOKUP(A12, A2:E9, 4, FALSE)', '=VLOOKUP(A12, A2:E9, 3, FALSE)'],
+      ['P006',      '=VLOOKUP(A13, A2:E9, 2, FALSE)', '=VLOOKUP(A13, A2:E9, 4, FALSE)', '=VLOOKUP(A13, A2:E9, 3, FALSE)'],
       ['',          '',                         '',                        ''],
       ['INDEX/MATCH Demo', '',                  '',                        ''],
       ['Row 3 Col 2',      '=INDEX(A2:E9, 3, 2)', '',                    ''],

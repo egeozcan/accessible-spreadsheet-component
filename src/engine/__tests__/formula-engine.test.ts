@@ -2166,4 +2166,33 @@ describe('FormulaEngine', () => {
       expect(data.get('0:1')!.displayValue).toBe('12');
     });
   });
+
+  // ─── Floating point display ────────────────────────
+
+  describe('floating point display', () => {
+    it('displays 10 * 5.99 as 59.9', () => {
+      const data: GridData = new Map([
+        ['0:0', cell('10', 'number')],
+        ['0:1', cell('5.99', 'number')],
+      ]);
+      engine.setData(data);
+      const result = engine.evaluate('=A1*B1', '0:2');
+      expect(result.displayValue).toBe('59.9');
+    });
+
+    it('displays 1/3 with reasonable precision', () => {
+      const result = engine.evaluate('=1/3');
+      expect(result.displayValue).toBe('0.333333333333333');
+    });
+
+    it('displays exact integers without trailing zeros', () => {
+      const result = engine.evaluate('=2+3');
+      expect(result.displayValue).toBe('5');
+    });
+
+    it('handles very small floating point differences', () => {
+      const result = engine.evaluate('=0.1+0.2');
+      expect(result.displayValue).toBe('0.3');
+    });
+  });
 });
