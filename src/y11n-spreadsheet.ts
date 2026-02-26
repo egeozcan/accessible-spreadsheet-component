@@ -16,6 +16,7 @@ import {
   cellKey,
   colToLetter,
   coordToRef,
+  formatNumber,
   formatsEqual,
   refToCoord,
 } from './types.js';
@@ -410,9 +411,16 @@ export class Y11nSpreadsheet extends LitElement {
     const existing = this._internalData.get(key);
     const evaluated = this._formulaEngine.evaluate(rawValue, key);
 
+    // Apply number format to display value if the cell has one and the value is numeric
+    let displayValue = evaluated.displayValue;
+    const numFmt = existing?.format?.numberFormat;
+    if (numFmt && evaluated.type === 'number') {
+      displayValue = formatNumber(Number(evaluated.displayValue), numFmt);
+    }
+
     this._internalData.set(key, {
       rawValue,
-      displayValue: evaluated.displayValue,
+      displayValue,
       type: evaluated.type,
       format: existing?.format,
     });
@@ -543,7 +551,17 @@ export class Y11nSpreadsheet extends LitElement {
       // Remove empty cells
       if (cell.rawValue === '') {
         this._internalData.delete(cellId);
+        return;
       }
+    }
+    // Re-apply number format to display value
+    if (cell.type === 'number' && cell.format?.numberFormat) {
+      cell.displayValue = formatNumber(Number(cell.rawValue.startsWith('=')
+        ? cell.displayValue : cell.rawValue), cell.format.numberFormat);
+    } else if (cell.type === 'number' && !cell.format?.numberFormat) {
+      // Remove number formatting — re-evaluate to get plain display
+      const evaluated = this._formulaEngine.evaluate(cell.rawValue, cellId);
+      cell.displayValue = evaluated.displayValue;
     }
   }
 

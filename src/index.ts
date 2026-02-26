@@ -18,5 +18,7 @@ export type {
   SelectionChangeDetail,
   DataChangeDetail,
   FormatChangeDetail,
+  NumberFormatType,
+  NumberFormatOptions,
 } from './types.js';
-export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual } from './types.js';
+export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual, formatNumber } from './types.js';

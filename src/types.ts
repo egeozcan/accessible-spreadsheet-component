@@ -19,6 +19,21 @@ export interface CellFormat {
   backgroundColor?: string;
   textAlign?: 'left' | 'center' | 'right';
   fontSize?: number;
+  numberFormat?: NumberFormatOptions;
+}
+
+/** Available preset number format types */
+export type NumberFormatType = 'number' | 'currency' | 'percent' | 'scientific';
+
+/** Options for number formatting */
+export interface NumberFormatOptions {
+  type: NumberFormatType;
+  /** Number of decimal places (default: 2) */
+  decimals?: number;
+  /** Currency symbol (default: '$'), only used when type is 'currency' */
+  currencySymbol?: string;
+  /** Whether to use thousands separators (default: true for 'number' and 'currency') */
+  thousandsSep?: boolean;
 }
 
 /**
@@ -94,7 +109,7 @@ export interface FormatChangeDetail {
 }
 
 /**
- * Shallow-compare two CellFormat objects (key-order independent)
+ * Compare two CellFormat objects (key-order independent, deep-compares numberFormat)
  */
 export function formatsEqual(a: CellFormat | undefined, b: CellFormat | undefined): boolean {
   if (a === b) return true;
@@ -102,7 +117,49 @@ export function formatsEqual(a: CellFormat | undefined, b: CellFormat | undefine
   const keysA = Object.keys(a) as (keyof CellFormat)[];
   const keysB = Object.keys(b) as (keyof CellFormat)[];
   if (keysA.length !== keysB.length) return false;
-  return keysA.every((k) => a[k] === b[k]);
+  return keysA.every((k) => {
+    if (k === 'numberFormat') {
+      return numberFormatEqual(a.numberFormat, b.numberFormat);
+    }
+    return a[k] === b[k];
+  });
+}
+
+function numberFormatEqual(a: NumberFormatOptions | undefined, b: NumberFormatOptions | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.type === b.type
+    && a.decimals === b.decimals
+    && a.currencySymbol === b.currencySymbol
+    && a.thousandsSep === b.thousandsSep;
+}
+
+export function formatNumber(value: number, opts: NumberFormatOptions): string {
+  const decimals = opts.decimals ?? 2;
+  switch (opts.type) {
+    case 'percent':
+      return (value * 100).toFixed(decimals) + '%';
+    case 'scientific':
+      return value.toExponential(decimals);
+    case 'currency': {
+      const symbol = opts.currencySymbol ?? '$';
+      const useSep = opts.thousandsSep !== false;
+      const abs = Math.abs(value);
+      const formatted = useSep ? addThousandsSep(abs.toFixed(decimals)) : abs.toFixed(decimals);
+      return value < 0 ? `-${symbol}${formatted}` : `${symbol}${formatted}`;
+    }
+    case 'number': {
+      const useSep = opts.thousandsSep !== false;
+      const fixed = value.toFixed(decimals);
+      return useSep ? addThousandsSep(fixed) : fixed;
+    }
+  }
+}
+
+function addThousandsSep(numStr: string): string {
+  const [intPart, decPart] = numStr.split('.');
+  const withCommas = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return decPart !== undefined ? `${withCommas}.${decPart}` : withCommas;
 }
 
 /**

@@ -6,6 +6,8 @@ import {
   letterToCol,
   refToCoord,
   coordToRef,
+  formatNumber,
+  formatsEqual,
 } from '../types.js';
 
 describe('types utility functions', () => {
@@ -98,5 +100,56 @@ describe('types utility functions', () => {
         expect(coordToRef(refToCoord(ref))).toBe(ref);
       }
     });
+  });
+});
+
+describe('formatNumber', () => {
+  it('formats number with default options', () => {
+    expect(formatNumber(1234.5, { type: 'number' })).toBe('1,234.50');
+  });
+  it('formats number without thousands separator', () => {
+    expect(formatNumber(1234.5, { type: 'number', thousandsSep: false })).toBe('1234.50');
+  });
+  it('formats number with custom decimals', () => {
+    expect(formatNumber(3.14159, { type: 'number', decimals: 3 })).toBe('3.142');
+  });
+  it('formats currency with default symbol', () => {
+    expect(formatNumber(1234.5, { type: 'currency' })).toBe('$1,234.50');
+  });
+  it('formats currency with custom symbol', () => {
+    expect(formatNumber(1234.5, { type: 'currency', currencySymbol: '€' })).toBe('€1,234.50');
+  });
+  it('formats negative currency', () => {
+    expect(formatNumber(-50, { type: 'currency' })).toBe('-$50.00');
+  });
+  it('formats percent', () => {
+    expect(formatNumber(0.1234, { type: 'percent' })).toBe('12.34%');
+  });
+  it('formats percent with custom decimals', () => {
+    expect(formatNumber(0.5, { type: 'percent', decimals: 0 })).toBe('50%');
+  });
+  it('formats scientific notation', () => {
+    expect(formatNumber(1234.5, { type: 'scientific' })).toBe('1.23e+3');
+  });
+  it('formats zero', () => {
+    expect(formatNumber(0, { type: 'number' })).toBe('0.00');
+  });
+});
+
+describe('formatsEqual with numberFormat', () => {
+  it('returns true when both have identical numberFormat', () => {
+    const a = { bold: true, numberFormat: { type: 'currency' as const, decimals: 2 } };
+    const b = { bold: true, numberFormat: { type: 'currency' as const, decimals: 2 } };
+    expect(formatsEqual(a, b)).toBe(true);
+  });
+  it('returns false when numberFormat differs', () => {
+    const a = { numberFormat: { type: 'currency' as const } };
+    const b = { numberFormat: { type: 'percent' as const } };
+    expect(formatsEqual(a, b)).toBe(false);
+  });
+  it('returns false when one has numberFormat and other does not', () => {
+    const a = { numberFormat: { type: 'number' as const } };
+    const b = {};
+    expect(formatsEqual(a, b)).toBe(false);
   });
 });
