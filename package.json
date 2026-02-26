@@ -1,17 +1,23 @@
 {
   "name": "y11n-spreadsheet",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Accessible spreadsheet web component built with Lit 3.0",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "files": [
     "dist"
   ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -20,20 +26,34 @@
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headed": "playwright test --headed",
     "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build"
+    "build-storybook": "storybook build",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "spreadsheet",
     "accessible",
     "web-component",
     "lit",
-    "aria"
+    "aria",
+    "a11y",
+    "wai-aria",
+    "grid"
   ],
+  "author": "Ege Ozcan <egecan@gmail.com>",
   "license": "MIT",
-  "dependencies": {
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/egeozcan/accessible-spreadsheet-component.git"
+  },
+  "homepage": "https://github.com/egeozcan/accessible-spreadsheet-component#readme",
+  "bugs": {
+    "url": "https://github.com/egeozcan/accessible-spreadsheet-component/issues"
+  },
+  "peerDependencies": {
     "lit": "^3.0.0"
   },
   "devDependencies": {
+    "lit": "^3.0.0",
     "@playwright/test": "^1.56.1",
     "@storybook/addon-essentials": "^8.6.17",
     "@storybook/blocks": "^8.6.17",
