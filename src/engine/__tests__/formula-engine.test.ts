@@ -1283,8 +1283,11 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=MOD(10, 5)')).toEqual({ displayValue: '0', type: 'number' });
     });
 
-    it('handles negative dividend', () => {
-      expect(engine.evaluate('=MOD(-10, 3)')).toEqual({ displayValue: '-1', type: 'number' });
+    it('handles negative dividend (Excel convention: result sign follows divisor)', () => {
+      // Excel: MOD(-10, 3) = -10 - 3*FLOOR(-10/3) = -10 - 3*(-4) = 2
+      expect(engine.evaluate('=MOD(-10, 3)')).toEqual({ displayValue: '2', type: 'number' });
+      expect(engine.evaluate('=MOD(-7, 3)')).toEqual({ displayValue: '2', type: 'number' });
+      expect(engine.evaluate('=MOD(-1, 3)')).toEqual({ displayValue: '2', type: 'number' });
     });
 
     it('returns #DIV/0! when divisor is 0', () => {

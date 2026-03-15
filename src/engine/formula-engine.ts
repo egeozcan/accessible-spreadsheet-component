@@ -1284,9 +1284,12 @@ export class FormulaEngine {
     // ─── Math ───────────────────────────────────────────
 
     this.registerFunction('MOD', (_ctx, num, divisor) => {
+      const n = Number(num);
       const d = Number(divisor);
       if (d === 0) throw new Error('#DIV/0!');
-      return Number(num) % d;
+      // Excel MOD: n - d * FLOOR(n/d). Result sign follows the divisor,
+      // unlike JavaScript's % which follows the dividend.
+      return n - d * Math.floor(n / d);
     });
 
     this.registerFunction('POWER', (_ctx, base, exp) => {
