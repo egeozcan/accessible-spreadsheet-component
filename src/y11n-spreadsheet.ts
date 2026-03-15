@@ -1203,8 +1203,12 @@ export class Y11nSpreadsheet extends LitElement {
 
     // Build the full command batch (for undo) before applying anything
     const valueUpdates = updates.map((u) => ({ id: u.id, value: u.value }));
-    const batch = this._buildCommandBatch(valueUpdates, 'paste', selection, selection);
-    if (!batch) return;
+    let batch = this._buildCommandBatch(valueUpdates, 'paste', selection, selection);
+
+    // If no values changed, create an empty batch shell for format-only deltas
+    if (!batch) {
+      batch = { deltas: [], selectionBefore: selection, selectionAfter: selection, operation: 'paste' };
+    }
 
     // Inject format deltas
     const updateMap = new Map(updates.map((u) => [u.id, u]));
@@ -1229,6 +1233,9 @@ export class Y11nSpreadsheet extends LitElement {
         });
       }
     }
+
+    // Nothing to do if no value or format changes
+    if (batch.deltas.length === 0) return;
 
     // Small paste: apply synchronously (no overhead)
     if (batch.deltas.length <= Y11nSpreadsheet.PASTE_CHUNK_SIZE) {

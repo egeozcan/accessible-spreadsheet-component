@@ -111,4 +111,25 @@ test.describe('Clipboard Operations', () => {
     await spreadsheet.waitForCellText(3, 4, '');
     await spreadsheet.waitForCellText(3, 5, '');
   });
+
+  test('pasting over identical values still applies formatting', async ({ spreadsheet }) => {
+    // Set A1 = "Hello" with bold, and B1 = "Hello" with no formatting
+    await spreadsheet.setData({
+      '0:0': { rawValue: 'Hello', displayValue: 'Hello', type: 'text' },
+      '0:1': { rawValue: 'Hello', displayValue: 'Hello', type: 'text' },
+    });
+    await spreadsheet.setCellFormat('0:0', { bold: true });
+
+    // Copy A1 (which has bold formatting)
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('Control+c');
+
+    // Paste onto B1 (same value "Hello" but no bold)
+    await spreadsheet.clickCell(0, 1);
+    await spreadsheet.cell(0, 1).press('Control+v');
+
+    // B1 should now have bold formatting from the paste
+    const format = await spreadsheet.getCellFormat('0:1');
+    expect(format?.bold).toBe(true);
+  });
 });
