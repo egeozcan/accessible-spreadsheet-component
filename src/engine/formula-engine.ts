@@ -1409,6 +1409,9 @@ export class FormulaEngine {
       const old = String(oldStr);
       const replacement = String(newStr);
 
+      // Excel: empty search string → return text unchanged
+      if (old === '') return s;
+
       if (instance !== undefined) {
         const nth = Number(instance);
         let count = 0;

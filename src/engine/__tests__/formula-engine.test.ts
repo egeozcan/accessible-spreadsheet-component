@@ -1570,10 +1570,14 @@ describe('FormulaEngine', () => {
       });
     });
 
-    it('replaces empty string (inserts between each character)', () => {
-      // JS "ab".split("").join("-") => "a-b"
+    it('empty search string returns text unchanged (Excel convention)', () => {
+      // Excel: SUBSTITUTE with empty old_text returns the original string
       expect(engine.evaluate('=SUBSTITUTE("ab", "", "-")')).toEqual({
-        displayValue: 'a-b',
+        displayValue: 'ab',
+        type: 'text',
+      });
+      expect(engine.evaluate('=SUBSTITUTE("hello", "", "x", 1)')).toEqual({
+        displayValue: 'hello',
         type: 'text',
       });
     });
