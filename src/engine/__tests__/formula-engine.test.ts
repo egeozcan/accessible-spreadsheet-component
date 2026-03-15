@@ -108,6 +108,14 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=+5')).toEqual({ displayValue: '5', type: 'number' });
     });
 
+    it('chained unary: --5 is 5 (double negation)', () => {
+      expect(engine.evaluate('=--5')).toEqual({ displayValue: '5', type: 'number' });
+    });
+
+    it('mixed chained unary: -+5 is -5', () => {
+      expect(engine.evaluate('=-+5')).toEqual({ displayValue: '-5', type: 'number' });
+    });
+
     it('comparison has lowest precedence: 1+2>2 is TRUE', () => {
       expect(engine.evaluate('=1+2>2')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
     });

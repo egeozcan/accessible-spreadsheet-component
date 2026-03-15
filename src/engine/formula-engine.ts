@@ -711,11 +711,11 @@ export class FormulaEngine {
   private _parseUnary(s: ParserState): unknown {
     if (this._peek(s).type === 'OPERATOR' && this._peek(s).value === '-') {
       this._consume(s);
-      return -Number(this._parsePrimary(s));
+      return -Number(this._parseUnary(s));
     }
     if (this._peek(s).type === 'OPERATOR' && this._peek(s).value === '+') {
       this._consume(s);
-      return Number(this._parsePrimary(s));
+      return Number(this._parseUnary(s));
     }
     return this._parsePrimary(s);
   }
