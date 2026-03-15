@@ -1025,7 +1025,9 @@ export class FormulaEngine {
     });
 
     this.registerFunction('IF', (_ctx, condition, trueVal, falseVal) => {
-      return condition ? trueVal : falseVal;
+      // Excel defaults: omitted true branch → 0, omitted false branch → FALSE
+      if (condition) return trueVal !== undefined ? trueVal : 0;
+      return falseVal !== undefined ? falseVal : false;
     });
 
     this.registerFunction('CONCAT', (_ctx, ...args) => {

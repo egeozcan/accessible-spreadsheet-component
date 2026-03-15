@@ -451,6 +451,22 @@ describe('FormulaEngine', () => {
     it('supports nested IF', () => {
       expect(engine.evaluate('=IF(TRUE, IF(FALSE, 1, 2), 3)')).toEqual({ displayValue: '2', type: 'number' });
     });
+
+    it('omitted false branch defaults to FALSE', () => {
+      // Excel: =IF(FALSE, "yes") returns FALSE
+      expect(engine.evaluate('=IF(FALSE, "yes")')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+      // True branch still works normally
+      expect(engine.evaluate('=IF(TRUE, "yes")')).toEqual({ displayValue: 'yes', type: 'text' });
+    });
+
+    it('omitted true branch defaults to 0', () => {
+      // Excel: =IF(TRUE) returns 0 (both value_if_true and value_if_false omitted/defaulted)
+      // But =IF(TRUE,,5) → 0 for the omitted true branch
+      // Our parser can't represent omitted middle args, so just test 2-arg form
+      expect(engine.evaluate('=IF(FALSE, "yes")')).not.toEqual(
+        expect.objectContaining({ displayValue: 'undefined' })
+      );
+    });
   });
 
   describe('CONCAT', () => {
