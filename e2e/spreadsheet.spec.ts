@@ -27,8 +27,28 @@ async function getCellText(page: Page, row: number, col: number): Promise<string
   return (await span.textContent()) ?? '';
 }
 
+// Helper: scroll a cell into the virtual viewport so it is rendered in the DOM
+async function scrollCellIntoView(page: Page, row: number, col: number) {
+  await page.evaluate(({ row, col }) => {
+    const sheet = document.querySelector('y11n-spreadsheet') as any;
+    const grid = sheet?.shadowRoot?.querySelector('[role="grid"]');
+    if (!grid) return;
+    const style = getComputedStyle(sheet);
+    const cellHeight = parseInt(style.getPropertyValue('--ls-cell-height'), 10) || 28;
+    const cellWidth = parseInt(style.getPropertyValue('--ls-cell-width'), 10) || 100;
+    grid.scrollTop = Math.max(0, row * cellHeight - grid.clientHeight / 2);
+    grid.scrollLeft = Math.max(0, col * cellWidth - grid.clientWidth / 2);
+  }, { row, col });
+  // Wait for Lit to re-render with the new scroll position
+  await page.waitForFunction(({ row, col }) => {
+    const sheet = document.querySelector('y11n-spreadsheet');
+    return sheet?.shadowRoot?.querySelector(`[data-row="${row}"][data-col="${col}"]`) !== null;
+  }, { row, col }, { timeout: 5000 });
+}
+
 // Helper: type into a cell and commit
 async function editCell(page: Page, row: number, col: number, value: string) {
+  await scrollCellIntoView(page, row, col);
   const cell = getCell(page, row, col);
   await cell.click();
   await cell.dblclick();
@@ -475,6 +495,7 @@ test.describe('Spreadsheet Component', () => {
     test('undo and redo pasted range', async ({ page }) => {
       await installClipboardMock(page, 'p11\tp12\np21\tp22');
 
+      await scrollCellIntoView(page, 22, 0);
       const target = getCell(page, 22, 0);
       await target.click();
       await page.keyboard.press('ControlOrMeta+v');

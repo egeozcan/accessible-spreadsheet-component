@@ -1431,6 +1431,9 @@ export class Y11nSpreadsheet extends LitElement {
       cellWidth,
       viewWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH
     );
+    // Subtract the sticky column header height so cells aren't scrolled
+    // behind it (mirrors how dataViewportWidth subtracts the row header).
+    const dataViewportHeight = Math.max(cellHeight, viewHeight - cellHeight);
 
     const cellTop = row * cellHeight;
     const cellBottom = cellTop + cellHeight;
@@ -1440,8 +1443,8 @@ export class Y11nSpreadsheet extends LitElement {
     let nextScrollTop = this._scrollTop;
     if (cellTop < nextScrollTop) {
       nextScrollTop = cellTop;
-    } else if (cellBottom > nextScrollTop + viewHeight) {
-      nextScrollTop = cellBottom - viewHeight;
+    } else if (cellBottom > nextScrollTop + dataViewportHeight) {
+      nextScrollTop = cellBottom - dataViewportHeight;
     }
 
     let nextScrollLeft = this._scrollLeft;

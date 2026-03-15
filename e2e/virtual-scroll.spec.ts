@@ -71,6 +71,49 @@ test.describe('Virtual Scrolling', () => {
     await expect(spreadsheet.cell(30, 0)).toHaveClass(/active-cell/);
   });
 
+  test('ensureCellVisible scrolls cell fully into viewport below sticky header', async ({ spreadsheet }) => {
+    // Programmatically move the selection to a far-off row via the component's
+    // internal API, which calls _ensureCellVisible but does NOT trigger the
+    // browser's native focus-scroll. This isolates the scroll calculation.
+    await spreadsheet.clickCell(0, 0);
+
+    const visibility = await spreadsheet.page.evaluate(async () => {
+      const sheet = document.querySelector('y11n-spreadsheet') as any;
+      // Use the public keyboard-like API: set selection then request update
+      // We access the selection manager to jump directly
+      const sel = sheet._selection;
+      sel.moveTo(30, 0);
+      // Trigger the internal ensureCellVisible (same as keyboard nav does)
+      sheet._ensureCellVisible(30, 0);
+      sheet.requestUpdate();
+      await sheet.updateComplete;
+
+      const grid = sheet.shadowRoot!.querySelector('[role="grid"]') as HTMLElement;
+      const activeCell = sheet.shadowRoot!.querySelector('[data-row="30"][data-col="0"]') as HTMLElement;
+      if (!activeCell || !grid) return { visible: false, reason: 'missing element' };
+
+      const gridRect = grid.getBoundingClientRect();
+      const cellRect = activeCell.getBoundingClientRect();
+
+      // Find the sticky header height
+      const header = sheet.shadowRoot!.querySelector('.ls-col-header') as HTMLElement;
+      const headerHeight = header ? header.getBoundingClientRect().height : 0;
+
+      const dataTop = gridRect.top + headerHeight;
+      const dataBottom = gridRect.bottom;
+
+      return {
+        visible: cellRect.top >= dataTop - 1 && cellRect.bottom <= dataBottom + 1,
+        cellTop: Math.round(cellRect.top),
+        cellBottom: Math.round(cellRect.bottom),
+        dataTop: Math.round(dataTop),
+        dataBottom: Math.round(dataBottom),
+      };
+    });
+
+    expect(visibility.visible).toBe(true);
+  });
+
   test('large grid renders efficiently with spacers', async ({ spreadsheet }) => {
     // Set the grid to have many rows
     await spreadsheet.setProperty('rows', 500);
