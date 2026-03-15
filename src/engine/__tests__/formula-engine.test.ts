@@ -689,6 +689,22 @@ describe('FormulaEngine', () => {
       engine.setData(data);
       expect(engine.evaluate('=IFERROR(A1, 999)')).toEqual({ displayValue: '999', type: 'number' });
     });
+
+    it('catches division-by-zero in first argument expression', () => {
+      expect(engine.evaluate('=IFERROR(1/0, "safe")')).toEqual({ displayValue: 'safe', type: 'text' });
+    });
+
+    it('catches #NAME? from unknown function in first argument', () => {
+      expect(engine.evaluate('=IFERROR(NOPE(), 0)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('catches error from formula cell reference', () => {
+      const data: GridData = new Map([
+        ['0:0', cell('=1/0', 'error', '#DIV/0!')],
+      ]);
+      engine.setData(data);
+      expect(engine.evaluate('=IFERROR(A1, "recovered")')).toEqual({ displayValue: 'recovered', type: 'text' });
+    });
   });
 
   describe('AND', () => {

@@ -772,6 +772,12 @@ export class FormulaEngine {
     const name = this._consume(s, 'FUNC').value;
     this._consume(s, 'LPAREN');
 
+    // IFERROR needs to trap errors thrown by its first argument rather
+    // than letting them propagate past the function call.
+    if (name === 'IFERROR') {
+      return this._parseIFERROR(s);
+    }
+
     const args: unknown[] = [];
     if (this._peek(s).type !== 'RPAREN') {
       args.push(this._parseComparison(s));
@@ -808,6 +814,58 @@ export class FormulaEngine {
     }
 
     return fn(ctx, ...args);
+  }
+
+  /**
+   * Parse IFERROR(value, fallback) with error trapping on the first argument.
+   * Called after LPAREN has already been consumed.
+   */
+  private _parseIFERROR(s: ParserState): unknown {
+    const savedPos = s.pos;
+    let value: unknown;
+    let caught = false;
+
+    try {
+      value = this._parseComparison(s);
+    } catch {
+      caught = true;
+      // The first argument threw — scan forward to the comma or closing paren
+      // so we can parse the fallback argument from a known position.
+      s.pos = savedPos;
+      let depth = 0;
+      while (this._peek(s).type !== 'EOF') {
+        const t = this._peek(s);
+        if (t.type === 'LPAREN') { depth++; s.pos++; }
+        else if (t.type === 'RPAREN') {
+          if (depth === 0) break;
+          depth--;
+          s.pos++;
+        }
+        else if (t.type === 'COMMA' && depth === 0) break;
+        else s.pos++;
+      }
+    }
+
+    // Parse the fallback argument (if present)
+    let fallback: unknown = '';
+    if (this._peek(s).type === 'COMMA') {
+      this._consume(s); // consume comma
+      fallback = this._parseComparison(s);
+    }
+    this._consume(s, 'RPAREN');
+
+    if (caught) return fallback;
+
+    // No throw — but the value itself might be an error string (e.g. from a
+    // cell whose displayValue is already an error code).
+    const sv = String(value);
+    if (
+      sv === '#ERROR!' || sv === '#REF!' || sv === '#DIV/0!' ||
+      sv === '#NAME?' || sv === '#CIRC!' || sv === '#VALUE!'
+    ) {
+      return fallback;
+    }
+    return value;
   }
 
   // ─── Comparison helper ────────────────────────────────
