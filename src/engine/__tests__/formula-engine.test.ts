@@ -45,6 +45,12 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=""')).toEqual({ displayValue: '', type: 'text' });
     });
 
+    it('tokenizes escaped double-quotes inside strings', () => {
+      // Excel convention: "" inside a string literal represents a single "
+      expect(engine.evaluate('="He said ""hi"""')).toEqual({ displayValue: 'He said "hi"', type: 'text' });
+      expect(engine.evaluate('=""""')).toEqual({ displayValue: '"', type: 'text' });
+    });
+
     it('tokenizes boolean literals TRUE', () => {
       expect(engine.evaluate('=TRUE')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
     });

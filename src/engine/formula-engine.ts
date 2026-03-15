@@ -466,13 +466,23 @@ export class FormulaEngine {
         continue;
       }
 
-      // String literal
+      // String literal (supports "" as escaped quote, matching Excel convention)
       if (ch === '"') {
         let str = '';
         i++; // skip opening quote
-        while (i < input.length && input[i] !== '"') {
-          str += input[i];
-          i++;
+        while (i < input.length) {
+          if (input[i] === '"') {
+            // Doubled "" is an escaped literal quote
+            if (i + 1 < input.length && input[i + 1] === '"') {
+              str += '"';
+              i += 2;
+            } else {
+              break; // closing quote
+            }
+          } else {
+            str += input[i];
+            i++;
+          }
         }
         if (i >= input.length) {
           throw new Error('Unterminated string literal');
