@@ -1297,14 +1297,18 @@ export class FormulaEngine {
       const n = Number(num);
       const sig = significance !== undefined ? Number(significance) : 1;
       if (sig === 0) return 0;
-      return Math.ceil(n / sig) * sig;
+      // Round the quotient to 10 significant digits to neutralise IEEE 754
+      // drift (e.g. 0.07/0.01 → 7.000000000000001 → 7) before ceiling.
+      const q = parseFloat((n / sig).toPrecision(10));
+      return Math.ceil(q) * sig;
     });
 
     this.registerFunction('FLOOR', (_ctx, num, significance?) => {
       const n = Number(num);
       const sig = significance !== undefined ? Number(significance) : 1;
       if (sig === 0) return 0;
-      return Math.floor(n / sig) * sig;
+      const q = parseFloat((n / sig).toPrecision(10));
+      return Math.floor(q) * sig;
     });
 
     // ─── String ─────────────────────────────────────────

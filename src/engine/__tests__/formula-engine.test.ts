@@ -1354,6 +1354,11 @@ describe('FormulaEngine', () => {
       engine.setData(data);
       expect(engine.evaluate('=CEILING(A1)')).toEqual({ displayValue: '5', type: 'number' });
     });
+
+    it('handles decimal significance without floating-point drift', () => {
+      // 0.07 / 0.01 is 7.000000000000001 in IEEE 754 — ceil must not round up to 8
+      expect(engine.evaluate('=CEILING(0.07, 0.01)')).toEqual({ displayValue: '0.07', type: 'number' });
+    });
   });
 
   describe('FLOOR', () => {
@@ -1385,6 +1390,12 @@ describe('FormulaEngine', () => {
       const data = makeData({ '0:0': '7.8' });
       engine.setData(data);
       expect(engine.evaluate('=FLOOR(A1)')).toEqual({ displayValue: '7', type: 'number' });
+    });
+
+    it('handles decimal significance without floating-point drift', () => {
+      // 0.6 / 0.2 is 2.9999999999999996 in IEEE 754 — must not round down to 2
+      expect(engine.evaluate('=FLOOR(0.6, 0.2)')).toEqual({ displayValue: '0.6', type: 'number' });
+      expect(engine.evaluate('=FLOOR(1.0, 0.1)')).toEqual({ displayValue: '1', type: 'number' });
     });
   });
 
