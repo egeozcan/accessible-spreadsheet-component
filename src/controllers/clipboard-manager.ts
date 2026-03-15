@@ -25,6 +25,8 @@ export class ClipboardManager {
   /** Source range and data from the last internal copy/cut, used for reference adjustment on paste */
   private _copySourceRange: SelectionRange | null = null;
   private _copySourceData: GridData | null = null;
+  /** The TSV text we last wrote to the clipboard, used to detect external overwrites */
+  private _lastWrittenText: string | null = null;
 
   /**
    * Copy the selected range to the system clipboard.
@@ -49,6 +51,7 @@ export class ClipboardManager {
     }
     this._copySourceData = snapshot;
     const tsv = this.serializeRange(data, range);
+    this._lastWrittenText = tsv;
     const htmlStr = this._serializeRangeAsHTML(data, range);
 
     try {
@@ -105,10 +108,22 @@ export class ClipboardManager {
     maxRows: number,
     maxCols: number
   ): Promise<PasteUpdate[] | null> {
-    // Try internal paste with formula reference adjustment first
+    // Try internal paste with formula reference adjustment, but only if
+    // the system clipboard still contains what we wrote (i.e. the user
+    // hasn't copied something from an external app since the last copy).
     if (this._copySourceRange && this._copySourceData) {
-      const internalResult = this._pasteInternal(targetRow, targetCol, maxRows, maxCols);
-      if (internalResult) return internalResult;
+      let clipboardMatchesInternal = false;
+      try {
+        const currentText = await navigator.clipboard.readText();
+        clipboardMatchesInternal = currentText === this._lastWrittenText;
+      } catch {
+        // Clipboard read denied — assume internal data is still valid
+        clipboardMatchesInternal = true;
+      }
+      if (clipboardMatchesInternal) {
+        const internalResult = this._pasteInternal(targetRow, targetCol, maxRows, maxCols);
+        if (internalResult) return internalResult;
+      }
     }
 
     // Try reading HTML from clipboard first

@@ -132,4 +132,26 @@ test.describe('Clipboard Operations', () => {
     const format = await spreadsheet.getCellFormat('0:1');
     expect(format?.bold).toBe(true);
   });
+
+  test('external clipboard overwrites stale internal copy data', async ({ spreadsheet }) => {
+    // Set A1 = "original"
+    await spreadsheet.setData({
+      '0:0': { rawValue: 'original', displayValue: 'original', type: 'text' },
+    });
+
+    // Internal copy of A1
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('Control+c');
+
+    // Simulate an external app overwriting the clipboard
+    await spreadsheet.page.evaluate(() =>
+      navigator.clipboard.writeText('external data')
+    );
+
+    // Paste into B1 — should get "external data", NOT "original"
+    await spreadsheet.clickCell(0, 1);
+    await spreadsheet.cell(0, 1).press('Control+v');
+
+    await spreadsheet.waitForCellText(0, 1, 'external data');
+  });
 });
