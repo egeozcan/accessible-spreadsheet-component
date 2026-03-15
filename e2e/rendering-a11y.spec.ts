@@ -15,17 +15,25 @@ test.describe('Rendering & Accessibility', () => {
     await expect(spreadsheet.grid).toHaveAttribute('aria-colcount', '27');
   });
 
-  test('renders column headers A through Z', async ({ spreadsheet }) => {
+  test('renders virtualized column headers and can reveal Z when scrolled', async ({ spreadsheet }) => {
     const headers = spreadsheet.columnHeaders;
-    // First columnheader is the corner header (empty), then A-Z
     const count = await headers.count();
-    expect(count).toBe(27); // corner + 26 columns
 
-    // Check first few column labels
+    // First columnheader is the corner header (empty), followed by a visible subset.
+    expect(count).toBeGreaterThan(1);
+    expect(count).toBeLessThan(27);
+
     await expect(headers.nth(1)).toHaveText('A');
     await expect(headers.nth(2)).toHaveText('B');
     await expect(headers.nth(3)).toHaveText('C');
-    await expect(headers.nth(26)).toHaveText('Z');
+
+    await spreadsheet.grid.evaluate((grid) => {
+      grid.scrollLeft = grid.scrollWidth;
+    });
+    await spreadsheet.page.waitForTimeout(200);
+
+    const renderedHeaders = spreadsheet.shadow('.ls-col-header');
+    await expect(renderedHeaders.last()).toHaveText('Z');
   });
 
   test('renders row headers with 1-based numbers', async ({ spreadsheet }) => {

@@ -111,6 +111,7 @@ export class Y11nSpreadsheet extends LitElement {
 
   /** Internal data store - we keep a separate mutable copy */
   private _internalData: GridData = new Map();
+  private _lastSyncedDataRef: GridData | null = null;
 
   /** Track which cell started editing for commit logic */
   private _editingCellKey: string | null = null;
@@ -132,16 +133,14 @@ export class Y11nSpreadsheet extends LitElement {
 
   /** Number of cells to process per animation frame during large pastes */
   private static readonly PASTE_CHUNK_SIZE = 500;
+  private static readonly INITIAL_VIEW_ROWS = 15;
+  private static readonly INITIAL_VIEW_COLS = 8;
+  private static readonly ROW_HEADER_WIDTH = 50;
 
   // ─── Lifecycle ──────────────────────────────────────
 
-  connectedCallback(): void {
-    super.connectedCallback();
-    this._syncData();
-  }
-
   willUpdate(changedProps: Map<string, unknown>): void {
-    if (changedProps.has('data')) {
+    if (changedProps.has('data') && this.data !== this._lastSyncedDataRef) {
       this._syncData();
     }
     if (changedProps.has('rows') || changedProps.has('cols')) {
@@ -150,9 +149,7 @@ export class Y11nSpreadsheet extends LitElement {
       this._selection.setBounds(this.rows, this.cols);
     }
     if (changedProps.has('functions')) {
-      for (const [name, fn] of Object.entries(this.functions)) {
-        this._formulaEngine.registerFunction(name, fn as FormulaFunction);
-      }
+      this._formulaEngine.setFunctions(this.functions);
       this._recalcAll();
     }
   }
@@ -425,6 +422,7 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     this._internalData = newData;
+    this._lastSyncedDataRef = this.data;
     this._undoStack = [];
     this._redoStack = [];
 
@@ -615,6 +613,7 @@ export class Y11nSpreadsheet extends LitElement {
         this._applyCellFormat(delta.id, delta.formatAfter);
       }
     }
+    this._lastSyncedDataRef = this.data;
     this._restoreSelection(batch.selectionAfter);
     this._finalizeBatch(batch, source, 'after');
   }
@@ -626,6 +625,7 @@ export class Y11nSpreadsheet extends LitElement {
         this._applyCellFormat(delta.id, delta.formatBefore);
       }
     }
+    this._lastSyncedDataRef = this.data;
     this._restoreSelection(batch.selectionBefore);
     this._finalizeBatch(batch, 'undo', 'before');
   }
@@ -824,6 +824,8 @@ export class Y11nSpreadsheet extends LitElement {
         this._editValue.substring(this._refInsertEnd);
       this._refInsertEnd = this._refInsertStart + ref.length;
     }
+
+    this._ensureCellVisible(this._refCursorRow, this._refCursorCol);
   }
 
   private _exitRefMode(): void {
@@ -1383,15 +1385,13 @@ export class Y11nSpreadsheet extends LitElement {
    * We add a buffer of extra rows/cols for smooth scrolling.
    */
   private _getVisibleRange(): { startRow: number; endRow: number; startCol: number; endCol: number } {
-    const gridEl = this._grid;
-    if (!gridEl) {
-      return { startRow: 0, endRow: Math.min(this.rows, 40), startCol: 0, endCol: this.cols };
-    }
-
     const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
     const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
-    const viewHeight = gridEl.clientHeight;
-    const viewWidth = gridEl.clientWidth;
+    const gridEl = this._grid;
+    const viewHeight =
+      gridEl?.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
+    const viewWidth =
+      gridEl?.clientWidth || cellWidth * Y11nSpreadsheet.INITIAL_VIEW_COLS;
 
     const buffer = 5;
 
@@ -1407,7 +1407,56 @@ export class Y11nSpreadsheet extends LitElement {
     if (activeCol < startCol) startCol = activeCol;
     if (activeCol >= endCol) endCol = activeCol + 1;
 
+    if (this._refMode) {
+      if (this._refCursorRow < startRow) startRow = this._refCursorRow;
+      if (this._refCursorRow >= endRow) endRow = this._refCursorRow + 1;
+      if (this._refCursorCol < startCol) startCol = this._refCursorCol;
+      if (this._refCursorCol >= endCol) endCol = this._refCursorCol + 1;
+    }
+
     return { startRow, endRow, startCol, endCol };
+  }
+
+  private _ensureCellVisible(row: number, col: number): void {
+    const gridEl = this._grid;
+    if (!gridEl) return;
+
+    const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+    const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
+    const viewHeight =
+      gridEl.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
+    const viewWidth =
+      gridEl.clientWidth || cellWidth * Y11nSpreadsheet.INITIAL_VIEW_COLS;
+    const dataViewportWidth = Math.max(
+      cellWidth,
+      viewWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH
+    );
+
+    const cellTop = row * cellHeight;
+    const cellBottom = cellTop + cellHeight;
+    const cellLeft = col * cellWidth;
+    const cellRight = cellLeft + cellWidth;
+
+    let nextScrollTop = this._scrollTop;
+    if (cellTop < nextScrollTop) {
+      nextScrollTop = cellTop;
+    } else if (cellBottom > nextScrollTop + viewHeight) {
+      nextScrollTop = cellBottom - viewHeight;
+    }
+
+    let nextScrollLeft = this._scrollLeft;
+    if (cellLeft < nextScrollLeft) {
+      nextScrollLeft = cellLeft;
+    } else if (cellRight > nextScrollLeft + dataViewportWidth) {
+      nextScrollLeft = cellRight - dataViewportWidth;
+    }
+
+    if (nextScrollTop !== this._scrollTop || nextScrollLeft !== this._scrollLeft) {
+      this._scrollTop = nextScrollTop;
+      this._scrollLeft = nextScrollLeft;
+      gridEl.scrollTop = nextScrollTop;
+      gridEl.scrollLeft = nextScrollLeft;
+    }
   }
 
   private _getCSSVarPx(name: string, fallback: number): number {
@@ -1427,7 +1476,7 @@ export class Y11nSpreadsheet extends LitElement {
     const { row, col } = this._selection.activeCell;
     const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
     const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
-    const headerWidth = 50; // row header width
+    const headerWidth = Y11nSpreadsheet.ROW_HEADER_WIDTH;
 
     const top = (row + 1) * cellHeight - this._scrollTop; // +1 for header, offset by scroll
     const left = headerWidth + col * cellWidth - this._scrollLeft;

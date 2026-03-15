@@ -12,21 +12,24 @@ test.describe('Virtual Scrolling', () => {
   });
 
   test('scrolling reveals new rows', async ({ spreadsheet }) => {
-    // Row 45 should not be rendered initially (virtual rendering limits initial rows)
-    const row45Before = await spreadsheet.shadow('[data-row="45"]').count();
-    expect(row45Before).toBe(0);
+    const initialVisibleRows = await spreadsheet.shadow('[data-row]').evaluateAll(
+      (elements) => elements.map((el) => parseInt((el as HTMLElement).dataset.row!))
+    );
+    const initialMaxRow = Math.max(...initialVisibleRows);
 
-    // Scroll far enough to bring row 45 into view
-    await spreadsheet.grid.evaluate((grid) => {
-      grid.scrollTop = 1000;
-    });
-
-    // Wait for scroll event and re-render
+    // Scroll well down the grid and wait for virtualization to catch up.
+    await spreadsheet.grid.evaluate((grid, top) => {
+      grid.scrollTop = top as number;
+    }, 1000);
     await spreadsheet.page.waitForTimeout(200);
 
-    // Row 45 should now be rendered
-    const row45After = await spreadsheet.shadow('[data-row="45"]').count();
-    expect(row45After).toBeGreaterThan(0);
+    const visibleRowsAfterScroll = await spreadsheet.shadow('[data-row]').evaluateAll(
+      (elements) => elements.map((el) => parseInt((el as HTMLElement).dataset.row!))
+    );
+    const maxRowAfterScroll = Math.max(...visibleRowsAfterScroll);
+
+    expect(maxRowAfterScroll).toBeGreaterThan(initialMaxRow);
+    expect(maxRowAfterScroll).toBeGreaterThan(30);
   });
 
   test('scrolled-to cells are accessible and clickable', async ({ spreadsheet }) => {

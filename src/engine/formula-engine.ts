@@ -156,6 +156,7 @@ function matchesCriteria(value: unknown, criteria: string): boolean {
 
 export class FormulaEngine {
   private _functions: Map<string, FormulaFunction> = new Map();
+  private _builtinFunctionNames: Set<string> = new Set();
   private _data: GridData = new Map();
   private _evaluating: Set<string> = new Set(); // circular reference detection
   private _evalDepth = 0;
@@ -170,6 +171,7 @@ export class FormulaEngine {
 
   constructor() {
     this.registerBuiltins();
+    this._builtinFunctionNames = new Set(this._functions.keys());
   }
 
   /**
@@ -181,6 +183,23 @@ export class FormulaEngine {
    */
   registerFunction(name: string, fn: FormulaFunction): void {
     this._functions.set(name.toUpperCase(), fn);
+  }
+
+  /**
+   * Replace the entire set of user-defined functions while keeping built-ins.
+   *
+   * @param functions - New custom functions keyed by name
+   */
+  setFunctions(functions: Record<string, FormulaFunction>): void {
+    for (const name of Array.from(this._functions.keys())) {
+      if (!this._builtinFunctionNames.has(name)) {
+        this._functions.delete(name);
+      }
+    }
+
+    for (const [name, fn] of Object.entries(functions)) {
+      this.registerFunction(name, fn);
+    }
   }
 
   /** Update the data reference for evaluation (full reset of dep graph and cache) */
