@@ -1479,11 +1479,19 @@ export class FormulaEngine {
 
     this.registerFunction('DATE', (_ctx, year, month, day) => {
       // Excel serial number: days since 1899-12-30
-      const y = Number(year);
+      let y = Number(year);
       const m = Number(month);
       const d = Number(day);
-      const date = new Date(y, m - 1, d);
-      const epoch = new Date(1899, 11, 30); // 1899-12-30
+      // Excel two-digit year windowing: 0-29 → 2000+, 30-99 → 1900+
+      if (y >= 0 && y <= 29) y += 2000;
+      else if (y >= 30 && y <= 99) y += 1900;
+      // Use setFullYear to bypass JS Date's own 0-99 → 1900+ mapping
+      const date = new Date(0);
+      date.setFullYear(y, m - 1, d);
+      date.setHours(0, 0, 0, 0);
+      const epoch = new Date(0);
+      epoch.setFullYear(1899, 11, 30);
+      epoch.setHours(0, 0, 0, 0);
       const diff = date.getTime() - epoch.getTime();
       return Math.round(diff / (1000 * 60 * 60 * 24));
     });

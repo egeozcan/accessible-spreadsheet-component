@@ -1766,6 +1766,18 @@ describe('FormulaEngine', () => {
       const r2 = engine.evaluate('=DATE(2020, 1, 2)');
       expect(Number(r2.displayValue) - Number(r1.displayValue)).toBe(1);
     });
+
+    it('two-digit year windowing matches Excel (0-29 → 2000+, 30-99 → 1900+)', () => {
+      // DATE(20, 1, 1) should be 2020, same as DATE(2020, 1, 1)
+      const twoDigit = engine.evaluate('=DATE(20, 1, 1)');
+      const fourDigit = engine.evaluate('=DATE(2020, 1, 1)');
+      expect(twoDigit.displayValue).toBe(fourDigit.displayValue);
+
+      // DATE(99, 1, 1) should be 1999, same as DATE(1999, 1, 1)
+      const twoDigit99 = engine.evaluate('=DATE(99, 1, 1)');
+      const fourDigit99 = engine.evaluate('=DATE(1999, 1, 1)');
+      expect(twoDigit99.displayValue).toBe(fourDigit99.displayValue);
+    });
   });
 
   describe('NOW', () => {
