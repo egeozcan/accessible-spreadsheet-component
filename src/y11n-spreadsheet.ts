@@ -87,6 +87,8 @@ export class Y11nSpreadsheet extends LitElement {
   @state() private _isEditing = false;
   @state() private _editValue = '';
   @state() private _formulaBarMode: FormulaBarMode = 'raw';
+  /** When true, the next render should reposition the editor cursor (set on edit start / ref mode) */
+  private _editorNeedsCursorReset = false;
 
   /** Whether arrow keys are currently selecting a cell reference in a formula */
   @state() private _refMode = false;
@@ -745,6 +747,7 @@ export class Y11nSpreadsheet extends LitElement {
     const cell = this._internalData.get(key);
     this._editValue = initialValue ?? cell?.rawValue ?? '';
     this._isEditing = true;
+    this._editorNeedsCursorReset = true;
   }
 
   private _commitEdit(): void {
@@ -1845,8 +1848,9 @@ export class Y11nSpreadsheet extends LitElement {
       if (this._refMode) {
         // Place cursor after the inserted reference
         this._editor.setSelectionRange(this._refInsertEnd, this._refInsertEnd);
-      } else {
-        // Place cursor at the end
+      } else if (this._editorNeedsCursorReset) {
+        // Place cursor at the end only when editing first starts
+        this._editorNeedsCursorReset = false;
         this._editor.setSelectionRange(this._editValue.length, this._editValue.length);
       }
     }

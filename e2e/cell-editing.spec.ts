@@ -135,6 +135,26 @@ test.describe('Cell Editing', () => {
     await spreadsheet.waitForCellText(8, 1, '');
   });
 
+  test('typing in the middle of a value keeps cursor position', async ({ spreadsheet }) => {
+    // Set a cell with a formula and start editing
+    await spreadsheet.clickCell(5, 0);
+    await spreadsheet.cell(5, 0).dblclick();
+    await spreadsheet.typeInEditor('=A1+B1');
+
+    // Position cursor after "=A1" (position 3) and type "XY"
+    await spreadsheet.page.evaluate(() => {
+      const sheet = document.querySelector('y11n-spreadsheet')!;
+      const editor = sheet.shadowRoot!.querySelector('#editor') as HTMLInputElement;
+      editor.setSelectionRange(3, 3);
+    });
+
+    // Type two characters — both should be inserted at position 3, not at the end
+    await spreadsheet.page.keyboard.press('x');
+    await spreadsheet.page.keyboard.press('y');
+
+    await expect(spreadsheet.editor).toHaveValue('=A1xy+B1');
+  });
+
   test('editor blur commits the edit', async ({ spreadsheet }) => {
     await spreadsheet.clickCell(9, 0);
     await spreadsheet.cell(9, 0).press('Enter');
