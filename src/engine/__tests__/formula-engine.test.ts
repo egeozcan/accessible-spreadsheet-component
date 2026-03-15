@@ -374,8 +374,14 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=AVERAGE(A1:A3)')).toEqual({ displayValue: '20', type: 'number' });
     });
 
-    it('returns 0 for no numeric values', () => {
-      expect(engine.evaluate('=AVERAGE()')).toEqual({ displayValue: '0', type: 'number' });
+    it('returns #DIV/0! for no numeric values (Excel convention)', () => {
+      expect(engine.evaluate('=AVERAGE()')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
+    });
+
+    it('returns #DIV/0! for range of only text', () => {
+      const data = makeData({ '0:0': 'hello', '1:0': 'world' });
+      engine.setData(data);
+      expect(engine.evaluate('=AVERAGE(A1:A2)')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
     });
   });
 

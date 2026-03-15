@@ -991,7 +991,7 @@ export class FormulaEngine {
 
     this.registerFunction('AVERAGE', (_ctx, ...args) => {
       const nums = args.filter((v) => typeof v === 'number' || !isNaN(Number(v)));
-      if (nums.length === 0) return 0;
+      if (nums.length === 0) throw new Error('#DIV/0!');
       const sum = nums.reduce((s: number, v) => s + Number(v), 0);
       return sum / nums.length;
     });
