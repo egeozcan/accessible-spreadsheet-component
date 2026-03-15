@@ -829,12 +829,13 @@ export class FormulaEngine {
       }
     }
 
-    // String comparison (case-sensitive for all operators)
+    // String comparison: = and <> are case-insensitive (Excel convention),
+    // relational operators (<, >, <=, >=) use locale-unaware ordinal comparison.
     const ls = String(left ?? '');
     const rs = String(right ?? '');
     switch (op) {
-      case '=':  return ls === rs;
-      case '<>': return ls !== rs;
+      case '=':  return ls.toLowerCase() === rs.toLowerCase();
+      case '<>': return ls.toLowerCase() !== rs.toLowerCase();
       case '<':  return ls < rs;
       case '>':  return ls > rs;
       case '<=': return ls <= rs;

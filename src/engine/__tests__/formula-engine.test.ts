@@ -1992,6 +1992,20 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('="banana">="apple"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
       expect(engine.evaluate('="apple">="banana"')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
     });
+
+    it('string equality is case-insensitive (Excel convention)', () => {
+      // In Excel and Google Sheets, = and <> comparisons on strings are case-insensitive
+      expect(engine.evaluate('="hello"="Hello"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('="HELLO"="hello"')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('="Hello"<>"hello"')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
+
+    it('string equality via cell references is case-insensitive', () => {
+      const data = makeData({ '0:0': 'Hello', '0:1': 'hello' });
+      engine.setData(data);
+      expect(engine.evaluate('=A1=B1')).toEqual({ displayValue: 'TRUE', type: 'boolean' });
+      expect(engine.evaluate('=A1<>B1')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+    });
   });
 
   // ─── Recursion depth limit ────────────────────────────
