@@ -1102,8 +1102,10 @@ export class FormulaEngine {
       const d = Number(digits) || 0;
       const n = Number(val);
       const factor = Math.pow(10, d);
-      // Excel rounds half away from zero; Math.round rounds half toward +Infinity
-      return Math.sign(n) * Math.round(Math.abs(n) * factor) / factor;
+      // Neutralise IEEE 754 drift (e.g. 1.005*100 → 100.4999… → 100.5)
+      // then round half away from zero (Excel convention).
+      const shifted = parseFloat((Math.abs(n) * factor).toPrecision(15));
+      return Math.sign(n) * Math.round(shifted) / factor;
     });
 
     this.registerFunction('UPPER', (_ctx, val) => {

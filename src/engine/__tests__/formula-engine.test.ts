@@ -521,6 +521,11 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=ROUND(2.5, 0)')).toEqual({ displayValue: '3', type: 'number' });
       expect(engine.evaluate('=ROUND(0.5, 0)')).toEqual({ displayValue: '1', type: 'number' });
     });
+
+    it('handles IEEE 754 midpoint drift (1.005 rounds to 1.01, not 1)', () => {
+      expect(engine.evaluate('=ROUND(1.005, 2)')).toEqual({ displayValue: '1.01', type: 'number' });
+      expect(engine.evaluate('=ROUND(2.675, 2)')).toEqual({ displayValue: '2.68', type: 'number' });
+    });
   });
 
   describe('UPPER', () => {
