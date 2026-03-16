@@ -1532,6 +1532,15 @@ describe('FormulaEngine', () => {
     it('extracts single character', () => {
       expect(engine.evaluate('=MID("hello", 2, 1)')).toEqual({ displayValue: 'e', type: 'text' });
     });
+
+    it('throws #VALUE! when start_num is less than 1', () => {
+      expect(engine.evaluate('=MID("hello", 0, 3)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+      expect(engine.evaluate('=MID("hello", -1, 3)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
+
+    it('throws #VALUE! when num_chars is negative', () => {
+      expect(engine.evaluate('=MID("hello", 2, -1)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
   });
 
   describe('SUBSTITUTE', () => {

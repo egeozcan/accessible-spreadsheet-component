@@ -1399,9 +1399,10 @@ export class FormulaEngine {
 
     this.registerFunction('MID', (_ctx, text, start, n) => {
       const s = String(text);
-      const startIdx = Number(start) - 1; // 1-indexed to 0-indexed
+      const startNum = Number(start);
       const count = Number(n);
-      return s.substring(startIdx, startIdx + count);
+      if (startNum < 1 || count < 0) throw new Error('#VALUE!');
+      return s.substring(startNum - 1, startNum - 1 + count);
     });
 
     this.registerFunction('SUBSTITUTE', (_ctx, text, oldStr, newStr, instance?) => {
