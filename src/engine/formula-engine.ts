@@ -1115,7 +1115,7 @@ export class FormulaEngine {
     });
 
     this.registerFunction('TRIM', (_ctx, val) => {
-      return String(val).trim();
+      return String(val).trim().replace(/ +/g, ' ');
     });
 
     // ─── Logic/Conditional ────────────────────────────────

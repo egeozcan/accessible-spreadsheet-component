@@ -631,6 +631,11 @@ describe('FormulaEngine', () => {
       engine.setData(data);
       expect(engine.evaluate('=TRIM(A1)')).toEqual({ displayValue: 'spaced', type: 'text' });
     });
+
+    it('collapses consecutive internal spaces to a single space', () => {
+      expect(engine.evaluate('=TRIM("  hello   world  ")')).toEqual({ displayValue: 'hello world', type: 'text' });
+      expect(engine.evaluate('=TRIM("a    b    c")')).toEqual({ displayValue: 'a b c', type: 'text' });
+    });
   });
 
   // ─── Logic/Conditional ─────────────────────────────
