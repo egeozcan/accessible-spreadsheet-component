@@ -2196,6 +2196,22 @@ describe('FormulaEngine', () => {
       expect(data.get('0:1')!.displayValue).toBe('#DIV/0!');
     });
 
+    it('classifies #N/A from INDEX over errored range as error, not text', () => {
+      // A1 has a MATCH that will fail with #N/A, A2/A3 are normal values
+      // B1 uses INDEX to retrieve A1's value from the range
+      const data = makeData({
+        '0:0': '=MATCH("notfound", C1:C3, 0)',
+        '1:0': '10',
+        '2:0': '20',
+        '0:1': '=INDEX(A1:A3, 1)',
+      });
+      engine.setData(data);
+      engine.recalculate();
+      const b1 = data.get('0:1')!;
+      expect(b1.displayValue).toBe('#N/A');
+      expect(b1.type).toBe('error');
+    });
+
     it('returns #ERROR! on syntax error', () => {
       expect(engine.evaluate('=(((')).toEqual({ displayValue: '#ERROR!', type: 'error' });
     });

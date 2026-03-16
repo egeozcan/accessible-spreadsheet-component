@@ -433,7 +433,7 @@ export class FormulaEngine {
   // ─── Value Coercion ──────────────────────────────────
 
   private coerceValue(val: string): { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' } {
-    if (val === '#ERROR!' || val === '#REF!' || val === '#DIV/0!' || val === '#NAME?' || val === '#CIRC!' || val === '#VALUE!') {
+    if (val === '#ERROR!' || val === '#REF!' || val === '#DIV/0!' || val === '#NAME?' || val === '#CIRC!' || val === '#VALUE!' || val === '#N/A') {
       return { displayValue: val, type: 'error' };
     }
 
@@ -861,7 +861,7 @@ export class FormulaEngine {
     const sv = String(value);
     if (
       sv === '#ERROR!' || sv === '#REF!' || sv === '#DIV/0!' ||
-      sv === '#NAME?' || sv === '#CIRC!' || sv === '#VALUE!'
+      sv === '#NAME?' || sv === '#CIRC!' || sv === '#VALUE!' || sv === '#N/A'
     ) {
       return fallback;
     }
@@ -1128,7 +1128,7 @@ export class FormulaEngine {
       const s = String(value);
       if (
         s === '#ERROR!' || s === '#REF!' || s === '#DIV/0!' ||
-        s === '#NAME?' || s === '#CIRC!' || s === '#VALUE!'
+        s === '#NAME?' || s === '#CIRC!' || s === '#VALUE!' || s === '#N/A'
       ) {
         return fallback;
       }
