@@ -1740,6 +1740,11 @@ describe('FormulaEngine', () => {
       // Commas preserve text type
       expect(engine.evaluate('=TEXT(A1, "#,##0.00")')).toEqual({ displayValue: '1,234.50', type: 'text' });
     });
+
+    it('rounds negative halves away from zero with "0" format', () => {
+      expect(engine.evaluate('=TEXT(-0.5, "0")')).toEqual({ displayValue: '-1', type: 'number' });
+      expect(engine.evaluate('=TEXT(-1.5, "0")')).toEqual({ displayValue: '-2', type: 'number' });
+    });
   });
 
   describe('VALUE', () => {

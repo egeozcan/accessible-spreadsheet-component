@@ -1469,7 +1469,8 @@ export class FormulaEngine {
 
       // Support common number formats
       if (fmt === '0') {
-        return Math.round(num).toString();
+        // Round half away from zero to match Excel (Math.round rounds toward +Infinity)
+        return (Math.sign(num) * Math.round(Math.abs(num))).toString();
       }
       if (fmt === '0.00' || fmt === '0.0') {
         const decimals = (fmt.split('.')[1] || '').length;
