@@ -511,6 +511,16 @@ describe('FormulaEngine', () => {
     it('defaults to 0 digits when not specified', () => {
       expect(engine.evaluate('=ROUND(3.7)')).toEqual({ displayValue: '4', type: 'number' });
     });
+
+    it('rounds half away from zero for negative numbers', () => {
+      expect(engine.evaluate('=ROUND(-2.5, 0)')).toEqual({ displayValue: '-3', type: 'number' });
+      expect(engine.evaluate('=ROUND(-1.5, 0)')).toEqual({ displayValue: '-2', type: 'number' });
+    });
+
+    it('rounds half up for positive numbers', () => {
+      expect(engine.evaluate('=ROUND(2.5, 0)')).toEqual({ displayValue: '3', type: 'number' });
+      expect(engine.evaluate('=ROUND(0.5, 0)')).toEqual({ displayValue: '1', type: 'number' });
+    });
   });
 
   describe('UPPER', () => {

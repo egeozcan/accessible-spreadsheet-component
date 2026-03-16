@@ -1098,8 +1098,10 @@ export class FormulaEngine {
 
     this.registerFunction('ROUND', (_ctx, val, digits) => {
       const d = Number(digits) || 0;
+      const n = Number(val);
       const factor = Math.pow(10, d);
-      return Math.round(Number(val) * factor) / factor;
+      // Excel rounds half away from zero; Math.round rounds half toward +Infinity
+      return Math.sign(n) * Math.round(Math.abs(n) * factor) / factor;
     });
 
     this.registerFunction('UPPER', (_ctx, val) => {
