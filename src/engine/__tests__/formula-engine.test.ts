@@ -1803,6 +1803,11 @@ describe('FormulaEngine', () => {
     it('handles already-numeric value', () => {
       expect(engine.evaluate('=VALUE(42)')).toEqual({ displayValue: '42', type: 'number' });
     });
+
+    it('converts TRUE to 1 and FALSE to 0', () => {
+      expect(engine.evaluate('=VALUE(TRUE)')).toEqual({ displayValue: '1', type: 'number' });
+      expect(engine.evaluate('=VALUE(FALSE)')).toEqual({ displayValue: '0', type: 'number' });
+    });
   });
 
   // ─── Date ───────────────────────────────────────────

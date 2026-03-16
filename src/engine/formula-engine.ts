@@ -1493,6 +1493,7 @@ export class FormulaEngine {
     });
 
     this.registerFunction('VALUE', (_ctx, text) => {
+      if (typeof text === 'boolean') return text ? 1 : 0;
       const num = Number(String(text));
       if (isNaN(num)) throw new Error('#VALUE!');
       return num;
