@@ -1318,7 +1318,7 @@ export class FormulaEngine {
         throw new Error('#VALUE!');
       }
 
-      const mt = matchType !== undefined ? Number(matchType) : 0;
+      const mt = matchType !== undefined ? Number(matchType) : 1;
 
       if (mt === 0) {
         // Exact match

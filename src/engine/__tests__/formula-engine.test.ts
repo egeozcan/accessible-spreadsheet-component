@@ -1268,12 +1268,13 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=MATCH("cherry", A1:A2, 0)')).toEqual({ displayValue: '#N/A', type: 'error' });
     });
 
-    it('defaults to exact match (type 0) when type is omitted', () => {
+    it('defaults to approximate match (type 1) when type is omitted', () => {
       const data = makeData({
         '0:0': '10', '1:0': '20', '2:0': '30',
       });
       engine.setData(data);
-      expect(engine.evaluate('=MATCH(20, A1:A3)')).toEqual({ displayValue: '2', type: 'number' });
+      // With default type 1, looking up 25 should find largest <= 25, which is 20 at position 2
+      expect(engine.evaluate('=MATCH(25, A1:A3)')).toEqual({ displayValue: '2', type: 'number' });
     });
 
     it('type 1: finds position of largest value <= lookup (sorted ascending)', () => {
