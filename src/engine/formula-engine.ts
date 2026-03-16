@@ -1400,14 +1400,14 @@ export class FormulaEngine {
 
     this.registerFunction('LEFT', (_ctx, text, n?) => {
       const count = n !== undefined ? Number(n) : 1;
-      if (count < 0) throw new Error('#VALUE!');
+      if (!(count >= 0)) throw new Error('#VALUE!');
       return String(text).substring(0, count);
     });
 
     this.registerFunction('RIGHT', (_ctx, text, n?) => {
       const s = String(text);
       const count = n !== undefined ? Number(n) : 1;
-      if (count < 0) throw new Error('#VALUE!');
+      if (!(count >= 0)) throw new Error('#VALUE!');
       return s.substring(s.length - count);
     });
 
@@ -1415,7 +1415,7 @@ export class FormulaEngine {
       const s = String(text);
       const startNum = Number(start);
       const count = Number(n);
-      if (startNum < 1 || count < 0) throw new Error('#VALUE!');
+      if (!(startNum >= 1) || !(count >= 0)) throw new Error('#VALUE!');
       return s.substring(startNum - 1, startNum - 1 + count);
     });
 
@@ -1429,7 +1429,7 @@ export class FormulaEngine {
 
       if (instance !== undefined) {
         const nth = Number(instance);
-        if (nth < 1) throw new Error('#VALUE!');
+        if (!(nth >= 1)) throw new Error('#VALUE!');
         let count = 0;
         let idx = -1;
         let searchFrom = 0;
@@ -1453,7 +1453,7 @@ export class FormulaEngine {
       const s = String(text);
       const searchStr = String(search);
       const startNum = start !== undefined ? Number(start) : 1;
-      if (startNum < 1) throw new Error('#VALUE!');
+      if (!(startNum >= 1)) throw new Error('#VALUE!');
       const idx = s.indexOf(searchStr, startNum - 1);
       if (idx === -1) throw new Error('#VALUE!');
       return idx + 1; // 1-indexed

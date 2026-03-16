@@ -1689,6 +1689,10 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=FIND("a", "abc", 0)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
       expect(engine.evaluate('=FIND("a", "abc", -1)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
     });
+
+    it('throws #VALUE! when start_num is non-numeric', () => {
+      expect(engine.evaluate('=FIND("a", "abc", "text")')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
   });
 
   // ─── Conversion ─────────────────────────────────────
