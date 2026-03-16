@@ -2188,6 +2188,14 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=UNKNOWNFUNC(1)')).toEqual({ displayValue: '#NAME?', type: 'error' });
     });
 
+    it('propagates specific error codes through cell references', () => {
+      const data = makeData({ '0:0': '=1/0', '0:1': '=A1+1' });
+      engine.setData(data);
+      engine.recalculate();
+      // B1 references A1 which has #DIV/0! — the specific error should propagate
+      expect(data.get('0:1')!.displayValue).toBe('#DIV/0!');
+    });
+
     it('returns #ERROR! on syntax error', () => {
       expect(engine.evaluate('=(((')).toEqual({ displayValue: '#ERROR!', type: 'error' });
     });

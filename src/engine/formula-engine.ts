@@ -938,7 +938,9 @@ export class FormulaEngine {
       this._evaluating.add(key);
       try {
         return this.parseExpression(cell.rawValue.substring(1));
-      } catch {
+      } catch (e) {
+        // Preserve specific error codes (#DIV/0!, #N/A, etc.)
+        if (e instanceof Error && e.message.startsWith('#')) throw e;
         throw new Error('#ERROR!');
       } finally {
         this._evaluating.delete(key);
