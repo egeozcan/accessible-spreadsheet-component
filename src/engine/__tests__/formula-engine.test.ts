@@ -1500,6 +1500,10 @@ describe('FormulaEngine', () => {
       // coerceValue sees "123" as numeric, so type is 'number'
       expect(engine.evaluate('=LEFT(12345, 3)')).toEqual({ displayValue: '123', type: 'number' });
     });
+
+    it('throws #VALUE! when num_chars is negative', () => {
+      expect(engine.evaluate('=LEFT("hello", -1)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
   });
 
   describe('RIGHT', () => {
@@ -1528,6 +1532,10 @@ describe('FormulaEngine', () => {
     it('converts numbers to strings', () => {
       // coerceValue sees "45" as numeric, so type is 'number'
       expect(engine.evaluate('=RIGHT(12345, 2)')).toEqual({ displayValue: '45', type: 'number' });
+    });
+
+    it('throws #VALUE! when num_chars is negative', () => {
+      expect(engine.evaluate('=RIGHT("hello", -1)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
     });
   });
 

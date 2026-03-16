@@ -1400,12 +1400,14 @@ export class FormulaEngine {
 
     this.registerFunction('LEFT', (_ctx, text, n?) => {
       const count = n !== undefined ? Number(n) : 1;
+      if (count < 0) throw new Error('#VALUE!');
       return String(text).substring(0, count);
     });
 
     this.registerFunction('RIGHT', (_ctx, text, n?) => {
       const s = String(text);
       const count = n !== undefined ? Number(n) : 1;
+      if (count < 0) throw new Error('#VALUE!');
       return s.substring(s.length - count);
     });
 
