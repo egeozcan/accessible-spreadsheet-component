@@ -1429,6 +1429,7 @@ export class FormulaEngine {
 
       if (instance !== undefined) {
         const nth = Number(instance);
+        if (nth < 1) throw new Error('#VALUE!');
         let count = 0;
         let idx = -1;
         let searchFrom = 0;

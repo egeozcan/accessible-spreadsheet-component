@@ -1632,6 +1632,11 @@ describe('FormulaEngine', () => {
         type: 'text',
       });
     });
+
+    it('throws #VALUE! when instance_num is less than 1', () => {
+      expect(engine.evaluate('=SUBSTITUTE("hello", "l", "r", 0)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+      expect(engine.evaluate('=SUBSTITUTE("hello", "l", "r", -1)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
   });
 
   describe('FIND', () => {
