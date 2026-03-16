@@ -1650,6 +1650,11 @@ describe('FormulaEngine', () => {
     it('finds single character in single-character string', () => {
       expect(engine.evaluate('=FIND("a", "a")')).toEqual({ displayValue: '1', type: 'number' });
     });
+
+    it('throws #VALUE! when start_num is less than 1', () => {
+      expect(engine.evaluate('=FIND("a", "abc", 0)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+      expect(engine.evaluate('=FIND("a", "abc", -1)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+    });
   });
 
   // ─── Conversion ─────────────────────────────────────

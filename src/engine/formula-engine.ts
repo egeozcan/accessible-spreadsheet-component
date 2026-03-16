@@ -1441,8 +1441,9 @@ export class FormulaEngine {
     this.registerFunction('FIND', (_ctx, search, text, start?) => {
       const s = String(text);
       const searchStr = String(search);
-      const startIdx = start !== undefined ? Number(start) - 1 : 0;
-      const idx = s.indexOf(searchStr, startIdx);
+      const startNum = start !== undefined ? Number(start) : 1;
+      if (startNum < 1) throw new Error('#VALUE!');
+      const idx = s.indexOf(searchStr, startNum - 1);
       if (idx === -1) throw new Error('#VALUE!');
       return idx + 1; // 1-indexed
     });
