@@ -1177,7 +1177,10 @@ export class FormulaEngine {
       let total = 0;
       for (let i = 0; i < rangeArr.length; i++) {
         const val = rangeArr[i];
-        if (val !== undefined && matchesCriteria(val, criteriaStr)) {
+        const matches = val === undefined
+          ? (criteriaStr === '' || criteriaStr === '=')
+          : matchesCriteria(val, criteriaStr);
+        if (matches) {
           if (sumArr) {
             total += Number(sumArr[i]) || 0;
           } else {

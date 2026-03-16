@@ -929,6 +929,19 @@ describe('FormulaEngine', () => {
       engine.setData(data);
       expect(engine.evaluate('=SUMIF(A1:A3, "apple", B1:B3)')).toEqual({ displayValue: '60', type: 'number' });
     });
+
+    it('sums values where criteria range cells are empty', () => {
+      // A1="x", A2=empty, A3="y", A4=empty; B1=10, B2=20, B3=30, B4=40
+      const data = makeData({
+        '0:0': 'x', '0:1': '10',
+        '1:1': '20',
+        '2:0': 'y', '2:1': '30',
+        '3:1': '40',
+      });
+      engine.setData(data);
+      // Sum B values where A is empty → B2 + B4 = 20 + 40 = 60
+      expect(engine.evaluate('=SUMIF(A1:A4, "", B1:B4)')).toEqual({ displayValue: '60', type: 'number' });
+    });
   });
 
   describe('COUNTIF', () => {
