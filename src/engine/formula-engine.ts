@@ -433,7 +433,7 @@ export class FormulaEngine {
   // ─── Value Coercion ──────────────────────────────────
 
   private coerceValue(val: string): { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' } {
-    if (val === '#ERROR!' || val === '#REF!' || val === '#DIV/0!' || val === '#NAME?' || val === '#CIRC!' || val === '#VALUE!' || val === '#N/A') {
+    if (val === '#ERROR!' || val === '#REF!' || val === '#DIV/0!' || val === '#NAME?' || val === '#CIRC!' || val === '#VALUE!' || val === '#N/A' || val === '#NUM!') {
       return { displayValue: val, type: 'error' };
     }
 
@@ -1367,7 +1367,15 @@ export class FormulaEngine {
     });
 
     this.registerFunction('POWER', (_ctx, base, exp) => {
-      return Math.pow(Number(base), Number(exp));
+      const b = Number(base);
+      const e = Number(exp);
+      const result = Math.pow(b, e);
+      if (!Number.isFinite(result) && Number.isFinite(b) && Number.isFinite(e)) {
+        // 0^(-n) → Infinity → #DIV/0!, negative^fraction → NaN → #NUM!
+        if (isNaN(result)) throw new Error('#NUM!');
+        throw new Error('#DIV/0!');
+      }
+      return result;
     });
 
     this.registerFunction('CEILING', (_ctx, num, significance?) => {

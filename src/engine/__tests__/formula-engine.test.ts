@@ -1384,6 +1384,16 @@ describe('FormulaEngine', () => {
       engine.setData(data);
       expect(engine.evaluate('=POWER(A1, B1)')).toEqual({ displayValue: '81', type: 'number' });
     });
+
+    it('returns #DIV/0! for 0 raised to a negative power', () => {
+      expect(engine.evaluate('=POWER(0, -1)')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
+      expect(engine.evaluate('=POWER(0, -2)')).toEqual({ displayValue: '#DIV/0!', type: 'error' });
+    });
+
+    it('returns #NUM! for negative base with fractional exponent', () => {
+      expect(engine.evaluate('=POWER(-1, 0.5)')).toEqual({ displayValue: '#NUM!', type: 'error' });
+      expect(engine.evaluate('=POWER(-4, 0.5)')).toEqual({ displayValue: '#NUM!', type: 'error' });
+    });
   });
 
   describe('CEILING', () => {
