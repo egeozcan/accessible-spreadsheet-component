@@ -185,7 +185,7 @@ export function formatNumber(value: number, opts: NumberFormatOptions): string {
   const decimals = opts.decimals ?? 2;
   switch (opts.type) {
     case 'percent':
-      return (value * 100).toFixed(decimals) + '%';
+      return stripNegZero((value * 100).toFixed(decimals)) + '%';
     case 'scientific':
       return value.toExponential(decimals);
     case 'currency': {
@@ -193,14 +193,20 @@ export function formatNumber(value: number, opts: NumberFormatOptions): string {
       const useSep = opts.thousandsSep !== false;
       const abs = Math.abs(value);
       const formatted = useSep ? addThousandsSep(abs.toFixed(decimals)) : abs.toFixed(decimals);
-      return value < 0 ? `-${symbol}${formatted}` : `${symbol}${formatted}`;
+      // Suppress negative sign when the formatted value rounds to zero
+      return value < 0 && parseFloat(formatted) !== 0 ? `-${symbol}${formatted}` : `${symbol}${formatted}`;
     }
     case 'number': {
       const useSep = opts.thousandsSep !== false;
-      const fixed = value.toFixed(decimals);
+      const fixed = stripNegZero(value.toFixed(decimals));
       return useSep ? addThousandsSep(fixed) : fixed;
     }
   }
+}
+
+/** Remove negative sign from "-0", "-0.00", etc. produced by toFixed */
+function stripNegZero(s: string): string {
+  return s === '-0' || parseFloat(s) === 0 && s.startsWith('-') ? s.slice(1) : s;
 }
 
 function addThousandsSep(numStr: string): string {

@@ -137,6 +137,19 @@ describe('formatNumber', () => {
   it('formats zero', () => {
     expect(formatNumber(0, { type: 'number' })).toBe('0.00');
   });
+
+  it('does not display negative zero for number format', () => {
+    expect(formatNumber(-0.001, { type: 'number', decimals: 2 })).toBe('0.00');
+    expect(formatNumber(-0.004, { type: 'number', decimals: 2 })).toBe('0.00');
+  });
+
+  it('does not display negative zero for currency format', () => {
+    expect(formatNumber(-0.001, { type: 'currency', decimals: 2 })).toBe('$0.00');
+  });
+
+  it('does not display negative zero for percent format', () => {
+    expect(formatNumber(-0.00001, { type: 'percent', decimals: 2 })).toBe('0.00%');
+  });
 });
 
 describe('formatsEqual with numberFormat', () => {
