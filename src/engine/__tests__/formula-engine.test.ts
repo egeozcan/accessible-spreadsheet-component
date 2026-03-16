@@ -1116,6 +1116,16 @@ describe('FormulaEngine', () => {
       engine.setData(data);
       expect(engine.evaluate('=VLOOKUP("x", A1:B2, 2, 0)')).toEqual({ displayValue: '10', type: 'number' });
     });
+
+    it('truncates fractional col_index to integer', () => {
+      const data = makeData({
+        '0:0': 'apple', '0:1': '10', '0:2': '100',
+        '1:0': 'banana', '1:1': '20', '1:2': '200',
+      });
+      engine.setData(data);
+      // col_index 2.9 should be truncated to 2, returning column B
+      expect(engine.evaluate('=VLOOKUP("banana", A1:C2, 2.9, FALSE)')).toEqual({ displayValue: '20', type: 'number' });
+    });
   });
 
   describe('HLOOKUP', () => {

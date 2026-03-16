@@ -1226,7 +1226,7 @@ export class FormulaEngine {
       if (!(tableRange instanceof RangeValue)) {
         throw new Error('#VALUE!');
       }
-      const colIdx = Number(colIndex);
+      const colIdx = Math.trunc(Number(colIndex));
       if (colIdx < 1 || colIdx > tableRange.cols) {
         throw new Error('#REF!');
       }
@@ -1263,7 +1263,7 @@ export class FormulaEngine {
       if (!(tableRange instanceof RangeValue)) {
         throw new Error('#VALUE!');
       }
-      const rowIdx = Number(rowIndex);
+      const rowIdx = Math.trunc(Number(rowIndex));
       if (rowIdx < 1 || rowIdx > tableRange.rows) {
         throw new Error('#REF!');
       }
@@ -1296,8 +1296,8 @@ export class FormulaEngine {
 
     this.registerFunction('INDEX', (_ctx, rangeArg, rowNum, colNum?) => {
       if (rangeArg instanceof RangeValue) {
-        const r = Number(rowNum) - 1;
-        const c = colNum !== undefined ? Number(colNum) - 1 : 0;
+        const r = Math.trunc(Number(rowNum)) - 1;
+        const c = colNum !== undefined ? Math.trunc(Number(colNum)) - 1 : 0;
         if (r < 0 || r >= rangeArg.rows || c < 0 || c >= rangeArg.cols) {
           throw new Error('#REF!');
         }
