@@ -979,6 +979,13 @@ describe('FormulaEngine', () => {
       engine.setData(data);
       expect(engine.evaluate('=COUNTIF(A1:A3, "10")')).toEqual({ displayValue: '2', type: 'number' });
     });
+
+    it('counts empty cells when criteria is empty string', () => {
+      // A1="hello", A2=empty, A3="world", A4=empty → 2 empty cells
+      const data = makeData({ '0:0': 'hello', '2:0': 'world' });
+      engine.setData(data);
+      expect(engine.evaluate('=COUNTIF(A1:A4, "")')).toEqual({ displayValue: '2', type: 'number' });
+    });
   });
 
   describe('AVERAGEIF', () => {

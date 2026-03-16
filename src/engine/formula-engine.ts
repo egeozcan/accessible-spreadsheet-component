@@ -1194,7 +1194,10 @@ export class FormulaEngine {
 
       let count = 0;
       for (const val of rangeArr) {
-        if (val !== undefined && matchesCriteria(val, criteriaStr)) {
+        if (val === undefined) {
+          // Empty cells match empty-string criteria ("" or "=")
+          if (criteriaStr === '' || criteriaStr === '=') count++;
+        } else if (matchesCriteria(val, criteriaStr)) {
           count++;
         }
       }
