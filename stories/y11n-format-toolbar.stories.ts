@@ -1,5 +1,5 @@
 import { html } from 'lit';
-import type { Meta, StoryObj } from '@storybook/web-components';
+import type { Meta, StoryObj } from '@storybook/web-components-vite';
 import '../src/y11n-spreadsheet.js';
 import '../src/components/y11n-format-toolbar.js';
 import type { Y11nSpreadsheet } from '../src/y11n-spreadsheet.js';

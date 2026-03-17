@@ -1,4 +1,4 @@
-import type { Preview } from '@storybook/web-components'
+import type { Preview } from '@storybook/web-components-vite'
 
 const preview: Preview = {
   parameters: {
@@ -8,7 +8,18 @@ const preview: Preview = {
         date: /Date$/i,
       },
     },
+
     layout: 'fullscreen',
+
+    options: {
+      storySort: {
+        order: ['Components', ['y11n-spreadsheet', '*']],
+      },
+    },
+
+    docs: {
+      codePanel: true
+    }
   },
 };
 

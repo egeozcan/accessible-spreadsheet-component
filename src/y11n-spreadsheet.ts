@@ -153,8 +153,14 @@ export class Y11nSpreadsheet extends LitElement {
       this._selection.setBounds(this.rows, this.cols);
     }
     if (changedProps.has('functions')) {
-      this._formulaEngine.setFunctions(this.functions);
-      this._recalcAll();
+      // On first render the old value is undefined and this.functions is the
+      // default empty object.  Skip the setFunctions call in that case so we
+      // don't wipe out functions added imperatively via registerFunction().
+      const prev = changedProps.get('functions') as Record<string, FormulaFunction> | undefined;
+      if (prev !== undefined || Object.keys(this.functions).length > 0) {
+        this._formulaEngine.setFunctions(this.functions);
+        this._recalcAll();
+      }
     }
   }
 
