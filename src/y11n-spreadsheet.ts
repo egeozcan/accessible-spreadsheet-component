@@ -1851,7 +1851,7 @@ export class Y11nSpreadsheet extends LitElement {
           tabindex="-1"
           @click="${this._handleSelectAll}"
           @keydown="${this._handleCornerKeydown}"
-        ></div>
+        ><span class="sr-only">Select all</span></div>
         ${startCol > 0
           ? html`<div style="grid-column: span ${startCol};"></div>`
           : nothing}

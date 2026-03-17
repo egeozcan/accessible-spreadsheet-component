@@ -16,11 +16,25 @@ export default defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
+      testIgnore: 'storybook-a11y.spec.ts',
+    },
+    {
+      name: 'storybook-a11y',
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://localhost:6006' },
+      testMatch: 'storybook-a11y.spec.ts',
     },
   ],
-  webServer: {
-    command: 'npx vite --port 5173',
-    port: 5173,
-    reuseExistingServer: !process.env.CI,
-  },
+  webServer: [
+    {
+      command: 'npx vite --port 5173',
+      port: 5173,
+      reuseExistingServer: !process.env.CI,
+    },
+    {
+      command: 'npx storybook dev -p 6006 --no-open',
+      port: 6006,
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+    },
+  ],
 });

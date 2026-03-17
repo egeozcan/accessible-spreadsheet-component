@@ -5,7 +5,6 @@ import '../src/components/y11n-format-toolbar.js';
 import type { Y11nSpreadsheet } from '../src/y11n-spreadsheet.js';
 import type { Y11nFormatToolbar, FormatActionDetail } from '../src/components/y11n-format-toolbar.js';
 import { computeSelectionFormat } from '../src/components/y11n-format-toolbar.js';
-import type { CellFormat } from '../src/types.js';
 import { cellKey } from '../src/types.js';
 import { gridFromRows } from './helpers.js';
 
@@ -432,6 +431,9 @@ export const DuckPixelArt: StoryObj = {
     codePanel.style.padding = '12px';
     codePanel.style.whiteSpace = 'pre';
     codePanel.style.lineHeight = '1.5';
+    codePanel.tabIndex = 0;
+    codePanel.setAttribute('role', 'log');
+    codePanel.setAttribute('aria-label', 'API call log');
 
     const header = document.createElement('div');
     header.style.color = '#569cd6';
