@@ -157,13 +157,15 @@ test.describe('Spreadsheet Component', () => {
       await expect(cell00).toBeFocused();
     });
 
-    test('navigates with Tab', async ({ page }) => {
+    test('Tab exits the grid (no focus trap)', async ({ page }) => {
       const cell00 = getCell(page, 0, 0);
       await cell00.click();
 
       await page.keyboard.press('Tab');
+      // Focus should have left the grid — original cell should no longer be focused
+      await expect(cell00).not.toBeFocused();
       const cell01 = getCell(page, 0, 1);
-      await expect(cell01).toBeFocused();
+      await expect(cell01).not.toBeFocused();
     });
 
     test('does not navigate past grid boundaries', async ({ page }) => {

@@ -111,4 +111,33 @@ test.describe('Rendering & Accessibility', () => {
     const corner = spreadsheet.shadow('.ls-corner-header');
     await expect(corner).toHaveAttribute('aria-label', 'Select all');
   });
+
+  test('grid has an accessible name (aria-label)', async ({ spreadsheet }) => {
+    await expect(spreadsheet.grid).toHaveAttribute('aria-label');
+    const label = await spreadsheet.grid.getAttribute('aria-label');
+    expect(label).toBeTruthy();
+  });
+
+  test('active cell has aria-current="true"', async ({ spreadsheet }) => {
+    await expect(spreadsheet.cell(0, 0)).toHaveAttribute('aria-current', 'true');
+  });
+
+  test('non-active cells do not have aria-current attribute', async ({ spreadsheet }) => {
+    const ariaCurrent = await spreadsheet.cell(1, 1).getAttribute('aria-current');
+    expect(ariaCurrent).toBeNull();
+  });
+
+  test('live region announces edit mode entry', async ({ spreadsheet }) => {
+    const modeRegion = spreadsheet.shadow('[role="log"][aria-live="assertive"]');
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('Enter');
+    await expect(modeRegion).toContainText('Editing');
+  });
+
+  test('live region announces selection extent', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('Shift+ArrowRight');
+    const liveRegion = spreadsheet.liveRegion;
+    await expect(liveRegion).toContainText('selected');
+  });
 });

@@ -44,18 +44,21 @@ test.describe('Keyboard Navigation', () => {
     await expect(spreadsheet.cell(0, 0)).toHaveClass(/active-cell/);
   });
 
-  test('Tab moves right', async ({ spreadsheet }) => {
+  test('Tab moves focus out of the grid (no focus trap)', async ({ spreadsheet }) => {
     await spreadsheet.clickCell(0, 0);
     await spreadsheet.cell(0, 0).press('Tab');
 
-    await expect(spreadsheet.cell(0, 1)).toHaveClass(/active-cell/);
+    // Focus should have left the grid — no grid cell should be focused
+    await expect(spreadsheet.cell(0, 0)).not.toBeFocused();
+    await expect(spreadsheet.cell(0, 1)).not.toBeFocused();
   });
 
-  test('Shift+Tab moves left', async ({ spreadsheet }) => {
+  test('Shift+Tab moves focus out of the grid backwards', async ({ spreadsheet }) => {
     await spreadsheet.clickCell(0, 2);
     await spreadsheet.cell(0, 2).press('Shift+Tab');
 
-    await expect(spreadsheet.cell(0, 1)).toHaveClass(/active-cell/);
+    await expect(spreadsheet.cell(0, 2)).not.toBeFocused();
+    await expect(spreadsheet.cell(0, 1)).not.toBeFocused();
   });
 
   test('multiple arrow key presses navigate correctly', async ({ spreadsheet }) => {
@@ -100,5 +103,76 @@ test.describe('Keyboard Navigation', () => {
 
     // The newly active cell should be focused
     await expect(spreadsheet.cell(1, 0)).toBeFocused();
+  });
+
+  test('Home moves to first cell in current row', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(2, 5);
+    await spreadsheet.cell(2, 5).press('Home');
+
+    await expect(spreadsheet.cell(2, 0)).toHaveClass(/active-cell/);
+  });
+
+  test('End moves to last cell in current row', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(2, 0);
+    await spreadsheet.cell(2, 0).press('End');
+
+    await expect(spreadsheet.cell(2, 25)).toHaveClass(/active-cell/);
+  });
+
+  test('Ctrl+Home moves to cell A1', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(5, 5);
+    await spreadsheet.cell(5, 5).press('Control+Home');
+
+    await expect(spreadsheet.cell(0, 0)).toHaveClass(/active-cell/);
+  });
+
+  test('Ctrl+End moves to last cell', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('Control+End');
+
+    await expect(spreadsheet.cell(49, 25)).toHaveClass(/active-cell/);
+  });
+
+  test('F2 enters edit mode', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('F2');
+
+    await expect(spreadsheet.editor).toBeFocused();
+  });
+
+  test('PageDown moves down by approximately one page', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('PageDown');
+
+    const activeCell = spreadsheet.shadow('.active-cell');
+    const row = await activeCell.getAttribute('data-row');
+    expect(Number(row)).toBeGreaterThan(5);
+  });
+
+  test('PageUp moves up by approximately one page', async ({ spreadsheet }) => {
+    // First navigate down to row 20 using PageDown (starts at row 0)
+    await spreadsheet.clickCell(0, 0);
+    await spreadsheet.cell(0, 0).press('PageDown');
+    await spreadsheet.shadow('.active-cell').press('PageDown');
+
+    // Now we're well past row 5, press PageUp
+    const activeBeforeUp = spreadsheet.shadow('.active-cell');
+    const rowBefore = Number(await activeBeforeUp.getAttribute('data-row'));
+
+    await activeBeforeUp.press('PageUp');
+
+    const activeAfterUp = spreadsheet.shadow('.active-cell');
+    const rowAfter = Number(await activeAfterUp.getAttribute('data-row'));
+    expect(rowAfter).toBeLessThan(rowBefore);
+  });
+
+  test('Shift+Home extends selection to row start', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(2, 3);
+    await spreadsheet.cell(2, 3).press('Shift+Home');
+
+    await expect(spreadsheet.cell(2, 0)).toHaveAttribute('aria-selected', 'true');
+    await expect(spreadsheet.cell(2, 1)).toHaveAttribute('aria-selected', 'true');
+    await expect(spreadsheet.cell(2, 2)).toHaveAttribute('aria-selected', 'true');
+    await expect(spreadsheet.cell(2, 3)).toHaveAttribute('aria-selected', 'true');
   });
 });

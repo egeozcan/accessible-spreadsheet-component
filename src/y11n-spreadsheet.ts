@@ -79,6 +79,8 @@ export class Y11nSpreadsheet extends LitElement {
   @property({ attribute: false }) data: GridData = new Map();
   /** When true, all editing is disabled. Default: false */
   @property({ type: Boolean, attribute: 'read-only', reflect: true }) readOnly = false;
+  /** Accessible label for the grid. Default: 'Spreadsheet' */
+  @property({ type: String, attribute: 'grid-label' }) gridLabel = 'Spreadsheet';
   /** Record of custom formula functions to register, keyed by name. */
   @property({ attribute: false }) functions: Record<string, FormulaFunction> = {};
 
@@ -748,6 +750,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._editValue = initialValue ?? cell?.rawValue ?? '';
     this._isEditing = true;
     this._editorNeedsCursorReset = true;
+    this._modeAnnouncement = `Editing ${coordToRef(this._selection.activeCell)}`;
   }
 
   private _commitEdit(): void {
@@ -758,6 +761,7 @@ export class Y11nSpreadsheet extends LitElement {
 
     this._isEditing = false;
     this._editingCellKey = null;
+    this._modeAnnouncement = 'Edit committed';
 
     this._commitRawValue(key, newValue);
 
@@ -768,6 +772,7 @@ export class Y11nSpreadsheet extends LitElement {
   private _cancelEdit(): void {
     this._isEditing = false;
     this._editingCellKey = null;
+    this._modeAnnouncement = 'Edit cancelled';
     this.updateComplete.then(() => this._focusActiveCell());
   }
 
@@ -897,6 +902,7 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _focusActiveCell(): void {
     const { row, col } = this._selection.activeCell;
+    this._ensureCellVisible(row, col);
     const cellEl = this.shadowRoot?.querySelector(
       `[data-row="${row}"][data-col="${col}"]`
     ) as HTMLElement | null;
@@ -917,9 +923,9 @@ export class Y11nSpreadsheet extends LitElement {
     const shift = e.shiftKey;
     const ctrl = e.ctrlKey || e.metaKey;
 
-    // Stop propagation for all handled keys so parent contexts
-    // (e.g. Storybook shortcuts) don't intercept them.
-    e.stopPropagation();
+    // Only stop propagation for keys we actually handle, so unhandled keys
+    // (e.g. Tab) propagate normally and focus can leave the grid.
+    let handled = true;
 
     switch (e.key) {
       case 'ArrowUp':
@@ -950,18 +956,14 @@ export class Y11nSpreadsheet extends LitElement {
         this.updateComplete.then(() => this._focusActiveCell());
         break;
 
-      case 'Tab':
+      case 'Enter':
         e.preventDefault();
-        if (shift) {
-          this._selection.move(0, -1);
-        } else {
-          this._selection.move(0, 1);
+        if (!this.readOnly) {
+          this._startEditing();
         }
-        this._dispatchSelectionChange();
-        this.updateComplete.then(() => this._focusActiveCell());
         break;
 
-      case 'Enter':
+      case 'F2':
         e.preventDefault();
         if (!this.readOnly) {
           this._startEditing();
@@ -982,11 +984,59 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
 
+      case 'Home':
+        e.preventDefault();
+        if (ctrl) {
+          this._selection.moveTo(0, 0, shift);
+        } else {
+          this._selection.moveTo(this._selection.activeCell.row, 0, shift);
+        }
+        this._dispatchSelectionChange();
+        this.updateComplete.then(() => this._focusActiveCell());
+        break;
+
+      case 'End':
+        e.preventDefault();
+        if (ctrl) {
+          this._selection.moveTo(this.rows - 1, this.cols - 1, shift);
+        } else {
+          this._selection.moveTo(this._selection.activeCell.row, this.cols - 1, shift);
+        }
+        this._dispatchSelectionChange();
+        this.updateComplete.then(() => this._focusActiveCell());
+        break;
+
+      case 'PageDown': {
+        e.preventDefault();
+        const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+        const gridEl = this._grid;
+        const viewHeight = gridEl?.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
+        const pageRows = Math.max(1, Math.floor(viewHeight / cellHeight) - 1);
+        this._selection.move(pageRows, 0, shift);
+        this._dispatchSelectionChange();
+        this.updateComplete.then(() => this._focusActiveCell());
+        break;
+      }
+
+      case 'PageUp': {
+        e.preventDefault();
+        const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+        const gridEl = this._grid;
+        const viewHeight = gridEl?.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
+        const pageRows = Math.max(1, Math.floor(viewHeight / cellHeight) - 1);
+        this._selection.move(-pageRows, 0, shift);
+        this._dispatchSelectionChange();
+        this.updateComplete.then(() => this._focusActiveCell());
+        break;
+      }
+
       case 'a':
         if (ctrl) {
           e.preventDefault();
           this._selection.selectAll();
           this._dispatchSelectionChange();
+        } else {
+          handled = false;
         }
         break;
 
@@ -994,6 +1044,8 @@ export class Y11nSpreadsheet extends LitElement {
         if (ctrl) {
           e.preventDefault();
           this._handleCopy();
+        } else {
+          handled = false;
         }
         break;
 
@@ -1001,6 +1053,8 @@ export class Y11nSpreadsheet extends LitElement {
         if (ctrl) {
           e.preventDefault();
           this._handleCut();
+        } else {
+          handled = false;
         }
         break;
 
@@ -1008,6 +1062,8 @@ export class Y11nSpreadsheet extends LitElement {
         if (ctrl) {
           e.preventDefault();
           this._handlePaste();
+        } else {
+          handled = false;
         }
         break;
 
@@ -1015,6 +1071,8 @@ export class Y11nSpreadsheet extends LitElement {
         if (ctrl) {
           e.preventDefault();
           this.toggleFormat('bold');
+        } else {
+          handled = false;
         }
         break;
 
@@ -1022,6 +1080,8 @@ export class Y11nSpreadsheet extends LitElement {
         if (ctrl) {
           e.preventDefault();
           this.toggleFormat('italic');
+        } else {
+          handled = false;
         }
         break;
 
@@ -1029,6 +1089,8 @@ export class Y11nSpreadsheet extends LitElement {
         if (ctrl) {
           e.preventDefault();
           this.toggleFormat('underline');
+        } else {
+          handled = false;
         }
         break;
 
@@ -1041,6 +1103,8 @@ export class Y11nSpreadsheet extends LitElement {
           } else {
             this._undo();
           }
+        } else {
+          handled = false;
         }
         break;
 
@@ -1049,8 +1113,14 @@ export class Y11nSpreadsheet extends LitElement {
         if (!ctrl && !e.altKey && e.key.length === 1 && !this.readOnly) {
           e.preventDefault();
           this._startEditing(e.key);
+        } else {
+          handled = false;
         }
         break;
+    }
+
+    if (handled) {
+      e.stopPropagation();
     }
   }
 
@@ -1103,6 +1173,21 @@ export class Y11nSpreadsheet extends LitElement {
           this._cycleReferenceMode();
         }
         break;
+    }
+  }
+
+  // ─── Select All (Corner Header) ─────────────────────
+
+  private _handleSelectAll(): void {
+    this._selection.selectAll();
+    this._dispatchSelectionChange();
+    this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  private _handleCornerKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      this._handleSelectAll();
     }
   }
 
@@ -1530,7 +1615,7 @@ export class Y11nSpreadsheet extends LitElement {
       --_header-bg: var(--ls-header-bg, #f3f3f3);
       --_border-color: var(--ls-border-color, #e0e0e0);
       --_selection-border: var(--ls-selection-border, 2px solid #1a73e8);
-      --_selection-bg: var(--ls-selection-bg, rgba(26, 115, 232, 0.1));
+      --_selection-bg: var(--ls-selection-bg, rgba(26, 115, 232, 0.2));
       --_focus-ring: var(--ls-focus-ring, 2px solid #1a73e8);
       --_editor-bg: var(--ls-editor-bg, #fff);
       --_editor-shadow: var(--ls-editor-shadow, 0 2px 6px rgba(0,0,0,0.2));
@@ -1721,6 +1806,7 @@ export class Y11nSpreadsheet extends LitElement {
           <div
             class="ls-grid"
             role="grid"
+            aria-label="${this.gridLabel}"
             aria-rowcount="${this.rows + 1}"
             aria-colcount="${this.cols + 1}"
             aria-readonly="${this.readOnly}"
@@ -1752,7 +1838,14 @@ export class Y11nSpreadsheet extends LitElement {
 
     return html`
       <div class="ls-header-row" role="row" aria-rowindex="1">
-        <div class="ls-corner-header" role="columnheader" aria-label="Select all"></div>
+        <div
+          class="ls-corner-header"
+          role="columnheader"
+          aria-label="Select all"
+          tabindex="-1"
+          @click="${this._handleSelectAll}"
+          @keydown="${this._handleCornerKeydown}"
+        ></div>
         ${startCol > 0
           ? html`<div style="grid-column: span ${startCol};"></div>`
           : nothing}
@@ -1808,7 +1901,7 @@ export class Y11nSpreadsheet extends LitElement {
           aria-colindex="${c + 2}"
           aria-selected="${isSelected}"
           aria-readonly="${this.readOnly}"
-          aria-current="${isActive ? 'true' : 'false'}"
+          aria-current="${isActive ? 'true' : nothing}"
           data-row="${row}"
           data-col="${c}"
           data-key="${key}"
@@ -1839,7 +1932,16 @@ export class Y11nSpreadsheet extends LitElement {
   private _getAnnouncement(activeCell: CellCoord): string {
     const ref = `${colToLetter(activeCell.col)}${activeCell.row + 1}`;
     const display = this._getCellDisplay(activeCell.row, activeCell.col);
-    return display ? `${ref}: ${display}` : ref;
+    const base = display ? `${ref}: ${display}` : ref;
+
+    const range = this._selection.range;
+    const selRows = range.end.row - range.start.row + 1;
+    const selCols = range.end.col - range.start.col + 1;
+    if (selRows > 1 || selCols > 1) {
+      return `${base}, ${selRows} row${selRows > 1 ? 's' : ''}, ${selCols} column${selCols > 1 ? 's' : ''} selected`;
+    }
+
+    return base;
   }
 
   protected updated(): void {
