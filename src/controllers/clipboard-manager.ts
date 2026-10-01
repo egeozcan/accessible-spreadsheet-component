@@ -116,7 +116,9 @@ export class ClipboardManager {
       let clipboardMatchesInternal = false;
       try {
         const currentText = await navigator.clipboard.readText();
-        clipboardMatchesInternal = currentText === this._lastWrittenText;
+        // Compare with normalized line endings: some platforms rewrite \n as \r\n
+        const normalize = (t: string | null) => t?.replace(/\r\n?/g, '\n');
+        clipboardMatchesInternal = normalize(currentText) === normalize(this._lastWrittenText);
       } catch {
         // Clipboard read denied — assume internal data is still valid
         clipboardMatchesInternal = true;
@@ -339,7 +341,9 @@ export class ClipboardManager {
           i++;
         }
       } else {
-        if (ch === '"') {
+        // A quote only opens a quoted field at the start of the field; a quote
+        // mid-field (e.g. `5" screen`, which Excel leaves unquoted) is literal.
+        if (ch === '"' && currentField === '') {
           inQuotes = true;
           i++;
         } else if (ch === '\t') {
@@ -437,7 +441,7 @@ export class ClipboardManager {
     // Handles ranges like $A$1:$B$2 by matching each ref separately
     // The lookarounds keep identifiers that merely contain a ref-like
     // substring (e.g. a custom LOG10() function) from being rewritten.
-    const refPattern = /(?<![A-Z0-9_.$])(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9_.(])/gi;
+    const refPattern = /(?<![A-Z0-9_.$])(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9_.]|\s*\()/gi;
 
     return segments.map((seg, idx) => {
       if (isString[idx]) return seg;

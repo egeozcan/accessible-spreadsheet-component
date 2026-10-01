@@ -18,6 +18,16 @@ describe('ClipboardManager', () => {
   });
 
   describe('parseTSV', () => {
+    it('treats a quote in the middle of an unquoted field as literal', () => {
+      const updates = manager.parseTSV('5" screen\tB\nC\tD', 0, 0, 100, 26);
+      expect(updates).toEqual([
+        { id: '0:0', value: '5" screen' },
+        { id: '0:1', value: 'B' },
+        { id: '1:0', value: 'C' },
+        { id: '1:1', value: 'D' },
+      ]);
+    });
+
     it('parses single-cell TSV', () => {
       const result = manager.parseTSV('hello', 0, 0, 100, 26);
       expect(result).toEqual([{ id: '0:0', value: 'hello' }]);
@@ -396,6 +406,7 @@ describe('ClipboardManager', () => {
     it('does not rewrite function names that look like references', () => {
       expect(manager.adjustFormulaReferences('=LOG10(A1)', 1, 1)).toBe('=LOG10(B2)');
       expect(manager.adjustFormulaReferences('=ATAN2(A1,B1)', 1, 0)).toBe('=ATAN2(A2,B2)');
+      expect(manager.adjustFormulaReferences('=ATAN2 (A1,B1)', 1, 0)).toBe('=ATAN2 (A2,B2)');
     });
   });
 
