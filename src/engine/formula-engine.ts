@@ -367,13 +367,17 @@ export class FormulaEngine {
             deferred.pop();
             continue;
           }
-          if (deferred.includes(e.key)) {
-            // The cell is needed by its own (long) dependency chain. Memoize
-            // the verdict for every deferred cell so later evaluations in this
-            // pass don't walk the whole cycle again (quadratic otherwise).
-            for (const key of deferred) this._memo?.set(key, { error: '#CIRC!' });
-            if (forCellKey) this._memo?.set(forCellKey, { error: '#CIRC!' });
-            return { displayValue: '#CIRC!', type: 'error' };
+          const cycleStart = deferred.indexOf(e.key);
+          if (cycleStart !== -1) {
+            // deferred[cycleStart..] form a (long) cycle. Memoize the verdict
+            // for its members so later evaluations in this pass don't walk the
+            // cycle again (quadratic otherwise), then retry the cells that
+            // merely depend on it so they can handle the error (e.g. IFERROR).
+            for (const key of deferred.slice(cycleStart)) {
+              this._memo?.set(key, { error: '#CIRC!' });
+            }
+            deferred.length = cycleStart;
+            continue;
           }
           if (deferred.length >= MAX_DEFERRED_CELLS) {
             return { displayValue: '#ERROR!', type: 'error' };
@@ -1003,10 +1007,11 @@ export class FormulaEngine {
         const err = flatArgs.find(isErrorCode);
         if (err !== undefined) throw new Error(err);
       }
-      return fn(ctx, ...flatArgs);
+      return fn(ctx, ...flatArgs) ?? 0;
     }
 
-    return fn(ctx, ...args);
+    // An empty cell returned by e.g. VLOOKUP reads as 0, matching how it displays
+    return fn(ctx, ...args) ?? 0;
   }
 
   /**

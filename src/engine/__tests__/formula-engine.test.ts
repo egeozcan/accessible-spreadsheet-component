@@ -2561,4 +2561,24 @@ describe('FormulaEngine', () => {
       expect(run(['0:0', '1:0', '0:1', '0:2'])).toBe(run(['0:0', '1:0', '0:2', '0:1']));
     });
   });
+
+  describe('review round 3', () => {
+    it('lets cells that depend on a long cycle handle the error', () => {
+      const data: GridData = new Map();
+      for (let i = 0; i < 150; i++) data.set(`${i}:0`, cell(i === 149 ? '=A1' : `=A${i + 2}`));
+      data.set('0:1', cell('=IFERROR(A1,7)'));
+      data.set('0:2', cell('=B1+1'));
+      engine.setData(data);
+      engine.recalculate();
+      expect(data.get('0:0')!.displayValue).toBe('#CIRC!');
+      expect(data.get('0:1')!.displayValue).toBe('7');
+      expect(data.get('0:2')!.displayValue).toBe('8');
+    });
+
+    it('treats an empty lookup result as 0 in dependent formulas', () => {
+      engine.setData(makeData({ '0:0': 'x', '0:3': '=VLOOKUP("x",A1:B1,2,FALSE)' }));
+      expect(engine.evaluate('=D1&"u"').displayValue).toBe('0u');
+      expect(engine.evaluate('=D1=0').displayValue).toBe('TRUE');
+    });
+  });
 });
