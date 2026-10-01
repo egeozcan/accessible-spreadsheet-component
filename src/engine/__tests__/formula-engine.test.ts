@@ -1533,8 +1533,8 @@ describe('FormulaEngine', () => {
     });
 
     it('converts numbers to strings', () => {
-      // coerceValue sees "123" as numeric, so type is 'number'
-      expect(engine.evaluate('=LEFT(12345, 3)')).toEqual({ displayValue: '123', type: 'number' });
+      // String functions return text (Excel semantics), even when it looks numeric
+      expect(engine.evaluate('=LEFT(12345, 3)')).toEqual({ displayValue: '123', type: 'text' });
     });
 
     it('throws #VALUE! when num_chars is negative', () => {
@@ -1566,8 +1566,8 @@ describe('FormulaEngine', () => {
     });
 
     it('converts numbers to strings', () => {
-      // coerceValue sees "45" as numeric, so type is 'number'
-      expect(engine.evaluate('=RIGHT(12345, 2)')).toEqual({ displayValue: '45', type: 'number' });
+      // String functions return text (Excel semantics), even when it looks numeric
+      expect(engine.evaluate('=RIGHT(12345, 2)')).toEqual({ displayValue: '45', type: 'text' });
     });
 
     it('throws #VALUE! when num_chars is negative', () => {
@@ -1724,21 +1724,20 @@ describe('FormulaEngine', () => {
 
   describe('TEXT', () => {
     it('formats number with "0" format (integer)', () => {
-      // coerceValue converts "4" -> number type
-      expect(engine.evaluate('=TEXT(3.7, "0")')).toEqual({ displayValue: '4', type: 'number' });
+      // TEXT always returns text
+      expect(engine.evaluate('=TEXT(3.7, "0")')).toEqual({ displayValue: '4', type: 'text' });
     });
 
     it('formats number with "0.00" format (2 decimal places)', () => {
-      // "3.10" -> Number("3.10") = 3.1 -> String(3.1) = "3.1", coerced to number
+      // The formatted text is kept verbatim (trailing zeros included)
       const result = engine.evaluate('=TEXT(3.1, "0.00")');
-      expect(result.type).toBe('number');
-      expect(result.displayValue).toBe('3.1');
+      expect(result.type).toBe('text');
+      expect(result.displayValue).toBe('3.10');
     });
 
     it('formats number with "0.0" format (1 decimal place)', () => {
-      // "3.1" -> coerced to number
       const result = engine.evaluate('=TEXT(3.14159, "0.0")');
-      expect(result.type).toBe('number');
+      expect(result.type).toBe('text');
       expect(result.displayValue).toBe('3.1');
     });
 
@@ -1753,8 +1752,7 @@ describe('FormulaEngine', () => {
     });
 
     it('returns toString for unknown format', () => {
-      // "42" -> coerced to number
-      expect(engine.evaluate('=TEXT(42, "custom")')).toEqual({ displayValue: '42', type: 'number' });
+      expect(engine.evaluate('=TEXT(42, "custom")')).toEqual({ displayValue: '42', type: 'text' });
     });
 
     it('handles non-numeric value', () => {
@@ -1762,15 +1760,13 @@ describe('FormulaEngine', () => {
     });
 
     it('formats zero with "0.00"', () => {
-      // "0.00" -> Number("0.00") = 0 -> String(0) = "0", coerced to number
       const result = engine.evaluate('=TEXT(0, "0.00")');
-      expect(result.type).toBe('number');
-      expect(result.displayValue).toBe('0');
+      expect(result.type).toBe('text');
+      expect(result.displayValue).toBe('0.00');
     });
 
     it('formats negative number', () => {
-      // "-5.5" -> coerced to number
-      expect(engine.evaluate('=TEXT(-5.5, "0.0")')).toEqual({ displayValue: '-5.5', type: 'number' });
+      expect(engine.evaluate('=TEXT(-5.5, "0.0")')).toEqual({ displayValue: '-5.5', type: 'text' });
     });
 
     it('works with cell references and comma format', () => {
@@ -1781,8 +1777,8 @@ describe('FormulaEngine', () => {
     });
 
     it('rounds negative halves away from zero with "0" format', () => {
-      expect(engine.evaluate('=TEXT(-0.5, "0")')).toEqual({ displayValue: '-1', type: 'number' });
-      expect(engine.evaluate('=TEXT(-1.5, "0")')).toEqual({ displayValue: '-2', type: 'number' });
+      expect(engine.evaluate('=TEXT(-0.5, "0")')).toEqual({ displayValue: '-1', type: 'text' });
+      expect(engine.evaluate('=TEXT(-1.5, "0")')).toEqual({ displayValue: '-2', type: 'text' });
     });
   });
 
@@ -2195,18 +2191,53 @@ describe('FormulaEngine', () => {
   // ─── Recursion depth limit ────────────────────────────
 
   describe('recursion depth limit', () => {
-    it('returns error for excessively deep formula chains', () => {
-      // Create a chain of references that exceeds depth limit
+    function chain(length: number): GridData {
       const data: GridData = new Map();
-      for (let i = 0; i < 70; i++) {
+      for (let i = 0; i < length; i++) {
         const raw = i === 0 ? '1' : `=A${i}+1`;
-        const isFormula = raw.startsWith('=');
-        data.set(`${i}:0`, cell(raw, isFormula ? 'text' : 'number'));
+        data.set(`${i}:0`, cell(raw, i === 0 ? 'number' : 'text'));
+      }
+      return data;
+    }
+
+    it('resolves reference chains deeper than the per-call depth limit', () => {
+      engine.setData(chain(70));
+      expect(engine.evaluate('=A70')).toEqual({ displayValue: '70', type: 'number' });
+    });
+
+    it('resolves very long running totals without overflowing the stack', () => {
+      const data = chain(5000);
+      engine.setData(data);
+      engine.recalculate();
+      expect(data.get('4999:0')!.displayValue).toBe('5000');
+      expect(engine.evaluate('=A5000')).toEqual({ displayValue: '5000', type: 'number' });
+    });
+
+    it('resolves long chains regardless of insertion order', () => {
+      const forward = chain(300);
+      const reversed: GridData = new Map([...forward].reverse());
+      engine.setData(reversed);
+      engine.recalculate();
+      expect(reversed.get('299:0')!.displayValue).toBe('300');
+    });
+
+    it('reports long reference cycles as circular', () => {
+      const data = chain(200);
+      data.set('0:0', cell('=A200'));
+      engine.setData(data);
+      expect(engine.evaluate('=A100').displayValue).toBe('#CIRC!');
+    });
+
+    it('evaluates shared precedents once per pass (no exponential blowup)', () => {
+      const data: GridData = new Map([['0:0', cell('1', 'number')]]);
+      for (let i = 1; i < 40; i++) {
+        data.set(`${i}:0`, cell(`=A${i}+A${i}`));
       }
       engine.setData(data);
-      // Evaluating a cell deep in the chain should hit the depth limit
-      const result = engine.evaluate('=A70');
-      expect(result.type).toBe('error');
+      const start = Date.now();
+      engine.recalculate();
+      expect(data.get('39:0')!.displayValue).toBe(String(2 ** 39));
+      expect(Date.now() - start).toBeLessThan(1000);
     });
   });
 
@@ -2315,16 +2346,11 @@ describe('FormulaEngine', () => {
       expect(a1.type === 'error' || b1.type === 'error').toBe(true);
     });
 
-    it('returns error when max eval depth is exceeded', () => {
-      const data: GridData = new Map();
-      for (let i = 0; i < 70; i++) {
-        const raw = i === 0 ? '1' : `=A${i}+1`;
-        const isFormula = raw.startsWith('=');
-        data.set(`${i}:0`, cell(raw, isFormula ? 'text' : 'number'));
-      }
+    it('reports a self-reference through a range as circular', () => {
+      const data = makeData({ '0:0': '=SUM(A1:A3)', '1:0': '1', '2:0': '2' });
       engine.setData(data);
-      const result = engine.evaluate('=A70');
-      expect(result.type).toBe('error');
+      engine.recalculate();
+      expect(data.get('0:0')!.displayValue).toBe('#CIRC!');
     });
   });
 
@@ -2424,6 +2450,81 @@ describe('FormulaEngine', () => {
     it('handles very small floating point differences', () => {
       const result = engine.evaluate('=0.1+0.2');
       expect(result.displayValue).toBe('0.3');
+    });
+  });
+
+  describe('review fixes', () => {
+    it('IF only evaluates the selected branch', () => {
+      engine.setData(makeData({ '0:0': '0' }));
+      expect(engine.evaluate('=IF(A1=0, 0, 1/A1)')).toEqual({ displayValue: '0', type: 'number' });
+      expect(engine.evaluate('=IF(A1<>0, 1/A1, "none")')).toEqual({ displayValue: 'none', type: 'text' });
+      expect(engine.evaluate('=IF(TRUE, 1)')).toEqual({ displayValue: '1', type: 'number' });
+      expect(engine.evaluate('=IF(FALSE, 1)')).toEqual({ displayValue: 'FALSE', type: 'boolean' });
+      expect(engine.evaluate('=IF(TRUE)')).toEqual({ displayValue: '0', type: 'number' });
+    });
+
+    it('propagates errors inside ranges through SUM/AVERAGE/MIN/MAX', () => {
+      engine.setData(makeData({ '0:0': '=1/0', '1:0': '5' }));
+      expect(engine.evaluate('=SUM(A1:A2)').displayValue).toBe('#DIV/0!');
+      expect(engine.evaluate('=MAX(A1:A2)').displayValue).toBe('#DIV/0!');
+      // COUNT skips errors, as in Excel
+      expect(engine.evaluate('=COUNT(A1:A2)').displayValue).toBe('1');
+    });
+
+    it('returns #VALUE! for arithmetic on text instead of NaN', () => {
+      engine.setData(makeData({ '0:0': 'abc' }));
+      expect(engine.evaluate('=A1+1')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+      expect(engine.evaluate('="abc"*2')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+      expect(engine.evaluate('=-"abc"')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+      expect(engine.evaluate('="2"*3')).toEqual({ displayValue: '6', type: 'number' });
+    });
+
+    it('keeps text formula results as text', () => {
+      expect(engine.evaluate('="007"')).toEqual({ displayValue: '007', type: 'text' });
+      expect(engine.evaluate('=CONCAT("00","7")')).toEqual({ displayValue: '007', type: 'text' });
+      expect(engine.evaluate('="TRUE"')).toEqual({ displayValue: 'TRUE', type: 'text' });
+    });
+
+    it('does not return a stale cached result after a cell formula changes', () => {
+      expect(engine.evaluate('=1+1', '0:0').displayValue).toBe('2');
+      expect(engine.evaluate('=5', '0:0').displayValue).toBe('5');
+    });
+
+    it('recalculates a changed formula against freshly updated precedents', () => {
+      // C1 depends on A1; B1 is edited in the same batch to reference C1.
+      const data = makeData({ '0:0': '1', '0:2': '=A1*2', '0:1': '0' });
+      engine.setData(data);
+      engine.recalculate();
+      data.set('0:0', cell('5', 'number'));
+      data.set('0:1', cell('=C1'));
+      engine.recalculateAffected(['0:0', '0:1']);
+      expect(data.get('0:2')!.displayValue).toBe('10');
+      expect(data.get('0:1')!.displayValue).toBe('10');
+    });
+
+    it('approximate lookups compare text keys as text', () => {
+      engine.setData(makeData({
+        '0:0': 'apple', '0:1': '1',
+        '1:0': 'banana', '1:1': '2',
+        '2:0': 'cherry', '2:1': '3',
+      }));
+      expect(engine.evaluate('=VLOOKUP("banana", A1:B3, 2)').displayValue).toBe('2');
+      expect(engine.evaluate('=VLOOKUP("blueberry", A1:B3, 2)').displayValue).toBe('2');
+      expect(engine.evaluate('=VLOOKUP("aardvark", A1:B3, 2)').displayValue).toBe('#N/A');
+      expect(engine.evaluate('=MATCH("c", A1:A3)').displayValue).toBe('2');
+    });
+
+    it('relational COUNTIF criteria do not match text against numbers', () => {
+      engine.setData(makeData({ '0:0': 'apple', '1:0': '3', '2:0': '10' }));
+      expect(engine.evaluate('=COUNTIF(A1:A3, ">5")').displayValue).toBe('1');
+    });
+
+    it('treats formatted-but-empty cells in ranges as empty', () => {
+      const data = makeData({ '0:0': '10' });
+      data.set('1:0', cell(''));
+      engine.setData(data);
+      expect(engine.evaluate('=AVERAGE(A1:A2)').displayValue).toBe('10');
+      expect(engine.evaluate('=MIN(A1:A2)').displayValue).toBe('10');
     });
   });
 });

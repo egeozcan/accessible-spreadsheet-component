@@ -6,7 +6,7 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 
 - Full keyboard navigation (arrows, Tab, Enter, Escape, Ctrl+A)
 - Copy/cut/paste with TSV clipboard format
-- Undo/redo with Ctrl+Z / Ctrl+Shift+Z
+- Undo/redo with Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)
 - Formula engine with 20+ built-in functions and custom function support
 - Arrow key cell reference insertion during formula editing
 - Virtual rendering for large datasets (1000+ rows)
@@ -187,7 +187,7 @@ y11n-spreadsheet::part(editor) {
 | Ctrl+A | Select all |
 | Ctrl+C / X / V | Copy / Cut / Paste |
 | Ctrl+Z | Undo |
-| Ctrl+Shift+Z | Redo |
+| Ctrl+Shift+Z / Ctrl+Y | Redo |
 | Any printable character | Start editing with that character |
 
 During formula editing, arrow keys insert cell references instead of navigating.

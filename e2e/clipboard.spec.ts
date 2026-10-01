@@ -27,6 +27,26 @@ test.describe('Clipboard Operations', () => {
     await spreadsheet.waitForCellText(7, 0, 'Pasted Value');
   });
 
+  test('paste anchors at the top-left of the selection, not the active cell', async ({ spreadsheet }) => {
+    await spreadsheet.page.evaluate(() => navigator.clipboard.writeText('X'));
+
+    // Select C8:D9 by extending right and down; the active cell ends at D9.
+    await spreadsheet.clickCell(7, 2);
+    await spreadsheet.cell(7, 2).press('Shift+ArrowRight');
+    await spreadsheet.cell(7, 3).press('Shift+ArrowDown');
+    await spreadsheet.cell(8, 3).press('Control+v');
+
+    await spreadsheet.waitForCellText(7, 2, 'X');
+    await spreadsheet.waitForCellText(8, 3, '');
+  });
+
+  test('typing a letter that is also a Ctrl shortcut starts editing', async ({ spreadsheet }) => {
+    await spreadsheet.clickCell(7, 0);
+    await spreadsheet.cell(7, 0).press('c');
+    await expect(spreadsheet.editor).toBeVisible();
+    await expect(spreadsheet.editor).toHaveValue('c');
+  });
+
   test('Ctrl+X cuts cell value (copies and clears)', async ({ spreadsheet }) => {
     // Use an existing demo data cell
     await spreadsheet.waitForCellText(1, 0, 'Widget A');

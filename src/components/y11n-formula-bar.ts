@@ -38,7 +38,6 @@ export class Y11nFormulaBar extends LitElement {
   @property({ type: Boolean, attribute: 'read-only', reflect: true }) readOnly = false;
 
   @state() private _draft = '';
-  private _suppressNextBlur = false;
 
   static styles = css`
     :host {
@@ -158,16 +157,14 @@ export class Y11nFormulaBar extends LitElement {
       this._commit();
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      // Reverting the draft is enough: blur only commits when the draft
+      // differs from the source, so no extra suppression flag is needed
+      // (a sticky flag would silently drop edits typed after Escape).
       this._draft = this._sourceValue();
-      this._suppressNextBlur = true;
     }
   }
 
   private _onBlur(): void {
-    if (this._suppressNextBlur) {
-      this._suppressNextBlur = false;
-      return;
-    }
     if (this._draft !== this._sourceValue()) {
       this._commit();
     }

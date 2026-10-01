@@ -392,5 +392,30 @@ describe('ClipboardManager', () => {
     it('handles formula with only string content', () => {
       expect(manager.adjustFormulaReferences('="A1"', 5, 5)).toBe('="A1"');
     });
+
+    it('does not rewrite function names that look like references', () => {
+      expect(manager.adjustFormulaReferences('=LOG10(A1)', 1, 1)).toBe('=LOG10(B2)');
+      expect(manager.adjustFormulaReferences('=ATAN2(A1,B1)', 1, 0)).toBe('=ATAN2(A2,B2)');
+    });
+  });
+
+  describe('_sanitizeFormat', () => {
+    it('keeps a valid numberFormat so number formats survive HTML paste', () => {
+      const fmt = (manager as any)._sanitizeFormat({
+        bold: true,
+        numberFormat: { type: 'currency', decimals: 0, currencySymbol: '€', thousandsSep: false },
+      });
+      expect(fmt).toEqual({
+        bold: true,
+        numberFormat: { type: 'currency', decimals: 0, currencySymbol: '€', thousandsSep: false },
+      });
+    });
+
+    it('drops an invalid numberFormat', () => {
+      expect((manager as any)._sanitizeFormat({ numberFormat: { type: 'bogus' } })).toBeUndefined();
+      expect(
+        (manager as any)._sanitizeFormat({ numberFormat: { type: 'number', decimals: 500 } })
+      ).toEqual({ numberFormat: { type: 'number' } });
+    });
   });
 });
