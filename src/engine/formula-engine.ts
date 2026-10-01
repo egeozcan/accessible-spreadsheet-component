@@ -335,6 +335,19 @@ export class FormulaEngine {
    * @returns The display value and resolved type
    */
   evaluate(rawValue: string, forCellKey?: string): EvalResult {
+    // Keep the cell marked in-progress across deferred retries so a long chain
+    // leading back to it is reported as circular rather than reading its old value.
+    const ownsKey =
+      !!forCellKey && rawValue.startsWith('=') && !this._evaluating.has(forCellKey);
+    if (ownsKey) this._evaluating.add(forCellKey!);
+    try {
+      return this._evaluateDeferred(rawValue, forCellKey);
+    } finally {
+      if (ownsKey) this._evaluating.delete(forCellKey!);
+    }
+  }
+
+  private _evaluateDeferred(rawValue: string, forCellKey?: string): EvalResult {
     return this._withMemo(() => {
       // Cells whose evaluation hit the depth limit, innermost last. Each is
       // evaluated on its own (memoizing its value) before retrying its parent.
@@ -355,7 +368,11 @@ export class FormulaEngine {
             continue;
           }
           if (deferred.includes(e.key)) {
-            // The cell is needed by its own (long) dependency chain.
+            // The cell is needed by its own (long) dependency chain. Memoize
+            // the verdict for every deferred cell so later evaluations in this
+            // pass don't walk the whole cycle again (quadratic otherwise).
+            for (const key of deferred) this._memo?.set(key, { error: '#CIRC!' });
+            if (forCellKey) this._memo?.set(forCellKey, { error: '#CIRC!' });
             return { displayValue: '#CIRC!', type: 'error' };
           }
           if (deferred.length >= MAX_DEFERRED_CELLS) {
@@ -426,7 +443,8 @@ export class FormulaEngine {
       if (forCellKey) {
         this._memo?.set(
           forCellKey,
-          evaluated.type === 'error' ? { error: evaluated.displayValue } : { value: result }
+          // Same shape as nested evaluation memoizes, so results don't depend on order
+          { value: result }
         );
         if (!isVolatile) {
           this._cache.set(forCellKey, { ...evaluated, rawValue });

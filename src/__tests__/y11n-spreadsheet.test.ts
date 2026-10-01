@@ -176,4 +176,44 @@ describe('Y11nSpreadsheet', () => {
 
     expect(getCellText(el, 0, 0)).toBe('$1,234.00');
   });
+
+  it('keeps computed values of unchanged cells across incremental data updates', async () => {
+    const el = await createSpreadsheet({ rows: 5, cols: 5 });
+    const d1 = new Map([
+      ['0:0', { rawValue: '1', displayValue: '1', type: 'number' as const }],
+      ['0:1', { rawValue: '=A1+1', displayValue: '', type: 'text' as const }],
+    ]);
+    el.data = d1;
+    await el.updateComplete;
+    expect(getCellText(el, 0, 1)).toBe('2');
+
+    const d2 = new Map(d1);
+    d2.set('2:2', { rawValue: 'x', displayValue: 'x', type: 'text' as const });
+    el.data = d2;
+    await el.updateComplete;
+    expect(getCellText(el, 0, 1)).toBe('2');
+  });
+
+  it('drops number formatting when a format is removed through new data', async () => {
+    const el = await createSpreadsheet({ rows: 5, cols: 5 });
+    el.data = new Map([
+      [
+        '0:0',
+        {
+          rawValue: '1234.5',
+          displayValue: '1234.5',
+          type: 'number' as const,
+          format: { numberFormat: { type: 'currency' as const } },
+        },
+      ],
+    ]);
+    await el.updateComplete;
+    expect(getCellText(el, 0, 0)).toBe('$1,234.50');
+
+    const next = el.getData();
+    delete next.get('0:0')!.format;
+    el.data = next;
+    await el.updateComplete;
+    expect(getCellText(el, 0, 0)).toBe('1234.5');
+  });
 });

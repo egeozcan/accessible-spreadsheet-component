@@ -2527,4 +2527,38 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=MIN(A1:A2)').displayValue).toBe('10');
     });
   });
+
+  describe('review round 2', () => {
+    it('recalculates a long reference cycle and its dependents in linear time', () => {
+      const data: GridData = new Map();
+      data.set('0:0', cell('=A300'));
+      for (let i = 1; i < 300; i++) data.set(`${i}:0`, cell(`=A${i}+1`));
+      for (let i = 0; i < 300; i++) data.set(`${i}:1`, cell('=A300*2'));
+      engine.setData(data);
+      const start = Date.now();
+      engine.recalculate();
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(data.get('299:0')!.displayValue).toBe('#CIRC!');
+      expect(data.get('0:1')!.displayValue).toBe('#CIRC!');
+    });
+
+    it('reports closing a long cycle as circular even before data is updated', () => {
+      const data: GridData = new Map([['0:0', cell('5', 'number')]]);
+      for (let i = 1; i < 150; i++) data.set(`${i}:0`, cell(`=A${i}+1`));
+      engine.setData(data);
+      expect(engine.evaluate('=A150', '0:0').displayValue).toBe('#CIRC!');
+    });
+
+    it('gives order-independent results for cells whose value is a range', () => {
+      const run = (order: string[]) => {
+        const e = new FormulaEngine();
+        const all: Record<string, string> = { '0:0': '1', '1:0': '2', '0:1': '=A1:A2', '0:2': '=SUM(B1)' };
+        const data = makeData(Object.fromEntries(order.map((k) => [k, all[k]])));
+        e.setData(data);
+        e.recalculate();
+        return data.get('0:2')!.displayValue;
+      };
+      expect(run(['0:0', '1:0', '0:1', '0:2'])).toBe(run(['0:0', '1:0', '0:2', '0:1']));
+    });
+  });
 });

@@ -476,6 +476,11 @@ export class Y11nSpreadsheet extends LitElement {
         !formatsEqual(oldCell.format, cell.format)
       ) {
         changedKeys.push(key);
+      } else {
+        // Unchanged cells keep their computed values; the caller's copy may
+        // carry a placeholder displayValue (e.g. '' for formulas).
+        cell.displayValue = oldCell.displayValue;
+        cell.type = oldCell.type;
       }
     }
 
@@ -494,8 +499,17 @@ export class Y11nSpreadsheet extends LitElement {
     if (changedKeys.length > 0 && oldData.size > 0) {
       // Incremental update: preserve dep graph for unchanged cells
       this._formulaEngine.updateData(this._internalData, changedKeys);
+      // Literal cells aren't recalculated by the engine: derive their display
+      // from the raw value so an added or removed number format takes effect.
+      for (const key of changedKeys) {
+        const cell = this._internalData.get(key);
+        if (cell && !cell.rawValue.startsWith('=')) {
+          const evaluated = this._formulaEngine.evaluate(cell.rawValue);
+          cell.displayValue = evaluated.displayValue;
+          cell.type = evaluated.type;
+        }
+      }
       this._recalcAffected(changedKeys);
-      // Literal cells aren't recalculated, so apply any new number format directly
       this._applyNumberFormatsToKeys(new Set(changedKeys));
     } else {
       // Full reset: first load or complete replacement
@@ -2012,11 +2026,16 @@ export class Y11nSpreadsheet extends LitElement {
           aria-colindex="1"
           aria-label="Row ${row + 1}"
         >${row + 1}</div>
-        ${layoutWithGaps(
-          cols,
-          this.cols,
-          (c) => this._renderCell(row, c),
-          (_start, size) => this._renderColumnSpacer(size)
+        ${repeat(
+          layoutWithGaps<{ key: string; tpl: unknown }>(
+            cols,
+            this.cols,
+            (c) => ({ key: `c${c}`, tpl: this._renderCell(row, c) }),
+            (start, size) => ({ key: `g${start}`, tpl: this._renderColumnSpacer(size) })
+          ),
+          // Keyed so the focused cell's element is never reused for another column
+          (seg) => seg.key,
+          (seg) => seg.tpl
         )}
       </div>
     `;
