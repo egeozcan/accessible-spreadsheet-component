@@ -1,6 +1,7 @@
 import {
   type CellFormat,
   type GridData,
+  type NumberFormatOptions,
   type SelectionRange,
   cellKey,
   colToLetter,
@@ -115,7 +116,9 @@ export class ClipboardManager {
       let clipboardMatchesInternal = false;
       try {
         const currentText = await navigator.clipboard.readText();
-        clipboardMatchesInternal = currentText === this._lastWrittenText;
+        // Compare with normalized line endings: some platforms rewrite \n as \r\n
+        const normalize = (t: string | null) => t?.replace(/\r\n?/g, '\n');
+        clipboardMatchesInternal = normalize(currentText) === normalize(this._lastWrittenText);
       } catch {
         // Clipboard read denied — assume internal data is still valid
         clipboardMatchesInternal = true;
@@ -338,7 +341,9 @@ export class ClipboardManager {
           i++;
         }
       } else {
-        if (ch === '"') {
+        // A quote only opens a quoted field at the start of the field; a quote
+        // mid-field (e.g. `5" screen`, which Excel leaves unquoted) is literal.
+        if (ch === '"' && currentField === '') {
           inQuotes = true;
           i++;
         } else if (ch === '\t') {
@@ -434,7 +439,9 @@ export class ClipboardManager {
     // Match cell references including optional $ markers
     // Pattern: optional $ + column letters + optional $ + row digits
     // Handles ranges like $A$1:$B$2 by matching each ref separately
-    const refPattern = /(\$?)([A-Z]+)(\$?)(\d+)/gi;
+    // The lookarounds keep identifiers that merely contain a ref-like
+    // substring (e.g. a custom LOG10() function) from being rewritten.
+    const refPattern = /(?<![A-Z0-9_.$])(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9_.]|\s*\()/gi;
 
     return segments.map((seg, idx) => {
       if (isString[idx]) return seg;
@@ -598,8 +605,28 @@ export class ClipboardManager {
     if (typeof obj.fontSize === 'number' && obj.fontSize > 0 && obj.fontSize <= 200) {
       fmt.fontSize = obj.fontSize;
     }
+    const numberFormat = this._sanitizeNumberFormat(obj.numberFormat);
+    if (numberFormat) fmt.numberFormat = numberFormat;
 
     return Object.keys(fmt).length > 0 ? fmt : undefined;
+  }
+
+  private _sanitizeNumberFormat(raw: unknown): NumberFormatOptions | undefined {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const obj = raw as Record<string, unknown>;
+    const validTypes = new Set(['number', 'currency', 'percent', 'scientific']);
+    if (typeof obj.type !== 'string' || !validTypes.has(obj.type)) return undefined;
+
+    const nf: NumberFormatOptions = { type: obj.type as NumberFormatOptions['type'] };
+    // toFixed/toExponential throw outside 0..20 (0..100 in newer engines)
+    if (typeof obj.decimals === 'number' && Number.isInteger(obj.decimals) && obj.decimals >= 0 && obj.decimals <= 20) {
+      nf.decimals = obj.decimals;
+    }
+    if (typeof obj.currencySymbol === 'string' && obj.currencySymbol.length <= 8) {
+      nf.currencySymbol = obj.currencySymbol;
+    }
+    if (typeof obj.thousandsSep === 'boolean') nf.thousandsSep = obj.thousandsSep;
+    return nf;
   }
 
   private _extractStyleProp(style: string, prop: string): string | undefined {

@@ -63,6 +63,93 @@ const AGGREGATE_FUNCTIONS = new Set([
 /** Set of volatile function names whose results should never be cached */
 const VOLATILE_FUNCTIONS = new Set(['NOW']);
 
+/** Aggregates that propagate an error found anywhere in their arguments (COUNT/COUNTA skip them) */
+const ERROR_PROPAGATING_AGGREGATES = new Set(['SUM', 'AVERAGE', 'MIN', 'MAX', 'CONCAT']);
+
+/** Upper bound on deferred cells when resolving reference chains deeper than MAX_EVAL_DEPTH */
+const MAX_DEFERRED_CELLS = 100_000;
+
+const ERROR_CODES = new Set([
+  '#ERROR!', '#REF!', '#DIV/0!', '#NAME?', '#CIRC!', '#VALUE!', '#N/A', '#NUM!',
+]);
+
+function isErrorCode(v: unknown): v is string {
+  return typeof v === 'string' && ERROR_CODES.has(v);
+}
+
+/** Map a thrown value to a spreadsheet error code. */
+function toErrorCode(e: unknown): string {
+  const msg = e instanceof Error ? e.message : '';
+  return msg.startsWith('#') ? msg : '#ERROR!';
+}
+
+function isVolatileFormula(rawValue: string): boolean {
+  const upper = rawValue.toUpperCase();
+  return [...VOLATILE_FUNCTIONS].some((fn) => upper.includes(fn + '('));
+}
+
+/**
+ * Coerce an operand of an arithmetic operator to a number.
+ * Empty values are 0 and booleans are 1/0 (Excel semantics); anything else
+ * that is not numeric is a #VALUE! error rather than a silent NaN.
+ */
+function toNumber(v: unknown): number {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (v === undefined || v === null || v === '') return 0;
+  if (typeof v === 'string') {
+    if (ERROR_CODES.has(v)) throw new Error(v);
+    const n = Number(v);
+    if (v.trim() !== '' && !isNaN(n)) return n;
+  }
+  throw new Error('#VALUE!');
+}
+
+/**
+ * Ordering used by approximate-match lookups: numbers compare numerically,
+ * text compares case-insensitively, and values of different kinds are
+ * incomparable (NaN), so they never match.
+ */
+function lookupCompare(a: unknown, b: unknown): number {
+  const isNum = (v: unknown) =>
+    typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v)));
+  if (a === undefined || b === undefined) return NaN;
+  if (isNum(a) && isNum(b)) return Number(a) - Number(b);
+  if (isNum(a) || isNum(b) || typeof a === 'boolean' || typeof b === 'boolean') return NaN;
+  const as = String(a).toLowerCase();
+  const bs = String(b).toLowerCase();
+  return as < bs ? -1 : as > bs ? 1 : 0;
+}
+
+/**
+ * Index of the last value <= `lookup` in an ascending list, stopping at the
+ * first larger value; values of a different kind are skipped. -1 if none.
+ */
+function approximateMatch(values: unknown[], lookup: unknown): number {
+  let match = -1;
+  for (let i = 0; i < values.length; i++) {
+    const cmp = lookupCompare(values[i], lookup);
+    if (isNaN(cmp)) continue;
+    if (cmp > 0) break;
+    match = i;
+  }
+  return match;
+}
+
+/**
+ * Thrown when resolving a reference would exceed MAX_EVAL_DEPTH. `key` is the
+ * cell that could not be entered; `evaluate()` evaluates it on its own first
+ * (memoizing the result) and then retries, so long reference chains resolve
+ * without growing the JS call stack.
+ */
+class EvalDepthError extends Error {
+  constructor(readonly key: string) {
+    super('#ERROR!');
+  }
+}
+
+type EvalResult = { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' };
+
 /**
  * Represents a 2D range of values with shape information.
  * Used by lookup functions (VLOOKUP, INDEX, etc.) that need row/col structure.
@@ -128,8 +215,14 @@ function matchesCriteria(value: unknown, criteria: string): boolean {
 
   const numTarget = Number(target);
   const numValue = Number(value);
-  const bothNumeric = !isNaN(numTarget) && !isNaN(numValue)
-    && target.trim() !== '' && String(value).trim() !== '';
+  const targetNumeric = !isNaN(numTarget) && target.trim() !== '';
+  const valueNumeric = !isNaN(numValue) && String(value).trim() !== '';
+  const bothNumeric = targetNumeric && valueNumeric;
+
+  // Relational operators only compare like with like (Excel: ">5" never matches text)
+  if (op !== '=' && op !== '<>' && targetNumeric !== valueNumeric) {
+    return false;
+  }
 
   const valLower = String(value).toLowerCase();
   const targetLower = target.toLowerCase();
@@ -166,8 +259,18 @@ export class FormulaEngine {
   private _reverseDeps: Map<string, Set<string>> = new Map();
   private _trackingCellKey: string | null = null;
 
-  // Formula result cache for performance
-  private _cache: Map<string, { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' }> = new Map();
+  // Formula result cache for performance. Entries remember the raw formula
+  // they were computed from so an edited cell never returns a stale result.
+  private _cache: Map<string, EvalResult & { rawValue: string }> = new Map();
+
+  /**
+   * Values of referenced formula cells computed during the current
+   * evaluation pass (one top-level `evaluate()`, or a whole `recalculate()` /
+   * `recalculateAffected()`). Avoids re-evaluating shared precedents, which is
+   * otherwise exponential, and lets deep chains be resolved incrementally.
+   * Null outside a pass, so standalone `evaluate()` calls always see fresh data.
+   */
+  private _memo: Map<string, { value?: unknown; error?: string }> | null = null;
 
   constructor() {
     this.registerBuiltins();
@@ -231,10 +334,76 @@ export class FormulaEngine {
    *   (side-effect: updates the forward/reverse dep graph and result cache)
    * @returns The display value and resolved type
    */
-  evaluate(
-    rawValue: string,
-    forCellKey?: string
-  ): { displayValue: string; type: 'text' | 'number' | 'boolean' | 'error' } {
+  evaluate(rawValue: string, forCellKey?: string): EvalResult {
+    // Keep the cell marked in-progress across deferred retries so a long chain
+    // leading back to it is reported as circular rather than reading its old value.
+    const ownsKey =
+      !!forCellKey && rawValue.startsWith('=') && !this._evaluating.has(forCellKey);
+    if (ownsKey) this._evaluating.add(forCellKey!);
+    try {
+      return this._evaluateDeferred(rawValue, forCellKey);
+    } finally {
+      if (ownsKey) this._evaluating.delete(forCellKey!);
+    }
+  }
+
+  private _evaluateDeferred(rawValue: string, forCellKey?: string): EvalResult {
+    return this._withMemo(() => {
+      // Cells whose evaluation hit the depth limit, innermost last. Each is
+      // evaluated on its own (memoizing its value) before retrying its parent.
+      const deferred: string[] = [];
+      for (;;) {
+        const target = deferred.length > 0 ? deferred[deferred.length - 1] : null;
+        try {
+          if (target === null) {
+            return this._evaluateTopLevel(rawValue, forCellKey);
+          }
+          this._evaluateFormulaCell(target, this._data.get(target)?.rawValue ?? '');
+          deferred.pop();
+        } catch (e) {
+          if (!(e instanceof EvalDepthError)) {
+            // A deferred cell failed with a normal error; it is memoized as
+            // such, so its dependents will see the error on retry.
+            deferred.pop();
+            continue;
+          }
+          const cycleStart = deferred.indexOf(e.key);
+          if (cycleStart !== -1) {
+            // deferred[cycleStart..] form a (long) cycle. Memoize the verdict
+            // for its members so later evaluations in this pass don't walk the
+            // cycle again (quadratic otherwise), then retry the cells that
+            // merely depend on it so they can handle the error (e.g. IFERROR).
+            for (const key of deferred.slice(cycleStart)) {
+              this._memo?.set(key, { error: '#CIRC!' });
+            }
+            deferred.length = cycleStart;
+            continue;
+          }
+          if (deferred.length >= MAX_DEFERRED_CELLS) {
+            return { displayValue: '#ERROR!', type: 'error' };
+          }
+          deferred.push(e.key);
+        }
+      }
+    });
+  }
+
+  /** Run `fn` inside an evaluation pass, creating the pass memo if needed. */
+  private _withMemo<T>(fn: () => T): T {
+    if (this._memo) return fn();
+    this._memo = new Map();
+    try {
+      return fn();
+    } finally {
+      this._memo = null;
+    }
+  }
+
+  /**
+   * Evaluate a raw value as the top-level formula of `forCellKey`.
+   * Throws only EvalDepthError; every other failure becomes an error result.
+   */
+  private _evaluateTopLevel(rawValue: string, forCellKey?: string): EvalResult {
     if (!rawValue || rawValue.trim() === '') {
       if (forCellKey) {
         this._clearDepsFor(forCellKey);
@@ -251,48 +420,86 @@ export class FormulaEngine {
       return this.coerceValue(rawValue);
     }
 
-    // Check if the formula contains a volatile function (skip cache for those)
-    const formulaUpper = rawValue.substring(1).toUpperCase();
-    const isVolatile = [...VOLATILE_FUNCTIONS].some(fn => formulaUpper.includes(fn + '('));
+    // Skip the cache for volatile functions
+    const isVolatile = isVolatileFormula(rawValue);
 
-    // Check cache for formula cells (skip for volatile functions)
+    // Check cache for formula cells (only valid for the same formula text)
     if (forCellKey && !isVolatile) {
       const cached = this._cache.get(forCellKey);
-      if (cached) {
+      if (cached && cached.rawValue === rawValue) {
         return { displayValue: cached.displayValue, type: cached.type };
       }
     }
 
+    const ownsEvaluatingKey = !!forCellKey && !this._evaluating.has(forCellKey);
     try {
       if (forCellKey) {
         this._clearDepsFor(forCellKey);
         this._trackingCellKey = forCellKey;
+        // Mark the cell as in-progress so self-references (direct or through
+        // a range) are reported as circular.
+        if (ownsEvaluatingKey) this._evaluating.add(forCellKey);
       }
       const formula = rawValue.substring(1);
       const result = this.parseExpression(formula);
-      const evaluated = this.coerceValue(String(result));
+      const evaluated = this._resultToDisplay(result);
 
-      // Store in cache for formula cells (skip for volatile functions)
-      if (forCellKey && !isVolatile) {
-        this._cache.set(forCellKey, { displayValue: evaluated.displayValue, type: evaluated.type });
+      if (forCellKey) {
+        this._memo?.set(
+          forCellKey,
+          // Same shape as nested evaluation memoizes, so results don't depend on order
+          { value: result }
+        );
+        if (!isVolatile) {
+          this._cache.set(forCellKey, { ...evaluated, rawValue });
+        }
       }
 
       return evaluated;
     } catch (e) {
+      if (e instanceof EvalDepthError) throw e;
       // Preserve specific error codes (#DIV/0!, #NAME?, #CIRC!)
-      const msg = e instanceof Error ? e.message : '';
-      const errorResult = msg.startsWith('#')
-        ? { displayValue: msg, type: 'error' as const }
-        : { displayValue: '#ERROR!', type: 'error' as const };
+      const errorResult: EvalResult = { displayValue: toErrorCode(e), type: 'error' };
 
-      if (forCellKey && !isVolatile) {
-        this._cache.set(forCellKey, errorResult);
+      if (forCellKey) {
+        this._memo?.set(forCellKey, { error: errorResult.displayValue });
+        if (!isVolatile) {
+          this._cache.set(forCellKey, { ...errorResult, rawValue });
+        }
       }
 
       return errorResult;
     } finally {
       this._trackingCellKey = null;
+      if (ownsEvaluatingKey) this._evaluating.delete(forCellKey!);
     }
+  }
+
+  /**
+   * Convert a formula result to its display string and type based on the
+   * JS type of the result, so text results like "007" or TEXT() output stay text.
+   */
+  private _resultToDisplay(result: unknown): EvalResult {
+    if (typeof result === 'number') {
+      if (isNaN(result)) return { displayValue: '#VALUE!', type: 'error' };
+      if (!Number.isFinite(result)) return { displayValue: '#NUM!', type: 'error' };
+      return { displayValue: String(parseFloat(result.toPrecision(15))), type: 'number' };
+    }
+    if (typeof result === 'boolean') {
+      return { displayValue: result ? 'TRUE' : 'FALSE', type: 'boolean' };
+    }
+    if (typeof result === 'string') {
+      return isErrorCode(result)
+        ? { displayValue: result, type: 'error' }
+        : { displayValue: result, type: 'text' };
+    }
+    if (result instanceof RangeValue) {
+      return { displayValue: '#VALUE!', type: 'error' };
+    }
+    if (result === undefined || result === null) {
+      return { displayValue: '0', type: 'number' };
+    }
+    return this.coerceValue(String(result));
   }
 
   /**
@@ -306,20 +513,22 @@ export class FormulaEngine {
     this._reverseDeps.clear();
     this._cache.clear();
 
-    const changed = new Set<string>();
+    return this._withMemo(() => {
+      const changed = new Set<string>();
 
-    for (const [key, cell] of this._data) {
-      if (cell.rawValue.startsWith('=')) {
-        const result = this.evaluate(cell.rawValue, key);
-        if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
-          cell.displayValue = result.displayValue;
-          cell.type = result.type;
-          changed.add(key);
+      for (const [key, cell] of this._data) {
+        if (cell.rawValue.startsWith('=')) {
+          const result = this.evaluate(cell.rawValue, key);
+          if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
+            cell.displayValue = result.displayValue;
+            cell.type = result.type;
+            changed.add(key);
+          }
         }
       }
-    }
 
-    return changed;
+      return changed;
+    });
   }
 
   /**
@@ -337,66 +546,43 @@ export class FormulaEngine {
       return this.recalculate();
     }
 
-    const changed = new Set<string>();
-    const changedSet = new Set(changedKeys);
-
-    // Clear cache entries for directly changed keys before re-evaluating
-    for (const key of changedKeys) {
-      this._cache.delete(key);
-    }
-
-    // Re-evaluate changed cells that are formulas (they may have been
-    // evaluated with stale sibling values during batch application)
-    for (const key of changedKeys) {
-      const cell = this._data.get(key);
-      if (cell?.rawValue.startsWith('=')) {
-        const result = this.evaluate(cell.rawValue, key);
-        if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
-          cell.displayValue = result.displayValue;
-          cell.type = result.type;
-          changed.add(key);
-        }
-      }
-    }
-
-    // BFS to find all transitive dependents (respects evaluation order)
-    const toRecalc: string[] = [];
-    const visited = new Set<string>();
+    // Collect the changed cells plus all transitive dependents first, and
+    // invalidate them all before evaluating anything, so no formula is ever
+    // computed from a stale cached precedent.
+    const affected = new Set<string>(changedKeys);
     const queue = [...changedKeys];
-
     while (queue.length > 0) {
       const key = queue.shift()!;
       const dependents = this._reverseDeps.get(key);
       if (dependents) {
         for (const dep of dependents) {
-          if (!visited.has(dep) && !changedSet.has(dep)) {
-            visited.add(dep);
-            toRecalc.push(dep);
+          if (!affected.has(dep)) {
+            affected.add(dep);
             queue.push(dep);
           }
         }
       }
     }
 
-    // Clear cache entries for BFS dependents before re-evaluating
-    for (const key of toRecalc) {
+    for (const key of affected) {
       this._cache.delete(key);
     }
 
-    // Recalculate each dependent formula in BFS order
-    for (const key of toRecalc) {
-      const cell = this._data.get(key);
-      if (cell?.rawValue.startsWith('=')) {
-        const result = this.evaluate(cell.rawValue, key);
-        if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
-          cell.displayValue = result.displayValue;
-          cell.type = result.type;
-          changed.add(key);
+    return this._withMemo(() => {
+      const changed = new Set<string>();
+      for (const key of affected) {
+        const cell = this._data.get(key);
+        if (cell?.rawValue.startsWith('=')) {
+          const result = this.evaluate(cell.rawValue, key);
+          if (cell.displayValue !== result.displayValue || cell.type !== result.type) {
+            cell.displayValue = result.displayValue;
+            cell.type = result.type;
+            changed.add(key);
+          }
         }
       }
-    }
-
-    return changed;
+      return changed;
+    });
   }
 
   // ─── Dependency Tracking ─────────────────────────────
@@ -691,8 +877,8 @@ export class FormulaEngine {
     ) {
       const op = this._consume(s).value;
       const right = this._parseMulDiv(s);
-      if (op === '+') left = Number(left) + Number(right);
-      else left = Number(left) - Number(right);
+      if (op === '+') left = toNumber(left) + toNumber(right);
+      else left = toNumber(left) - toNumber(right);
     }
 
     return left;
@@ -707,11 +893,12 @@ export class FormulaEngine {
     ) {
       const op = this._consume(s).value;
       const right = this._parseUnary(s);
-      if (op === '*') left = Number(left) * Number(right);
+      if (op === '*') left = toNumber(left) * toNumber(right);
       else {
-        const divisor = Number(right);
+        const dividend = toNumber(left);
+        const divisor = toNumber(right);
         if (divisor === 0) throw new Error('#DIV/0!');
-        left = Number(left) / divisor;
+        left = dividend / divisor;
       }
     }
 
@@ -721,11 +908,11 @@ export class FormulaEngine {
   private _parseUnary(s: ParserState): unknown {
     if (this._peek(s).type === 'OPERATOR' && this._peek(s).value === '-') {
       this._consume(s);
-      return -Number(this._parseUnary(s));
+      return -toNumber(this._parseUnary(s));
     }
     if (this._peek(s).type === 'OPERATOR' && this._peek(s).value === '+') {
       this._consume(s);
-      return Number(this._parseUnary(s));
+      return toNumber(this._parseUnary(s));
     }
     return this._parsePrimary(s);
   }
@@ -778,6 +965,12 @@ export class FormulaEngine {
       return this._parseIFERROR(s);
     }
 
+    // IF only evaluates the branch it returns, so guards like
+    // =IF(A1=0, 0, 1/A1) don't raise errors from the untaken branch.
+    if (name === 'IF') {
+      return this._parseIF(s);
+    }
+
     const args: unknown[] = [];
     if (this._peek(s).type !== 'RPAREN') {
       args.push(this._parseComparison(s));
@@ -810,10 +1003,15 @@ export class FormulaEngine {
           flatArgs.push(arg);
         }
       }
-      return fn(ctx, ...flatArgs);
+      if (ERROR_PROPAGATING_AGGREGATES.has(name)) {
+        const err = flatArgs.find(isErrorCode);
+        if (err !== undefined) throw new Error(err);
+      }
+      return fn(ctx, ...flatArgs) ?? 0;
     }
 
-    return fn(ctx, ...args);
+    // An empty cell returned by e.g. VLOOKUP reads as 0, matching how it displays
+    return fn(ctx, ...args) ?? 0;
   }
 
   /**
@@ -827,23 +1025,14 @@ export class FormulaEngine {
 
     try {
       value = this._parseComparison(s);
-    } catch {
+    } catch (e) {
+      // Running out of evaluation depth is not a formula error; let evaluate() retry.
+      if (e instanceof EvalDepthError) throw e;
       caught = true;
       // The first argument threw — scan forward to the comma or closing paren
       // so we can parse the fallback argument from a known position.
       s.pos = savedPos;
-      let depth = 0;
-      while (this._peek(s).type !== 'EOF') {
-        const t = this._peek(s);
-        if (t.type === 'LPAREN') { depth++; s.pos++; }
-        else if (t.type === 'RPAREN') {
-          if (depth === 0) break;
-          depth--;
-          s.pos++;
-        }
-        else if (t.type === 'COMMA' && depth === 0) break;
-        else s.pos++;
-      }
+      this._skipArgument(s);
     }
 
     // Parse the fallback argument (if present)
@@ -858,14 +1047,51 @@ export class FormulaEngine {
 
     // No throw — but the value itself might be an error string (e.g. from a
     // cell whose displayValue is already an error code).
-    const sv = String(value);
-    if (
-      sv === '#ERROR!' || sv === '#REF!' || sv === '#DIV/0!' ||
-      sv === '#NAME?' || sv === '#CIRC!' || sv === '#VALUE!' || sv === '#N/A'
-    ) {
+    if (isErrorCode(value)) {
       return fallback;
     }
     return value;
+  }
+
+  /**
+   * Parse IF(condition, then, else), evaluating only the selected branch.
+   * Called after LPAREN has already been consumed.
+   */
+  private _parseIF(s: ParserState): unknown {
+    const condition = this._parseComparison(s);
+    // Excel defaults: omitted true branch → 0, omitted false branch → FALSE
+    let result: unknown = condition ? 0 : false;
+
+    if (this._peek(s).type === 'COMMA') {
+      this._consume(s);
+      if (condition) result = this._parseComparison(s);
+      else this._skipArgument(s);
+
+      if (this._peek(s).type === 'COMMA') {
+        this._consume(s);
+        if (condition) this._skipArgument(s);
+        else result = this._parseComparison(s);
+      }
+    }
+
+    this._consume(s, 'RPAREN');
+    return result;
+  }
+
+  /** Advance past one function argument without evaluating it. */
+  private _skipArgument(s: ParserState): void {
+    let depth = 0;
+    while (this._peek(s).type !== 'EOF') {
+      const t = this._peek(s);
+      if (t.type === 'LPAREN') { depth++; s.pos++; }
+      else if (t.type === 'RPAREN') {
+        if (depth === 0) break;
+        depth--;
+        s.pos++;
+      }
+      else if (t.type === 'COMMA' && depth === 0) break;
+      else s.pos++;
+    }
   }
 
   // ─── Comparison helper ────────────────────────────────
@@ -931,20 +1157,8 @@ export class FormulaEngine {
     const cell = this._data.get(key);
     if (!cell) return 0; // empty cells are 0
 
-    // If this cell also has a formula, evaluate it in a fresh parser context.
-    // Keep _trackingCellKey so transitive dependencies are recorded
-    // (e.g. C1→B1→A1 means C1 depends on A1 too).
     if (cell.rawValue.startsWith('=')) {
-      this._evaluating.add(key);
-      try {
-        return this.parseExpression(cell.rawValue.substring(1));
-      } catch (e) {
-        // Preserve specific error codes (#DIV/0!, #N/A, etc.)
-        if (e instanceof Error && e.message.startsWith('#')) throw e;
-        throw new Error('#ERROR!');
-      } finally {
-        this._evaluating.delete(key);
-      }
+      return this._evaluateFormulaCell(key, cell.rawValue);
     }
 
     // Return the value, coerced to number if possible
@@ -953,6 +1167,42 @@ export class FormulaEngine {
     if (cell.rawValue.toUpperCase() === 'TRUE') return true;
     if (cell.rawValue.toUpperCase() === 'FALSE') return false;
     return cell.rawValue;
+  }
+
+  /**
+   * Evaluate a referenced formula cell, reusing its value if it was already
+   * computed in this evaluation pass. Keeps `_trackingCellKey` so transitive
+   * dependencies are recorded (e.g. C1→B1→A1 means C1 depends on A1 too).
+   */
+  private _evaluateFormulaCell(key: string, rawValue: string): unknown {
+    if (this._evaluating.has(key)) {
+      throw new Error('#CIRC!');
+    }
+
+    const memoized = this._memo?.get(key);
+    if (memoized) {
+      if (memoized.error !== undefined) throw new Error(memoized.error);
+      return memoized.value;
+    }
+
+    if (this._evalDepth >= MAX_EVAL_DEPTH) {
+      throw new EvalDepthError(key);
+    }
+
+    this._evaluating.add(key);
+    try {
+      const value = this.parseExpression(rawValue.substring(1));
+      this._memo?.set(key, { value });
+      return value;
+    } catch (e) {
+      if (e instanceof EvalDepthError) throw e;
+      // Preserve specific error codes (#DIV/0!, #N/A, etc.)
+      const code = toErrorCode(e);
+      this._memo?.set(key, { error: code });
+      throw new Error(code);
+    } finally {
+      this._evaluating.delete(key);
+    }
   }
 
   private _resolveRange(rangeStr: string): RangeValue {
@@ -978,20 +1228,17 @@ export class FormulaEngine {
         const cell = this._data.get(key);
         if (cell) {
           if (cell.rawValue.startsWith('=')) {
-            // Keep _trackingCellKey so transitive deps through ranges are tracked
-            if (this._evaluating.has(key)) {
-              values.push('#CIRC!');
-            } else {
-              this._evaluating.add(key);
-              try {
-                values.push(this.parseExpression(cell.rawValue.substring(1)));
-              } catch (e) {
-                const msg = e instanceof Error ? e.message : '';
-                values.push(msg.startsWith('#') ? msg : '#ERROR!');
-              } finally {
-                this._evaluating.delete(key);
-              }
+            // Errors become error-code values so functions like COUNTIF can
+            // skip them while aggregates like SUM propagate them.
+            try {
+              values.push(this._evaluateFormulaCell(key, cell.rawValue));
+            } catch (e) {
+              if (e instanceof EvalDepthError) throw e;
+              values.push(toErrorCode(e));
             }
+          } else if (cell.rawValue === '') {
+            // A formatted-but-empty cell is still empty
+            values.push(undefined);
           } else {
             // Match _resolveRef's coercion logic for consistency
             const num = Number(cell.rawValue);
@@ -1252,17 +1499,12 @@ export class FormulaEngine {
           if (bothNum ? numLookup === numCell : String(firstCol[r]).toLowerCase() === String(lookupValue).toLowerCase()) {
             return tableRange.get(r, colIdx - 1);
           }
-        } else {
-          // Approximate match: find largest value <= lookupValue
-          // Data assumed sorted ascending
-          if (Number(firstCol[r]) > Number(lookupValue)) {
-            if (r === 0) throw new Error('#N/A');
-            return tableRange.get(r - 1, colIdx - 1);
-          }
         }
       }
-      if (!isExact && firstCol.length > 0) {
-        return tableRange.get(firstCol.length - 1, colIdx - 1);
+      if (!isExact) {
+        // Approximate match: largest value <= lookupValue (data assumed sorted ascending)
+        const r = approximateMatch(firstCol, lookupValue);
+        if (r !== -1) return tableRange.get(r, colIdx - 1);
       }
       throw new Error('#N/A');
     });
@@ -1289,15 +1531,11 @@ export class FormulaEngine {
           if (bothNum ? numLookup === numCell : String(firstRow[c]).toLowerCase() === String(lookupValue).toLowerCase()) {
             return tableRange.get(rowIdx - 1, c);
           }
-        } else {
-          if (Number(firstRow[c]) > Number(lookupValue)) {
-            if (c === 0) throw new Error('#N/A');
-            return tableRange.get(rowIdx - 1, c - 1);
-          }
         }
       }
-      if (!isExact && firstRow.length > 0) {
-        return tableRange.get(rowIdx - 1, firstRow.length - 1);
+      if (!isExact) {
+        const c = approximateMatch(firstRow, lookupValue);
+        if (c !== -1) return tableRange.get(rowIdx - 1, c);
       }
       throw new Error('#N/A');
     });
@@ -1342,19 +1580,14 @@ export class FormulaEngine {
         throw new Error('#N/A');
       } else if (mt === 1) {
         // Largest value <= lookupValue (data assumed sorted ascending)
-        let lastMatch = -1;
-        for (let i = 0; i < arr.length; i++) {
-          if (Number(arr[i]) <= Number(lookupValue)) {
-            lastMatch = i;
-          }
-        }
-        if (lastMatch === -1) throw new Error('#N/A');
-        return lastMatch + 1;
+        const match = approximateMatch(arr, lookupValue);
+        if (match === -1) throw new Error('#N/A');
+        return match + 1;
       } else {
         // mt === -1: Smallest value >= lookupValue (data assumed sorted descending)
         let lastMatch = -1;
         for (let i = 0; i < arr.length; i++) {
-          if (Number(arr[i]) >= Number(lookupValue)) {
+          if (lookupCompare(arr[i], lookupValue) >= 0) {
             lastMatch = i;
           }
         }

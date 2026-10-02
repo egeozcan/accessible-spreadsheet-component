@@ -29,6 +29,48 @@ import type { FormulaBarMode } from './components/y11n-formula-bar.js';
 type DataChangeOperation = NonNullable<DataChangeDetail['operation']>;
 type ChangeSource = NonNullable<DataChangeDetail['source']>;
 
+function cloneCell(cell: CellData): CellData {
+  const copy: CellData = { ...cell };
+  if (cell.format) {
+    copy.format = { ...cell.format };
+    if (cell.format.numberFormat) {
+      copy.format.numberFormat = { ...cell.format.numberFormat };
+    }
+  }
+  return copy;
+}
+
+/**
+ * Lay out a sorted list of rendered indices across `total` slots, emitting
+ * a spacer for every run of unrendered slots so the CSS grid keeps its geometry.
+ */
+function layoutWithGaps<T>(
+  indices: number[],
+  total: number,
+  item: (index: number) => T,
+  gap: (start: number, size: number) => T
+): T[] {
+  const out: T[] = [];
+  let next = 0;
+  for (const i of indices) {
+    if (i > next) out.push(gap(next, i - next));
+    out.push(item(i));
+    next = i + 1;
+  }
+  if (total > next) out.push(gap(next, total - next));
+  return out;
+}
+
+/** Contiguous `[start, end)` indices plus any `extras` outside that window, sorted. */
+function windowWithExtras(start: number, end: number, extras: number[]): number[] {
+  const out: number[] = [];
+  for (let i = start; i < end; i++) out.push(i);
+  for (const e of extras) {
+    if ((e < start || e >= end) && !out.includes(e)) out.push(e);
+  }
+  return out.sort((a, b) => a - b);
+}
+
 interface CellDelta {
   id: string;
   before: string;
@@ -172,7 +214,11 @@ export class Y11nSpreadsheet extends LitElement {
    * @returns A new Map containing all cell data
    */
   getData(): GridData {
-    return new Map(this._internalData);
+    const copy: GridData = new Map();
+    for (const [key, cell] of this._internalData) {
+      copy.set(key, cloneCell(cell));
+    }
+    return copy;
   }
 
   /**
@@ -267,7 +313,7 @@ export class Y11nSpreadsheet extends LitElement {
    * @param prop - The boolean format property to toggle
    */
   toggleFormat(prop: 'bold' | 'italic' | 'underline' | 'strikethrough'): void {
-    if (this.readOnly) return;
+    if (this.readOnly || this._pasteInProgress) return;
     const range = this._selection.range;
     const cellIds: string[] = [];
     let allHaveProp = true;
@@ -411,7 +457,12 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _syncData(): void {
     const oldData = this._internalData;
-    const newData = new Map(this.data);
+    // Clone each cell so internal mutations (recalc, number formatting) never
+    // leak into the caller's objects, and caller mutations never leak in.
+    const newData: GridData = new Map();
+    for (const [key, cell] of this.data) {
+      newData.set(key, cloneCell(cell));
+    }
 
     // Diff old vs new to collect changed keys for future targeted recalc
     const changedKeys: string[] = [];
@@ -419,8 +470,17 @@ export class Y11nSpreadsheet extends LitElement {
     // Keys in new data that are different or absent in old data
     for (const [key, cell] of newData) {
       const oldCell = oldData.get(key);
-      if (!oldCell || oldCell.rawValue !== cell.rawValue) {
+      if (
+        !oldCell ||
+        oldCell.rawValue !== cell.rawValue ||
+        !formatsEqual(oldCell.format, cell.format)
+      ) {
         changedKeys.push(key);
+      } else {
+        // Unchanged cells keep their computed values; the caller's copy may
+        // carry a placeholder displayValue (e.g. '' for formulas).
+        cell.displayValue = oldCell.displayValue;
+        cell.type = oldCell.type;
       }
     }
 
@@ -439,7 +499,18 @@ export class Y11nSpreadsheet extends LitElement {
     if (changedKeys.length > 0 && oldData.size > 0) {
       // Incremental update: preserve dep graph for unchanged cells
       this._formulaEngine.updateData(this._internalData, changedKeys);
+      // Literal cells aren't recalculated by the engine: derive their display
+      // from the raw value so an added or removed number format takes effect.
+      for (const key of changedKeys) {
+        const cell = this._internalData.get(key);
+        if (cell && !cell.rawValue.startsWith('=')) {
+          const evaluated = this._formulaEngine.evaluate(cell.rawValue);
+          cell.displayValue = evaluated.displayValue;
+          cell.type = evaluated.type;
+        }
+      }
       this._recalcAffected(changedKeys);
+      this._applyNumberFormatsToKeys(new Set(changedKeys));
     } else {
       // Full reset: first load or complete replacement
       this._formulaEngine.setData(this._internalData);
@@ -700,7 +771,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _undo(): void {
-    if (this.readOnly) return;
+    if (this.readOnly || this._pasteInProgress) return;
 
     const batch = this._undoStack.pop();
     if (!batch) return;
@@ -711,7 +782,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _redo(): void {
-    if (this.readOnly) return;
+    if (this.readOnly || this._pasteInProgress) return;
 
     const batch = this._redoStack.pop();
     if (!batch) return;
@@ -746,7 +817,7 @@ export class Y11nSpreadsheet extends LitElement {
   // ─── Editing ────────────────────────────────────────
 
   private _startEditing(initialValue?: string): void {
-    if (this.readOnly || this._isEditing) return;
+    if (this.readOnly || this._isEditing || this._pasteInProgress) return;
 
     const { row, col } = this._selection.activeCell;
     const key = cellKey(row, col);
@@ -796,7 +867,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (before === '=') return true;
 
     const lastChar = before[before.length - 1];
-    return ['+', '-', '*', '/', '&', '(', ',', '<', '>', '='].includes(lastChar);
+    return ['+', '-', '*', '/', '&', '(', ',', ':', '<', '>', '='].includes(lastChar);
   }
 
   /**
@@ -858,7 +929,7 @@ export class Y11nSpreadsheet extends LitElement {
     const text = this._editValue;
 
     // Find the reference at or just before the cursor
-    const refPattern = /(\$?)([A-Z]+)(\$?)(\d+)/gi;
+    const refPattern = /(?<![A-Z0-9_.$])(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9_.(])/gi;
     let match: RegExpExecArray | null;
     let bestMatch: RegExpExecArray | null = null;
 
@@ -931,9 +1002,24 @@ export class Y11nSpreadsheet extends LitElement {
 
     // Only stop propagation for keys we actually handle, so unhandled keys
     // (e.g. Tab) propagate normally and focus can leave the grid.
+    // Start editing on printable character input. This must run before the
+    // shortcut switch so plain letters like "a" or "c" aren't swallowed by the
+    // Ctrl+letter cases. Count code points so emoji also start editing.
+    if (!ctrl && !e.altKey && [...e.key].length === 1) {
+      if (!this.readOnly) {
+        e.preventDefault();
+        e.stopPropagation();
+        this._startEditing(e.key);
+      }
+      return;
+    }
+
     let handled = true;
 
-    switch (e.key) {
+    // Normalize letter keys so shortcuts work with Caps Lock / Shift held.
+    const key = ctrl && e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
+    switch (key) {
       case 'ArrowUp':
         e.preventDefault();
         this._selection.move(-1, 0, shift);
@@ -1100,8 +1186,16 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
 
+      case 'y':
+        if (ctrl) {
+          e.preventDefault();
+          this._redo();
+        } else {
+          handled = false;
+        }
+        break;
+
       case 'z':
-      case 'Z':
         if (ctrl) {
           e.preventDefault();
           if (shift) {
@@ -1115,13 +1209,7 @@ export class Y11nSpreadsheet extends LitElement {
         break;
 
       default:
-        // Start editing on printable character input
-        if (!ctrl && !e.altKey && e.key.length === 1 && !this.readOnly) {
-          e.preventDefault();
-          this._startEditing(e.key);
-        } else {
-          handled = false;
-        }
+        handled = false;
         break;
     }
 
@@ -1193,6 +1281,8 @@ export class Y11nSpreadsheet extends LitElement {
   private _handleCornerKeydown(e: KeyboardEvent): void {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
+      // Keep the grid handler from also treating this key as "start editing".
+      e.stopPropagation();
       this._handleSelectAll();
     }
   }
@@ -1264,7 +1354,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private async _handleCut(): Promise<void> {
-    if (this.readOnly) return;
+    if (this.readOnly || this._pasteInProgress) return;
 
     const keysToDelete = await this._clipboardManager.cut(
       this._internalData,
@@ -1288,7 +1378,9 @@ export class Y11nSpreadsheet extends LitElement {
   private async _handlePaste(): Promise<void> {
     if (this.readOnly || this._pasteInProgress) return;
 
-    const { row, col } = this._selection.activeCell;
+    // Paste anchors at the top-left of the selection (not the head, which may
+    // be the bottom-right corner after a Shift+arrow or drag selection).
+    const { row, col } = this._selection.range.start;
     const updates = await this._clipboardManager.paste(row, col, this.rows, this.cols);
 
     if (!updates || updates.length === 0) return;
@@ -1387,6 +1479,7 @@ export class Y11nSpreadsheet extends LitElement {
   // ─── Cell Clearing ──────────────────────────────────
 
   private _clearSelectedCells(): void {
+    if (this._pasteInProgress) return;
     const range = this._selection.range;
     const updates: Array<{ id: string; value: string }> = [];
     const selection = this._snapshotSelection();
@@ -1485,7 +1578,7 @@ export class Y11nSpreadsheet extends LitElement {
    * Compute which rows and columns are visible based on scroll position.
    * We add a buffer of extra rows/cols for smooth scrolling.
    */
-  private _getVisibleRange(): { startRow: number; endRow: number; startCol: number; endCol: number } {
+  private _getVisibleRange(): { rows: number[]; cols: number[] } {
     const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
     const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
     const gridEl = this._grid;
@@ -1496,26 +1589,27 @@ export class Y11nSpreadsheet extends LitElement {
 
     const buffer = 5;
 
-    let startRow = Math.max(0, Math.floor(this._scrollTop / cellHeight) - buffer);
-    let endRow = Math.min(this.rows, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
-    let startCol = Math.max(0, Math.floor(this._scrollLeft / cellWidth) - buffer);
-    let endCol = Math.min(this.cols, Math.ceil((this._scrollLeft + viewWidth) / cellWidth) + buffer);
+    const startRow = Math.max(0, Math.floor(this._scrollTop / cellHeight) - buffer);
+    const endRow = Math.min(this.rows, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
+    const startCol = Math.max(0, Math.floor(this._scrollLeft / cellWidth) - buffer);
+    const endCol = Math.min(this.cols, Math.ceil((this._scrollLeft + viewWidth) / cellWidth) + buffer);
 
-    // Ensure the active cell is always within the rendered range
+    // The active cell (roving tabindex target) and the reference cursor must
+    // always be in the DOM. Render them individually rather than stretching
+    // the window, which would render every row between the viewport and a
+    // far-away active cell after the user scrolls with the mouse.
     const { row: activeRow, col: activeCol } = this._selection.activeCell;
-    if (activeRow < startRow) startRow = activeRow;
-    if (activeRow >= endRow) endRow = activeRow + 1;
-    if (activeCol < startCol) startCol = activeCol;
-    if (activeCol >= endCol) endCol = activeCol + 1;
-
+    const extraRows = [activeRow];
+    const extraCols = [activeCol];
     if (this._refMode) {
-      if (this._refCursorRow < startRow) startRow = this._refCursorRow;
-      if (this._refCursorRow >= endRow) endRow = this._refCursorRow + 1;
-      if (this._refCursorCol < startCol) startCol = this._refCursorCol;
-      if (this._refCursorCol >= endCol) endCol = this._refCursorCol + 1;
+      extraRows.push(this._refCursorRow);
+      extraCols.push(this._refCursorCol);
     }
 
-    return { startRow, endRow, startCol, endCol };
+    return {
+      rows: windowWithExtras(startRow, endRow, extraRows),
+      cols: windowWithExtras(startCol, endCol, extraCols),
+    };
   }
 
   private _ensureCellVisible(row: number, col: number): void {
@@ -1780,7 +1874,7 @@ export class Y11nSpreadsheet extends LitElement {
   `;
 
   protected render() {
-    const { startRow, endRow, startCol, endCol } = this._getVisibleRange();
+    const { rows, cols } = this._getVisibleRange();
     const activeCell = this._selection.activeCell;
     const activeRawValue = this._getCellRaw(activeCell.row, activeCell.col);
     const activeDisplayValue = this._getCellDisplay(activeCell.row, activeCell.col);
@@ -1821,8 +1915,8 @@ export class Y11nSpreadsheet extends LitElement {
             @keydown="${this._handleGridKeydown}"
             @scroll="${this._handleScroll}"
           >
-            ${this._renderHeaderRow(startCol, endCol)}
-            ${this._renderRows(startRow, endRow, startCol, endCol)}
+            ${this._renderHeaderRow(cols)}
+            ${this._renderRows(rows, cols)}
           </div>
         </div>
 
@@ -1836,101 +1930,113 @@ export class Y11nSpreadsheet extends LitElement {
     `;
   }
 
-  private _renderHeaderRow(startCol: number, endCol: number) {
-    const headers = [];
-    for (let c = startCol; c < endCol; c++) {
-      headers.push({ letter: colToLetter(c), index: c });
-    }
+  private _renderColumnSpacer(size: number) {
+    return html`<div style="grid-column: span ${size};"></div>`;
+  }
 
+  private _renderHeaderRow(cols: number[]) {
     return html`
       <div class="ls-header-row" role="row" aria-rowindex="1">
         <div
           class="ls-corner-header"
           role="columnheader"
+          aria-colindex="1"
           aria-label="Select all"
           tabindex="-1"
           @click="${this._handleSelectAll}"
           @keydown="${this._handleCornerKeydown}"
         ><span class="sr-only">Select all</span></div>
-        ${startCol > 0
-          ? html`<div style="grid-column: span ${startCol};"></div>`
-          : nothing}
-        ${headers.map(
-          (h) => html`
+        ${layoutWithGaps(
+          cols,
+          this.cols,
+          (c) => html`
             <div
               class="ls-col-header"
               role="columnheader"
-              aria-colindex="${h.index + 2}"
-              aria-label="Column ${h.letter}"
+              aria-colindex="${c + 2}"
+              aria-label="Column ${colToLetter(c)}"
             >
-              ${h.letter}
+              ${colToLetter(c)}
             </div>
-          `
+          `,
+          (_start, size) => this._renderColumnSpacer(size)
         )}
-        ${endCol < this.cols
-          ? html`<div style="grid-column: span ${this.cols - endCol};"></div>`
-          : nothing}
       </div>
     `;
   }
 
-  private _renderRows(startRow: number, endRow: number, startCol: number, endCol: number) {
+  private _renderRows(rows: number[], cols: number[]) {
     const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
-    const rowIndices = Array.from({ length: endRow - startRow }, (_, i) => startRow + i);
+    type Segment = { key: string; row: number; gap: number };
+    const segments = layoutWithGaps<Segment>(
+      rows,
+      this.rows,
+      (row) => ({ key: `r${row}`, row, gap: 0 }),
+      (start, size) => ({ key: `g${start}`, row: start, gap: size })
+    );
 
     return html`
-      ${startRow > 0
-        ? html`<div style="grid-column: 1 / -1; height: ${startRow * cellHeight}px;"></div>`
-        : nothing}
-      ${repeat(rowIndices, (r) => r, (r) => this._renderRow(r, startCol, endCol))}
-      ${endRow < this.rows
-        ? html`<div style="grid-column: 1 / -1; height: ${(this.rows - endRow) * cellHeight}px;"></div>`
-        : nothing}
+      ${repeat(
+        segments,
+        (seg) => seg.key,
+        (seg) =>
+          seg.gap > 0
+            ? html`<div style="grid-column: 1 / -1; height: ${seg.gap * cellHeight}px;"></div>`
+            : this._renderRow(seg.row, cols)
+      )}
     `;
   }
 
-  private _renderRow(row: number, startCol: number, endCol: number) {
-    const cells = [];
-    for (let c = startCol; c < endCol; c++) {
-      const isSelected = this._selection.isCellSelected(row, c);
-      const isActive = this._selection.isCellActive(row, c);
-      const isRefTarget = this._refMode && row === this._refCursorRow && c === this._refCursorCol;
-      const display = this._getCellDisplay(row, c);
-      const key = cellKey(row, c);
+  private _renderCell(row: number, c: number) {
+    const isSelected = this._selection.isCellSelected(row, c);
+    const isActive = this._selection.isCellActive(row, c);
+    const isRefTarget = this._refMode && row === this._refCursorRow && c === this._refCursorCol;
+    const display = this._getCellDisplay(row, c);
+    const key = cellKey(row, c);
 
-      const cellStyles = this._getCellStyles(row, c);
-
-      cells.push(html`
-        <div
-          class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''}"
-          role="gridcell"
-          aria-colindex="${c + 2}"
-          aria-selected="${isSelected}"
-          aria-readonly="${this.readOnly}"
-          aria-current="${isActive ? 'true' : nothing}"
-          data-row="${row}"
-          data-col="${c}"
-          data-key="${key}"
-          tabindex="${isActive ? 0 : -1}"
-          style=${styleMap(cellStyles)}
-          @pointerdown="${this._handleCellPointerDown}"
-          @dblclick="${this._handleCellDblClick}"
-        >
-          <span class="cell-text">${display}</span>
-        </div>
-      `);
-    }
+    const cellStyles = this._getCellStyles(row, c);
 
     return html`
+      <div
+        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''}"
+        role="gridcell"
+        aria-colindex="${c + 2}"
+        aria-selected="${isSelected}"
+        aria-readonly="${this.readOnly}"
+        aria-current="${isActive ? 'true' : nothing}"
+        data-row="${row}"
+        data-col="${c}"
+        data-key="${key}"
+        tabindex="${isActive ? 0 : -1}"
+        style=${styleMap(cellStyles)}
+        @pointerdown="${this._handleCellPointerDown}"
+        @dblclick="${this._handleCellDblClick}"
+      >
+        <span class="cell-text">${display}</span>
+      </div>
+    `;
+  }
+
+  private _renderRow(row: number, cols: number[]) {
+    return html`
       <div class="ls-row" role="row" aria-rowindex="${row + 2}">
-        <div class="ls-row-header" role="rowheader" aria-label="Row ${row + 1}">${row + 1}</div>
-        ${startCol > 0
-          ? html`<div style="grid-column: span ${startCol};"></div>`
-          : nothing}
-        ${cells}
-        ${endCol < this.cols
-          ? html`<div style="grid-column: span ${this.cols - endCol};"></div>`
-          : nothing}
+        <div
+          class="ls-row-header"
+          role="rowheader"
+          aria-colindex="1"
+          aria-label="Row ${row + 1}"
+        >${row + 1}</div>
+        ${repeat(
+          layoutWithGaps<{ key: string; tpl: unknown }>(
+            cols,
+            this.cols,
+            (c) => ({ key: `c${c}`, tpl: this._renderCell(row, c) }),
+            (start, size) => ({ key: `g${start}`, tpl: this._renderColumnSpacer(size) })
+          ),
+          // Keyed so the focused cell's element is never reused for another column
+          (seg) => seg.key,
+          (seg) => seg.tpl
+        )}
       </div>
     `;
   }

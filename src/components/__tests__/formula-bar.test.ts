@@ -215,5 +215,21 @@ describe('Y11nFormulaBar', () => {
       // The draft should revert to the raw value
       expect(input.value).toBe('original');
     });
+
+    it('still commits edits typed after an earlier Escape', async () => {
+      const el = await createFormulaBar({ rawValue: 'original', mode: 'raw' });
+      const input = getInput(el);
+      const handler = vi.fn();
+      el.addEventListener('formula-bar-commit', handler);
+
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      input.value = 'new value';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+      input.dispatchEvent(new Event('blur'));
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler.mock.calls[0][0].detail.value).toBe('new value');
+    });
   });
 });
