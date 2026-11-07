@@ -13,6 +13,13 @@ import {
   type SelectionChangeDetail,
   type DataChangeDetail,
   type FormatChangeDetail,
+  type DataChangeOperation,
+  type CellEditStartDetail,
+  type ProposedChange,
+  type BeforeChangeDetail,
+  type CellValidator,
+  type ValidationErrorDetail,
+  type StructureChangeDetail,
   cellKey,
   colToLetter,
   coordToRef,
@@ -23,12 +30,12 @@ import {
 } from './types.js';
 import { SelectionManager, findDataEdge } from './controllers/selection-manager.js';
 import { parseDelimited, serializeDelimited } from './utils/delimited.js';
+import { adjustFormulaForStructureChange, type StructureChange } from './utils/references.js';
 import { FormulaEngine } from './engine/formula-engine.js';
 import { ClipboardManager } from './controllers/clipboard-manager.js';
 import './components/y11n-formula-bar.js';
-import type { FormulaBarMode } from './components/y11n-formula-bar.js';
+import type { FormulaBarMode, Y11nFormulaBar } from './components/y11n-formula-bar.js';
 
-type DataChangeOperation = NonNullable<DataChangeDetail['operation']>;
 type ChangeSource = NonNullable<DataChangeDetail['source']>;
 
 function cloneCell(cell: CellData): CellData {
@@ -100,6 +107,14 @@ export interface CSVExportOptions {
   values?: 'display' | 'raw';
 }
 
+/** Options for `findCells()`. */
+export interface FindOptions {
+  /** Match upper/lower case exactly. Default: false */
+  matchCase?: boolean;
+  /** Search raw values (formula text) instead of displayed values. Default: false */
+  formulas?: boolean;
+}
+
 /** Options for `fromCSV()`. */
 export interface CSVImportOptions {
   /** Field separator. Default: `,` */
@@ -123,11 +138,61 @@ interface SelectionSnapshot {
   active: CellCoord | null;
 }
 
+/** Whole-cell before/after state for a row/column insertion or deletion. */
+interface StructureCellDelta {
+  id: string;
+  before?: CellData;
+  after?: CellData;
+}
+
+interface StructureBatch {
+  change: StructureChange;
+  cells: StructureCellDelta[];
+  rowsBefore: number;
+  colsBefore: number;
+  rowsAfter: number;
+  colsAfter: number;
+}
+
 interface CommandBatch {
   deltas: CellDelta[];
   selectionBefore: SelectionSnapshot;
   selectionAfter: SelectionSnapshot;
   operation: DataChangeOperation;
+  /** Set for row/column insertions and deletions, which replace whole cells */
+  structure?: StructureBatch;
+}
+
+const STRUCTURE_OPERATIONS: Record<string, DataChangeOperation> = {
+  'insert:row': 'insert-rows',
+  'delete:row': 'delete-rows',
+  'insert:col': 'insert-columns',
+  'delete:col': 'delete-columns',
+};
+
+/**
+ * Least-squares linear trend of a run of numbers (for fill-handle series),
+ * or null if the run has fewer than two values or any non-number (null).
+ */
+function linearTrend(values: Array<number | null>): { intercept: number; slope: number } | null {
+  if (values.length < 2 || values.some((v) => v === null)) return null;
+  const ys = values as number[];
+  const n = ys.length;
+  const meanX = (n - 1) / 2;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0;
+  let den = 0;
+  ys.forEach((y, x) => {
+    num += (x - meanX) * (y - meanY);
+    den += (x - meanX) ** 2;
+  });
+  const slope = num / den;
+  return { intercept: meanY - slope * meanX, slope };
+}
+
+/** Render a computed series value without floating-point noise (0.1+0.2 → 0.3). */
+function formatSeriesNumber(value: number): string {
+  return String(parseFloat(value.toPrecision(15)));
 }
 
 /**
@@ -145,8 +210,14 @@ interface CommandBatch {
  * @fires selection-change - When the selected range changes
  * @fires data-change - On bulk updates (paste, cut, clear, undo/redo)
  * @fires format-change - When cell formatting is modified
+ * @fires cell-edit-start - Before the inline editor opens (cancelable)
+ * @fires before-change - Before a user edit, paste, cut, clear or fill is applied (cancelable)
+ * @fires validation-error - When `validateCell` rejects one or more values
+ * @fires before-structure-change - Before a user inserts or deletes rows/columns (cancelable)
+ * @fires structure-change - After rows/columns are inserted or deleted
  *
  * @csspart editor - The inline cell editor input element
+ * @csspart validation-message - The message shown under the editor when a value is rejected
  */
 @customElement('y11n-spreadsheet')
 export class Y11nSpreadsheet extends LitElement {
@@ -164,6 +235,12 @@ export class Y11nSpreadsheet extends LitElement {
   @property({ type: String, attribute: 'grid-label' }) gridLabel = 'Spreadsheet';
   /** Record of custom formula functions to register, keyed by name. */
   @property({ attribute: false }) functions: Record<string, FormulaFunction> = {};
+  /**
+   * Optional validator for values the user enters (typing, formula bar,
+   * paste, fill). Return an error message to reject a value, or null/undefined
+   * to accept it. Clearing a cell is never validated.
+   */
+  @property({ attribute: false }) validateCell?: CellValidator;
 
   // ─── Internal State ─────────────────────────────────
 
@@ -179,6 +256,17 @@ export class Y11nSpreadsheet extends LitElement {
   /** Screen reader announcement text for mode changes */
   @state() private _modeAnnouncement = '';
 
+  /** Message from `validateCell` for the value in the editor, shown below it */
+  @state() private _validationMessage = '';
+
+  /** Find bar state */
+  @state() private _findOpen = false;
+  @state() private _findQuery = '';
+  @state() private _findStatus = '';
+
+  /** Cells a fill-handle drag would fill, for the drag preview */
+  @state() private _fillPreview: SelectionRange | null = null;
+
   /** Track scroll position for virtual rendering */
   @state() private _scrollTop = 0;
   @state() private _scrollLeft = 0;
@@ -186,6 +274,7 @@ export class Y11nSpreadsheet extends LitElement {
   // ─── DOM Refs ───────────────────────────────────────
 
   @query('#editor') private _editor!: HTMLInputElement;
+  @query('#find-input') private _findInput?: HTMLInputElement;
   @query('.ls-grid') private _grid!: HTMLDivElement;
 
   // ─── Controllers / Managers ─────────────────────────
@@ -216,6 +305,25 @@ export class Y11nSpreadsheet extends LitElement {
   /** Whether an async paste operation is currently in progress */
   private _pasteInProgress = false;
 
+  /**
+   * Bumped whenever rows/columns are inserted or deleted (including undo/redo),
+   * so async clipboard work can tell that its cell coordinates went stale.
+   */
+  private _structureRevision = 0;
+
+  /**
+   * Bumped when the data is replaced (`setData()` / `data`), which clears the
+   * undo history. Operations that started before then must not push history
+   * entries or keep writing (e.g. a progressive fill between frames).
+   */
+  private _dataGeneration = 0;
+
+  /**
+   * Bumped by every data change. Cancelable events compare it before and after
+   * dispatch to detect a listener that changed the grid reentrantly.
+   */
+  private _mutationCount = 0;
+
   /** Number of cells to process per animation frame during large pastes */
   private static readonly PASTE_CHUNK_SIZE = 500;
   private static readonly INITIAL_VIEW_ROWS = 15;
@@ -227,6 +335,11 @@ export class Y11nSpreadsheet extends LitElement {
   willUpdate(changedProps: Map<string, unknown>): void {
     if (changedProps.has('data') && this.data !== this._lastSyncedDataRef) {
       this._syncData();
+    }
+    if (changedProps.has('readOnly') && this.readOnly && this._isEditing) {
+      // The grid became read-only mid-edit: discard the edit
+      this._exitRefMode();
+      this._cancelEdit();
     }
     if (changedProps.has('rows') || changedProps.has('cols')) {
       this.rows = Math.max(1, Math.round(this.rows));
@@ -331,6 +444,7 @@ export class Y11nSpreadsheet extends LitElement {
    */
   fromCSV(text: string, options: CSVImportOptions = {}): void {
     if (this._pasteInProgress) return;
+    this._syncPendingData();
     const { delimiter = ',', start = { row: 0, col: 0 } } = options;
     if (!Number.isInteger(start.row) || !Number.isInteger(start.col) || start.row < 0 || start.col < 0) {
       throw new RangeError('fromCSV: start must be a cell with non-negative integer row and col');
@@ -349,8 +463,103 @@ export class Y11nSpreadsheet extends LitElement {
     const selection = this._snapshotSelection();
     const batch = this._buildCellBatch(updates, 'import', selection);
     if (!batch) return;
+    const generation = this._dataGeneration;
     this._applyBatch(batch, 'programmatic');
-    this._pushHistory(batch);
+    this._pushHistory(batch, generation);
+  }
+
+  // ─── Rows / Columns API ──────────────────────────────
+
+  /**
+   * Insert `count` empty rows before row `index` (0-based; `index === rows`
+   * appends). Cells below move down, the grid grows by `count` rows, and
+   * formula references are rewritten to follow the cells they point to.
+   * Undoable; fires `data-change` and `structure-change`.
+   *
+   * @param index - Row to insert before
+   * @param count - Number of rows to insert (default 1)
+   */
+  insertRows(index: number, count = 1): void {
+    this._changeStructure({ axis: 'row', kind: 'insert', index, count }, 'programmatic');
+  }
+
+  /**
+   * Delete `count` rows starting at row `index` (0-based). Cells below move
+   * up and the grid shrinks; references to deleted cells become `#REF!`.
+   * At least one row must remain. Undoable; fires `data-change` and
+   * `structure-change`.
+   *
+   * @param index - First row to delete
+   * @param count - Number of rows to delete (default 1)
+   */
+  deleteRows(index: number, count = 1): void {
+    this._changeStructure({ axis: 'row', kind: 'delete', index, count }, 'programmatic');
+  }
+
+  /**
+   * Insert `count` empty columns before column `index` (0-based;
+   * `index === cols` appends). See `insertRows()`.
+   *
+   * @param index - Column to insert before
+   * @param count - Number of columns to insert (default 1)
+   */
+  insertColumns(index: number, count = 1): void {
+    this._changeStructure({ axis: 'col', kind: 'insert', index, count }, 'programmatic');
+  }
+
+  /**
+   * Delete `count` columns starting at column `index` (0-based). See
+   * `deleteRows()`.
+   *
+   * @param index - First column to delete
+   * @param count - Number of columns to delete (default 1)
+   */
+  deleteColumns(index: number, count = 1): void {
+    this._changeStructure({ axis: 'col', kind: 'delete', index, count }, 'programmatic');
+  }
+
+  // ─── Find API ────────────────────────────────────────
+
+  /**
+   * Find the cells whose displayed value (or formula text, with
+   * `formulas: true`) contains `query`. Case-insensitive by default.
+   *
+   * @param query - Text to search for
+   * @param options - Case sensitivity and whether to search formulas
+   * @returns Matching cell keys in reading order (row by row)
+   */
+  findCells(query: string, options: FindOptions = {}): string[] {
+    if (!query) return [];
+    const { matchCase = false, formulas = false } = options;
+    const needle = matchCase ? query : query.toLowerCase();
+    const hits: CellCoord[] = [];
+    for (const [key, cell] of this._internalData) {
+      const text = formulas ? cell.rawValue : cell.displayValue;
+      if (!text) continue;
+      const haystack = matchCase ? text : text.toLowerCase();
+      if (!haystack.includes(needle)) continue;
+      const coord = parseKey(key);
+      if (coord.row < this.rows && coord.col < this.cols) hits.push(coord);
+    }
+    hits.sort((a, b) => a.row - b.row || a.col - b.col);
+    return hits.map((c) => cellKey(c.row, c.col));
+  }
+
+  /** Open the find bar (as Ctrl/Cmd+F does) and focus its input. */
+  async openFind(): Promise<void> {
+    if (this._isEditing) this._commitEdit();
+    this._findOpen = true;
+    await this.updateComplete;
+    this._findInput?.focus();
+    this._findInput?.select();
+  }
+
+  /** Close the find bar and return focus to the active cell. */
+  closeFind(): void {
+    if (!this._findOpen) return;
+    this._findOpen = false;
+    this._findStatus = '';
+    this.updateComplete.then(() => this._focusActiveCell());
   }
 
   // ─── Format API ──────────────────────────────────────
@@ -426,10 +635,15 @@ export class Y11nSpreadsheet extends LitElement {
     const range = this._selection.range;
     const cellIds: string[] = [];
     let allHaveProp = true;
+    let locked = 0;
 
     for (let r = range.start.row; r <= range.end.row; r++) {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const id = cellKey(r, c);
+        if (this._isCellLocked(id)) {
+          locked++;
+          continue;
+        }
         cellIds.push(id);
         const cell = this._internalData.get(id);
         if (!cell?.format?.[prop]) {
@@ -438,6 +652,8 @@ export class Y11nSpreadsheet extends LitElement {
       }
     }
 
+    if (locked > 0) this._announceSkipped(locked, []);
+    if (cellIds.length === 0) return;
     const format: CellFormat = { [prop]: !allHaveProp };
     this._applyFormat(cellIds, format, 'user');
   }
@@ -452,8 +668,9 @@ export class Y11nSpreadsheet extends LitElement {
     if (source === 'user') {
       this._executeUserBatch(batch);
     } else {
+      const generation = this._dataGeneration;
       this._applyBatch(batch, source);
-      this._pushHistory(batch);
+      this._pushHistory(batch, generation);
     }
 
     this._dispatchFormatChange({ cellIds, format, source });
@@ -488,8 +705,9 @@ export class Y11nSpreadsheet extends LitElement {
     if (source === 'user') {
       this._executeUserBatch(batch);
     } else {
+      const generation = this._dataGeneration;
       this._applyBatch(batch, source);
-      this._pushHistory(batch);
+      this._pushHistory(batch, generation);
     }
 
     this._dispatchFormatChange({ cellIds, format: {}, source });
@@ -614,6 +832,8 @@ export class Y11nSpreadsheet extends LitElement {
     this._lastSyncedDataRef = this.data;
     this._undoStack = [];
     this._redoStack = [];
+    this._dataGeneration++;
+    this._mutationCount++;
 
     if (changedKeys.length > 0 && oldData.size > 0) {
       // Incremental update: preserve dep graph for unchanged cells
@@ -635,6 +855,22 @@ export class Y11nSpreadsheet extends LitElement {
       this._formulaEngine.setData(this._internalData);
       this._recalcAll();
     }
+  }
+
+  /**
+   * Whether the grid changed since `mutations` was read from `_mutationCount`,
+   * counting a `data` assignment that hasn't been imported yet.
+   */
+  private _changedSince(mutations: number): boolean {
+    return mutations !== this._mutationCount || this.data !== this._lastSyncedDataRef;
+  }
+
+  /**
+   * Import a `data` assignment that Lit hasn't processed yet, so an API call
+   * made right after it works on the new data instead of overwriting it.
+   */
+  private _syncPendingData(): void {
+    if (this.data !== this._lastSyncedDataRef) this._syncData();
   }
 
   private _recalcAll(): void {
@@ -710,25 +946,25 @@ export class Y11nSpreadsheet extends LitElement {
       displayValue = formatNumber(Number(evaluated.displayValue), numFmt);
     }
 
-    this._internalData.set(key, {
+    const cell: CellData = {
       rawValue,
       displayValue,
       type: evaluated.type,
       format: existing?.format,
-    });
+    };
+    if (existing?.readOnly) cell.readOnly = true;
+    this._internalData.set(key, cell);
   }
 
   private _applyRawValueByString(key: string, rawValue: string): void {
     if (rawValue === '') {
       const existing = this._internalData.get(key);
-      if (existing?.format) {
-        // Preserve format on empty cells
-        this._internalData.set(key, {
-          rawValue: '',
-          displayValue: '',
-          type: 'text',
-          format: existing.format,
-        });
+      if (existing?.format || existing?.readOnly) {
+        // Keep the entry so the format / read-only flag survives
+        const cell: CellData = { rawValue: '', displayValue: '', type: 'text' };
+        if (existing.format) cell.format = existing.format;
+        if (existing.readOnly) cell.readOnly = true;
+        this._internalData.set(key, cell);
       } else {
         this._internalData.delete(key);
       }
@@ -820,15 +1056,22 @@ export class Y11nSpreadsheet extends LitElement {
       return;
     }
     this._pasteInProgress = true;
+    const generation = this._dataGeneration;
     try {
-      await this._applyBatchProgressive(batch);
-      this._pushHistory(batch);
+      if (await this._applyBatchProgressive(batch)) {
+        this._pushHistory(batch, generation);
+      }
     } finally {
       this._pasteInProgress = false;
     }
   }
 
-  private _pushHistory(batch: CommandBatch): void {
+  /**
+   * Record a batch for undo, unless the data was replaced (which clears the
+   * history) since `generation` was captured, before the batch was applied.
+   */
+  private _pushHistory(batch: CommandBatch, generation: number): void {
+    if (generation !== this._dataGeneration) return;
     this._undoStack.push(batch);
     this._redoStack = [];
     if (this._undoStack.length > this._maxHistory) {
@@ -856,6 +1099,11 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _applyBatch(batch: CommandBatch, source: ChangeSource): void {
+    this._mutationCount++;
+    if (batch.structure) {
+      this._applyStructureBatch(batch, 'after', source);
+      return;
+    }
     for (const delta of batch.deltas) {
       this._applyRawValueByString(delta.id, delta.after);
       if ('formatAfter' in delta) {
@@ -868,6 +1116,11 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _revertBatch(batch: CommandBatch): void {
+    this._mutationCount++;
+    if (batch.structure) {
+      this._applyStructureBatch(batch, 'before', 'undo');
+      return;
+    }
     for (const delta of batch.deltas) {
       this._applyRawValueByString(delta.id, delta.before);
       if ('formatBefore' in delta) {
@@ -892,7 +1145,7 @@ export class Y11nSpreadsheet extends LitElement {
     } else {
       delete cell.format;
       // Remove empty cells
-      if (cell.rawValue === '') {
+      if (cell.rawValue === '' && !cell.readOnly) {
         this._internalData.delete(cellId);
         return;
       }
@@ -915,11 +1168,12 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _executeUserBatch(batch: CommandBatch): void {
+    const generation = this._dataGeneration;
     this._applyBatch(batch, 'user');
-    this._pushHistory(batch);
+    this._pushHistory(batch, generation);
   }
 
-  private _commitRawValue(key: string, newValue: string): boolean {
+  private _commitRawValue(key: string, newValue: string, options: { validate?: boolean } = {}): boolean {
     const oldCell = this._internalData.get(key);
     const oldValue = oldCell?.rawValue ?? '';
     if (newValue === oldValue) return false;
@@ -932,10 +1186,312 @@ export class Y11nSpreadsheet extends LitElement {
       selection
     );
 
-    if (!batch) return false;
-    this._executeUserBatch(batch);
-    this._dispatchCellChange({ cellId: key, value: newValue, oldValue });
+    const vetted = batch && this._vetUserBatch(batch, options);
+    if (!vetted) return false;
+    this._executeUserBatch(vetted);
+    this._dispatchCellChange({ cellId: key, value: vetted.deltas[0].after, oldValue });
     return true;
+  }
+
+  // ─── Read-only cells, validation, before-change ─────
+
+  /** Whether a cell is individually marked read-only (`CellData.readOnly`). */
+  private _isCellLocked(key: string): boolean {
+    return this._internalData.get(key)?.readOnly === true;
+  }
+
+  /** Run `validateCell`; returns the rejection message, or null if valid. */
+  private _validate(cellId: string, value: string): string | null {
+    if (!this.validateCell || value === '') return null;
+    try {
+      const result = this.validateCell(cellId, value);
+      return typeof result === 'string' && result !== '' ? result : null;
+    } catch (err) {
+      console.error('y11n-spreadsheet: validateCell threw', err);
+      return 'Invalid value';
+    }
+  }
+
+  private _announceSkipped(locked: number, errors: ValidationErrorDetail['errors']): void {
+    const parts: string[] = [];
+    if (locked > 0) {
+      parts.push(locked === 1 ? '1 read-only cell was not changed' : `${locked} read-only cells were not changed`);
+    }
+    if (errors.length === 1) {
+      parts.push(`Invalid value: ${errors[0].message}`);
+    } else if (errors.length > 1) {
+      parts.push(`${errors.length} values were rejected: ${errors[0].message}`);
+    }
+    if (parts.length > 0) this._modeAnnouncement = parts.join('. ');
+  }
+
+  /**
+   * Prepare a user batch for applying: drop read-only cells and values that
+   * `validateCell` rejects, then fire the cancelable `before-change` event
+   * and apply the host's rewrites. Returns null when nothing is left to apply.
+   */
+  private _vetUserBatch(batch: CommandBatch, options: { validate?: boolean } = {}): CommandBatch | null {
+    const { validate = true } = options;
+    // Re-checked here because async operations (paste, cut) await the
+    // clipboard between their initial checks and applying.
+    if (this.readOnly || this._pasteInProgress) return null;
+    // Validators and event listeners may change the grid; if they do, the
+    // batch's before-values are stale and it must not be applied.
+    const mutations = this._mutationCount;
+    const stale = () => {
+      if (!this._changedSince(mutations)) return false;
+      this._modeAnnouncement = 'Change not applied because the data changed';
+      return true;
+    };
+    let locked = 0;
+    const errors: ValidationErrorDetail['errors'] = [];
+    let deltas = batch.deltas.filter((d) => {
+      if (this._isCellLocked(d.id)) {
+        locked++;
+        return false;
+      }
+      if (validate && d.after !== d.before) {
+        const message = this._validate(d.id, d.after);
+        if (message) {
+          errors.push({ cellId: d.id, value: d.after, message });
+          return false;
+        }
+      }
+      return true;
+    });
+
+    if (errors.length > 0) this._dispatchValidationError({ errors, operation: batch.operation });
+    this._announceSkipped(locked, errors);
+    if (stale() || deltas.length === 0) return null;
+
+    if (batch.operation !== 'format') {
+      const changes: ProposedChange[] = deltas.map((d) => ({
+        cellId: d.id,
+        value: d.after,
+        oldValue: d.before,
+      }));
+      const detail: BeforeChangeDetail = { changes, operation: batch.operation };
+      const event = new CustomEvent<BeforeChangeDetail>('before-change', {
+        detail,
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      if (!this.dispatchEvent(event)) {
+        this._modeAnnouncement = 'Change cancelled';
+        return null;
+      }
+      if (stale()) return null;
+      // Apply the host's edits to the list: rewritten values and removed cells
+      const finalValues = new Map<string, string>();
+      for (const change of Array.isArray(detail.changes) ? detail.changes : []) {
+        if (change && typeof change.cellId === 'string') {
+          finalValues.set(change.cellId, String(change.value ?? ''));
+        }
+      }
+      deltas = deltas.flatMap((d) => {
+        const after = finalValues.get(d.id);
+        if (after === undefined) return [];
+        if (after === d.before && !('formatAfter' in d)) return [];
+        return [{ ...d, after }];
+      });
+      if (deltas.length === 0) return null;
+    }
+
+    return { ...batch, deltas };
+  }
+
+  // ─── Row / Column Insertion and Deletion ────────────
+
+  /**
+   * Insert or delete rows/columns as one undoable step. Programmatic calls
+   * throw a RangeError for out-of-range arguments; user-initiated ones are
+   * pre-checked by the caller and can be vetoed via `before-structure-change`.
+   */
+  private _changeStructure(change: StructureChange, source: 'user' | 'programmatic'): boolean {
+    const { axis, kind, index, count } = change;
+    const size = axis === 'row' ? this.rows : this.cols;
+    const noun = axis === 'row' ? 'row' : 'column';
+    if (!Number.isInteger(index) || !Number.isInteger(count) || index < 0 || count < 1) {
+      throw new RangeError(`${kind} ${noun}s: index must be a non-negative integer and count a positive integer`);
+    }
+    if (kind === 'insert' ? index > size : index + count > size) {
+      throw new RangeError(`${kind} ${noun}s: ${index}+${count} is outside the grid (${size} ${noun}s)`);
+    }
+    if (kind === 'delete' && count >= size) {
+      throw new RangeError(`delete ${noun}s: at least one ${noun} must remain`);
+    }
+    if (this._pasteInProgress) return false;
+    // Import a pending data assignment first, so the edit commits into it
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+
+    if (source === 'user') {
+      if (this.readOnly) return false;
+      if (kind === 'delete' && this._hasLockedCellIn(change)) {
+        this._modeAnnouncement = `Cannot delete: the ${noun}s contain read-only cells`;
+        return false;
+      }
+      const detail: StructureChangeDetail = { ...change, source };
+      const event = new CustomEvent<StructureChangeDetail>('before-structure-change', {
+        detail,
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      const mutations = this._mutationCount;
+      if (!this.dispatchEvent(event)) return false;
+      // A listener changed (or replaced) the grid: the checks above no longer hold
+      if (this._changedSince(mutations)) return false;
+    }
+
+    const rowsBefore = this.rows;
+    const colsBefore = this.cols;
+    const delta = kind === 'insert' ? count : -count;
+    const rowsAfter = axis === 'row' ? rowsBefore + delta : rowsBefore;
+    const colsAfter = axis === 'col' ? colsBefore + delta : colsBefore;
+    const selectionBefore = this._snapshotSelection();
+
+    const batch: CommandBatch = {
+      deltas: [],
+      selectionBefore,
+      selectionAfter: this._remapSelection(selectionBefore, rowsBefore, colsBefore, rowsAfter, colsAfter),
+      operation: STRUCTURE_OPERATIONS[`${kind}:${axis}`],
+      structure: {
+        change,
+        cells: this._computeStructureCells(change),
+        rowsBefore,
+        colsBefore,
+        rowsAfter,
+        colsAfter,
+      },
+    };
+    const generation = this._dataGeneration;
+    this._applyBatch(batch, source);
+    this._pushHistory(batch, generation);
+
+    if (source === 'user') {
+      const label = (i: number) => (axis === 'row' ? String(i + 1) : colToLetter(i));
+      const what =
+        count === 1
+          ? `${noun} ${label(index)}`
+          : `${noun}s ${label(index)} to ${label(index + count - 1)}`;
+      this._modeAnnouncement = `${kind === 'insert' ? 'Inserted' : 'Deleted'} ${what}`;
+    }
+    return true;
+  }
+
+  private _hasLockedCellIn(change: StructureChange): boolean {
+    for (const [key, cell] of this._internalData) {
+      if (!cell.readOnly) continue;
+      const { row, col } = parseKey(key);
+      const p = change.axis === 'row' ? row : col;
+      if (p >= change.index && p < change.index + change.count) return true;
+    }
+    return false;
+  }
+
+  /** Before/after state of every cell a row/column insertion or deletion changes. */
+  private _computeStructureCells(change: StructureChange): StructureCellDelta[] {
+    const { axis, kind, index, count } = change;
+    const next: GridData = new Map();
+    for (const [key, cell] of this._internalData) {
+      const { row, col } = parseKey(key);
+      const p = axis === 'row' ? row : col;
+      let moved = p;
+      if (kind === 'insert') {
+        if (p >= index) moved = p + count;
+      } else if (p >= index + count) {
+        moved = p - count;
+      } else if (p >= index) {
+        continue; // deleted
+      }
+      const copy = cloneCell(cell);
+      copy.rawValue = adjustFormulaForStructureChange(cell.rawValue, change);
+      next.set(axis === 'row' ? cellKey(moved, col) : cellKey(row, moved), copy);
+    }
+
+    const cells: StructureCellDelta[] = [];
+    for (const id of new Set([...this._internalData.keys(), ...next.keys()])) {
+      const before = this._internalData.get(id);
+      const after = next.get(id);
+      if (
+        before &&
+        after &&
+        before.rawValue === after.rawValue &&
+        formatsEqual(before.format, after.format) &&
+        !!before.readOnly === !!after.readOnly
+      ) {
+        continue;
+      }
+      cells.push({ id, before: before && cloneCell(before), after });
+    }
+    return cells;
+  }
+
+  /**
+   * Selection after a structure change: the same cells by position, clamped
+   * to the new size. A selection of whole rows (or columns) stays whole.
+   */
+  private _remapSelection(
+    snapshot: SelectionSnapshot,
+    rowsBefore: number,
+    colsBefore: number,
+    rowsAfter: number,
+    colsAfter: number
+  ): SelectionSnapshot {
+    const minCol = Math.min(snapshot.anchor.col, snapshot.head.col);
+    const maxCol = Math.max(snapshot.anchor.col, snapshot.head.col);
+    const minRow = Math.min(snapshot.anchor.row, snapshot.head.row);
+    const maxRow = Math.max(snapshot.anchor.row, snapshot.head.row);
+    const fullWidth = minCol === 0 && maxCol === colsBefore - 1;
+    const fullHeight = minRow === 0 && maxRow === rowsBefore - 1;
+    const remap = (c: CellCoord): CellCoord => ({
+      row: fullHeight && c.row === rowsBefore - 1 ? rowsAfter - 1 : Math.min(c.row, rowsAfter - 1),
+      col: fullWidth && c.col === colsBefore - 1 ? colsAfter - 1 : Math.min(c.col, colsAfter - 1),
+    });
+    return {
+      anchor: remap(snapshot.anchor),
+      head: remap(snapshot.head),
+      active: snapshot.active
+        ? { row: Math.min(snapshot.active.row, rowsAfter - 1), col: Math.min(snapshot.active.col, colsAfter - 1) }
+        : null,
+    };
+  }
+
+  private _applyStructureBatch(batch: CommandBatch, side: 'before' | 'after', source: ChangeSource): void {
+    const structure = batch.structure!;
+    for (const cell of structure.cells) {
+      const value = side === 'after' ? cell.after : cell.before;
+      if (value) {
+        this._internalData.set(cell.id, cloneCell(value));
+      } else {
+        this._internalData.delete(cell.id);
+      }
+    }
+    this._structureRevision++;
+    this.rows = side === 'after' ? structure.rowsAfter : structure.rowsBefore;
+    this.cols = side === 'after' ? structure.colsAfter : structure.colsBefore;
+    this._selection.setBounds(this.rows, this.cols);
+    this._lastSyncedDataRef = this.data;
+
+    // Every reference may have moved, so rebuild the dependency graph.
+    this._formulaEngine.setData(this._internalData);
+    this._recalcAll();
+    this._restoreSelection(side === 'after' ? batch.selectionAfter : batch.selectionBefore);
+
+    this._dispatchDataChange({
+      updates: structure.cells.map((cell) => ({
+        id: cell.id,
+        value: (side === 'after' ? cell.after : cell.before)?.rawValue ?? '',
+      })),
+      source,
+      operation: batch.operation,
+    });
+    const { change } = structure;
+    const kind = side === 'after' ? change.kind : change.kind === 'insert' ? 'delete' : 'insert';
+    this._dispatchStructureChange({ ...change, kind, source });
+    this.requestUpdate();
   }
 
   private _undo(): void {
@@ -944,8 +1500,9 @@ export class Y11nSpreadsheet extends LitElement {
     const batch = this._undoStack.pop();
     if (!batch) return;
 
+    const generation = this._dataGeneration;
     this._revertBatch(batch);
-    this._redoStack.push(batch);
+    if (generation === this._dataGeneration) this._redoStack.push(batch);
     this._dispatchFormatChangeForBatch(batch, 'undo');
   }
 
@@ -955,8 +1512,9 @@ export class Y11nSpreadsheet extends LitElement {
     const batch = this._redoStack.pop();
     if (!batch) return;
 
+    const generation = this._dataGeneration;
     this._applyBatch(batch, 'redo');
-    this._undoStack.push(batch);
+    if (generation === this._dataGeneration) this._undoStack.push(batch);
     if (this._undoStack.length > this._maxHistory) {
       this._undoStack.shift();
     }
@@ -989,35 +1547,78 @@ export class Y11nSpreadsheet extends LitElement {
 
     const { row, col } = this._selection.activeCell;
     const key = cellKey(row, col);
-    this._editingCellKey = key;
+    if (this._isCellLocked(key)) {
+      this._modeAnnouncement = `${coordToRef({ row, col })} is read-only`;
+      return;
+    }
 
     const cell = this._internalData.get(key);
+    const detail: CellEditStartDetail = { cellId: key, value: cell?.rawValue ?? '' };
+    const event = new CustomEvent<CellEditStartDetail>('cell-edit-start', {
+      detail,
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+    });
+    if (!this.dispatchEvent(event)) return;
+
+    this._editingCellKey = key;
     this._editValue = initialValue ?? cell?.rawValue ?? '';
+    this._validationMessage = '';
     this._isEditing = true;
     this._editorNeedsCursorReset = true;
     this._modeAnnouncement = `Editing ${coordToRef(this._selection.activeCell)}`;
   }
 
-  private _commitEdit(): void {
-    if (!this._isEditing || !this._editingCellKey) return;
+  /**
+   * Commit the inline edit. Returns false if `validateCell` rejected the
+   * value: with `onInvalid: 'keep'` (keyboard commits) the editor stays open
+   * and shows the message; with `'cancel'` (focus moving away) the edit is
+   * discarded and the message announced.
+   */
+  private _commitEdit(onInvalid: 'keep' | 'cancel' = 'cancel'): boolean {
+    if (!this._isEditing || !this._editingCellKey) return true;
 
     const key = this._editingCellKey;
     const newValue = this._editValue;
+    if (!this._checkEditValue(key, newValue, onInvalid)) return false;
 
     this._isEditing = false;
     this._editingCellKey = null;
+    this._validationMessage = '';
     this._modeAnnouncement = 'Edit committed';
 
-    this._commitRawValue(key, newValue);
+    this._commitRawValue(key, newValue, { validate: false });
 
     // Return focus to the grid
     this.updateComplete.then(() => this._focusActiveCell());
+    return true;
   }
 
-  private _cancelEdit(): void {
+  /**
+   * Validate the value being edited in `key`. On rejection, fires
+   * `validation-error` and either keeps the editor open with the message or
+   * cancels the edit. Unchanged values are not validated.
+   */
+  private _checkEditValue(key: string, value: string, onInvalid: 'keep' | 'cancel'): boolean {
+    if (value === (this._internalData.get(key)?.rawValue ?? '')) return true;
+    const message = this._validate(key, value);
+    if (!message) return true;
+    this._dispatchValidationError({ errors: [{ cellId: key, value, message }], operation: 'edit' });
+    if (onInvalid === 'keep') {
+      this._validationMessage = message;
+      this._modeAnnouncement = `Invalid value: ${message}`;
+    } else {
+      this._cancelEdit(`Invalid value: ${message}. Edit cancelled`);
+    }
+    return false;
+  }
+
+  private _cancelEdit(announcement = 'Edit cancelled'): void {
     this._isEditing = false;
     this._editingCellKey = null;
-    this._modeAnnouncement = 'Edit cancelled';
+    this._validationMessage = '';
+    this._modeAnnouncement = announcement;
     this.updateComplete.then(() => this._focusActiveCell());
   }
 
@@ -1192,6 +1793,19 @@ export class Y11nSpreadsheet extends LitElement {
       return;
     }
 
+    // Insert/delete rows or columns: Ctrl+Shift+= / Ctrl+Alt+= / Ctrl+NumpadAdd
+    // and Ctrl+- / Ctrl+Alt+- / Ctrl+NumpadSubtract.
+    if (ctrl && this._handleStructureShortcut(e)) return;
+
+    // Ctrl+Alt+D / Ctrl+Alt+R: fill series down / right (the fill handle's
+    // keyboard equivalent). Matched by e.code because Option changes e.key on macOS.
+    if (ctrl && e.altKey && !shift && (e.code === 'KeyD' || e.code === 'KeyR')) {
+      e.preventDefault();
+      e.stopPropagation();
+      this._fillSeriesInSelection(e.code === 'KeyD' ? 'down' : 'right');
+      return;
+    }
+
     let handled = true;
 
     // Normalize letter keys so shortcuts work with Caps Lock / Shift held.
@@ -1358,8 +1972,17 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
 
-      case 'd':
+      case 'f':
         if (ctrl && !shift) {
+          e.preventDefault();
+          void this.openFind();
+        } else {
+          handled = false;
+        }
+        break;
+
+      case 'd':
+        if (ctrl && !shift && !e.altKey) {
           e.preventDefault();
           this._fillSelection('down');
         } else {
@@ -1368,7 +1991,7 @@ export class Y11nSpreadsheet extends LitElement {
         break;
 
       case 'r':
-        if (ctrl && !shift) {
+        if (ctrl && !shift && !e.altKey) {
           e.preventDefault();
           this._fillSelection('right');
         } else {
@@ -1420,7 +2043,7 @@ export class Y11nSpreadsheet extends LitElement {
           this._commitEditToSelection();
           break;
         }
-        this._commitEdit();
+        if (!this._commitEdit('keep')) break;
         // Enter moves down after committing, Shift+Enter moves up
         this._selection.move(e.shiftKey ? -1 : 1, 0);
         this._dispatchSelectionChange();
@@ -1430,7 +2053,7 @@ export class Y11nSpreadsheet extends LitElement {
       case 'Tab':
         e.preventDefault();
         this._exitRefMode();
-        this._commitEdit();
+        if (!this._commitEdit('keep')) break;
         if (e.shiftKey) {
           this._selection.move(0, -1);
         } else {
@@ -1456,6 +2079,15 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
 
+      case 'f':
+      case 'F':
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          this._exitRefMode();
+          void this.openFind();
+        }
+        break;
+
       case 'F4':
         if (this._editValue.startsWith('=')) {
           e.preventDefault();
@@ -1463,6 +2095,47 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
     }
+  }
+
+  /**
+   * Keyboard insertion/deletion of rows or columns. Acts on whole-row or
+   * whole-column selections (Shift+Space / Ctrl+Space); with any other
+   * selection it announces how to select rows or columns first.
+   *
+   * @returns true if the key was an insert/delete shortcut
+   */
+  private _handleStructureShortcut(e: KeyboardEvent): boolean {
+    const insert =
+      e.code === 'NumpadAdd' || e.key === '+' || ((e.shiftKey || e.altKey) && e.code === 'Equal');
+    const remove =
+      !e.shiftKey && (e.code === 'NumpadSubtract' || e.code === 'Minus' || e.key === '-');
+    if (!insert && !remove) return false;
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (this.readOnly) {
+      this._modeAnnouncement = 'The spreadsheet is read-only';
+      return true;
+    }
+    const { start, end } = this._selection.range;
+    const wholeRows = start.col === 0 && end.col === this.cols - 1;
+    const wholeCols = start.row === 0 && end.row === this.rows - 1;
+    if (!wholeRows && !wholeCols) {
+      this._modeAnnouncement =
+        'Select entire rows with Shift+Space or columns with Ctrl+Space first';
+      return true;
+    }
+    // A whole-grid selection counts as rows
+    const axis = wholeRows ? 'row' : 'col';
+    const index = axis === 'row' ? start.row : start.col;
+    const count = axis === 'row' ? end.row - start.row + 1 : end.col - start.col + 1;
+    if (remove && count >= (axis === 'row' ? this.rows : this.cols)) {
+      this._modeAnnouncement = `Cannot delete every ${axis === 'row' ? 'row' : 'column'}`;
+      return true;
+    }
+    this._changeStructure({ axis, kind: insert ? 'insert' : 'delete', index, count }, 'user');
+    this.updateComplete.then(() => this._focusActiveCell());
+    return true;
   }
 
   private _isCellFilled(row: number, col: number): boolean {
@@ -1637,10 +2310,22 @@ export class Y11nSpreadsheet extends LitElement {
   private async _handleCut(): Promise<void> {
     if (this.readOnly || this._pasteInProgress) return;
 
+    const mutations = this._mutationCount;
     const keysToDelete = await this._clipboardManager.cut(
       this._internalData,
       this._selection.range
     );
+    // The grid changed while the clipboard was being written (rows moved, data
+    // replaced, cells edited): clearing the saved coordinates could erase
+    // something other than what was copied, so leave the data alone.
+    if (this._changedSince(mutations)) {
+      this._modeAnnouncement = 'Cut not applied because the data changed';
+      return;
+    }
+    if (this._pasteInProgress) {
+      this._modeAnnouncement = 'Cut not applied because another change is in progress';
+      return;
+    }
 
     const updates: Array<{ id: string; value: string }> = [];
     const selection = this._snapshotSelection();
@@ -1651,8 +2336,9 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     const batch = this._buildCommandBatch(updates, 'cut', selection, selection);
-    if (batch) {
-      this._executeUserBatch(batch);
+    const vetted = batch && this._vetUserBatch(batch);
+    if (vetted) {
+      this._executeUserBatch(vetted);
     }
   }
 
@@ -1662,9 +2348,24 @@ export class Y11nSpreadsheet extends LitElement {
     // Paste anchors at the top-left of the selection (not the head, which may
     // be the bottom-right corner after a Shift+arrow or drag selection).
     const { row, col } = this._selection.range.start;
+    const revision = this._structureRevision;
+    const generation = this._dataGeneration;
+    const dataRef = this._lastSyncedDataRef;
     const updates = await this._clipboardManager.paste(row, col, this.rows, this.cols);
 
     if (!updates || updates.length === 0) return;
+    if (
+      revision !== this._structureRevision ||
+      generation !== this._dataGeneration ||
+      dataRef !== this.data
+    ) {
+      this._modeAnnouncement = 'Paste not applied because rows, columns or data changed';
+      return;
+    }
+    if (this._pasteInProgress) {
+      this._modeAnnouncement = 'Paste not applied because another change is in progress';
+      return;
+    }
 
     const selection = this._snapshotSelection();
     // Pasted formats replace the target's; cells pasted without one keep theirs.
@@ -1673,20 +2374,29 @@ export class Y11nSpreadsheet extends LitElement {
       'paste',
       selection
     );
-    if (!batch) return;
-    await this._runUserBatch(batch);
+    const vetted = batch && this._vetUserBatch(batch);
+    if (!vetted) return;
+    await this._runUserBatch(vetted);
   }
 
   /**
    * Apply a command batch progressively in chunks, yielding to the event loop
    * between chunks via requestAnimationFrame to keep the UI responsive.
    */
-  private _applyBatchProgressive(batch: CommandBatch): Promise<void> {
+  private _applyBatchProgressive(batch: CommandBatch): Promise<boolean> {
+    const generation = this._dataGeneration;
     return new Promise((resolve) => {
       const deltas = batch.deltas;
       let offset = 0;
 
       const applyChunk = () => {
+        // The data was replaced between frames: the rest of this batch (and
+        // its history entry) would apply to cells it was never built for.
+        if (generation !== this._dataGeneration) {
+          resolve(false);
+          return;
+        }
+        this._mutationCount++;
         const end = Math.min(offset + Y11nSpreadsheet.PASTE_CHUNK_SIZE, deltas.length);
 
         for (let i = offset; i < end; i++) {
@@ -1706,7 +2416,7 @@ export class Y11nSpreadsheet extends LitElement {
           // Final: restore selection, recalc, dispatch events
           this._restoreSelection(batch.selectionAfter);
           this._finalizeBatch(batch, 'user', 'after');
-          resolve();
+          resolve(true);
         }
       };
 
@@ -1732,8 +2442,9 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     const batch = this._buildCommandBatch(updates, 'clear', selection, selection);
-    if (batch) {
-      this._executeUserBatch(batch);
+    const vetted = batch && this._vetUserBatch(batch);
+    if (vetted) {
+      this._executeUserBatch(vetted);
     }
   }
 
@@ -1775,7 +2486,182 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     const batch = this._buildCellBatch(updates, 'fill', this._snapshotSelection());
-    if (batch) void this._runUserBatch(batch);
+    const vetted = batch && this._vetUserBatch(batch);
+    if (vetted) void this._runUserBatch(vetted);
+  }
+
+  /**
+   * Keyboard fill series (Ctrl+Alt+D / Ctrl+Alt+R): the leading rows (or
+   * columns) of the selection that contain data are the source, and the rest
+   * of the selection is filled from them exactly as a fill-handle drag would,
+   * so `1, 2` followed by empty cells continues as `3, 4, ...`.
+   */
+  private _fillSeriesInSelection(direction: 'down' | 'right'): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const range = this._selection.range;
+    const down = direction === 'down';
+    const first = down ? range.start.row : range.start.col;
+    const last = down ? range.end.row : range.end.col;
+    const crossStart = down ? range.start.col : range.start.row;
+    const crossEnd = down ? range.end.col : range.end.row;
+
+    let seedEnd = first - 1;
+    for (let p = first; p <= last; p++) {
+      let filled = false;
+      for (let x = crossStart; x <= crossEnd && !filled; x++) {
+        filled = down ? this._isCellFilled(p, x) : this._isCellFilled(x, p);
+      }
+      if (!filled) break;
+      seedEnd = p;
+    }
+    if (seedEnd < first || seedEnd >= last) {
+      this._modeAnnouncement = `Select the cells to continue and the empty cells ${down ? 'below' : 'to the right of'} them`;
+      return;
+    }
+    const source: SelectionRange = {
+      start: { ...range.start },
+      end: down ? { row: seedEnd, col: range.end.col } : { row: range.end.row, col: seedEnd },
+    };
+    this._autoFill(source, { start: { ...range.start }, end: { ...range.end } });
+    this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  /**
+   * Fill-handle drag: dragging the square at the selection's bottom-right
+   * corner previews the cells to fill (along whichever axis the pointer has
+   * moved further past the selection) and fills them on release.
+   */
+  private _handleFillHandlePointerDown(e: PointerEvent): void {
+    if (e.button !== 0 || this.readOnly || this._pasteInProgress) return;
+    // Keep the cell underneath from starting a new selection
+    e.preventDefault();
+    e.stopPropagation();
+
+    const { start, end } = this._selection.range;
+    const source: SelectionRange = { start: { ...start }, end: { ...end } };
+    let target: SelectionRange | null = null;
+
+    const controller = new AbortController();
+    const { signal } = controller;
+    const onPointerMove = (ev: PointerEvent) => {
+      const el = this.shadowRoot?.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+      const cellEl = el?.closest?.('[data-row]') as HTMLElement | null;
+      if (!cellEl) return;
+      const next = this._fillTargetFor(
+        source,
+        parseInt(cellEl.dataset.row!, 10),
+        parseInt(cellEl.dataset.col!, 10)
+      );
+      const same =
+        next === target ||
+        (next !== null &&
+          target !== null &&
+          next.start.row === target.start.row &&
+          next.start.col === target.start.col &&
+          next.end.row === target.end.row &&
+          next.end.col === target.end.col);
+      if (!same) {
+        target = next;
+        this._fillPreview = next;
+      }
+    };
+    const finish = (apply: boolean) => {
+      controller.abort();
+      this._fillPreview = null;
+      if (apply && target) this._autoFill(source, target);
+      this.updateComplete.then(() => this._focusActiveCell());
+    };
+    document.addEventListener('pointermove', onPointerMove, { signal });
+    document.addEventListener('pointerup', () => finish(true), { signal });
+    document.addEventListener('pointercancel', () => finish(false), { signal });
+    window.addEventListener('blur', () => finish(false), { signal });
+  }
+
+  /**
+   * The range a fill-handle drag from `source` to cell (row, col) covers, or
+   * null while the pointer is still inside the source.
+   */
+  private _fillTargetFor(source: SelectionRange, row: number, col: number): SelectionRange | null {
+    const below = row - source.end.row;
+    const above = source.start.row - row;
+    const right = col - source.end.col;
+    const left = source.start.col - col;
+    const vertical = Math.max(below, above, 0);
+    const horizontal = Math.max(right, left, 0);
+    if (vertical === 0 && horizontal === 0) return null;
+    if (vertical >= horizontal) {
+      return below > 0
+        ? { start: { ...source.start }, end: { row, col: source.end.col } }
+        : { start: { row, col: source.start.col }, end: { ...source.end } };
+    }
+    return right > 0
+      ? { start: { ...source.start }, end: { row: source.end.row, col } }
+      : { start: { row: source.start.row, col }, end: { ...source.end } };
+  }
+
+  /**
+   * Fill `target` (which contains `source` and extends it along one axis)
+   * from `source`, as the fill handle does. Each line of the source along
+   * the fill direction is handled separately:
+   *
+   * - two or more plain numbers continue their linear trend (1, 2 → 3, 4);
+   * - anything else repeats, with formulas' relative references shifted and
+   *   formats copied.
+   */
+  private _autoFill(source: SelectionRange, target: SelectionRange): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const vertical = target.start.row < source.start.row || target.end.row > source.end.row;
+    const along = vertical ? 'row' : 'col';
+    const cross = vertical ? 'col' : 'row';
+    const lineStart = source.start[along];
+    const lineLength = source.end[along] - lineStart + 1;
+
+    const updates: CellUpdate[] = [];
+    for (let x = source.start[cross]; x <= source.end[cross]; x++) {
+      const keyAt = (p: number) => (vertical ? cellKey(p, x) : cellKey(x, p));
+      const line = Array.from({ length: lineLength }, (_, i) =>
+        this._internalData.get(keyAt(lineStart + i))
+      );
+      const trend = linearTrend(line.map((cell) => this._literalNumber(cell)));
+      for (let p = target.start[along]; p <= target.end[along]; p++) {
+        if (p >= lineStart && p < lineStart + lineLength) continue;
+        const offset = p - lineStart;
+        const srcIndex = ((offset % lineLength) + lineLength) % lineLength;
+        const src = line[srcIndex];
+        let value: string;
+        if (trend) {
+          value = formatSeriesNumber(trend.intercept + trend.slope * offset);
+        } else {
+          const shift = offset - srcIndex;
+          value = this._shiftFormula(src?.rawValue ?? '', vertical ? shift : 0, vertical ? 0 : shift);
+        }
+        updates.push({ id: keyAt(p), value, format: src?.format ?? null });
+      }
+    }
+
+    const selectionAfter: SelectionSnapshot = {
+      anchor: { ...target.start },
+      head: { ...target.end },
+      active: { ...this._selection.activeCell },
+    };
+    this._modeAnnouncement = `Filled ${updates.length} cell${updates.length === 1 ? '' : 's'}`;
+    const batch = this._buildCellBatch(updates, 'fill', this._snapshotSelection());
+    const vetted = batch && this._vetUserBatch(batch);
+    if (vetted) {
+      vetted.selectionAfter = selectionAfter;
+      void this._runUserBatch(vetted);
+    } else {
+      this._restoreSelection(selectionAfter);
+    }
+  }
+
+  /** The number a cell holds as a literal (not a formula), or null. */
+  private _literalNumber(cell: CellData | undefined): number | null {
+    if (!cell || cell.rawValue === '' || cell.rawValue.startsWith('=')) return null;
+    const evaluated = this._formulaEngine.evaluate(cell.rawValue);
+    if (evaluated.type !== 'number') return null;
+    const n = Number(evaluated.displayValue);
+    return Number.isFinite(n) ? n : null;
   }
 
   /** Shift the relative references of a formula; non-formulas are returned as-is. */
@@ -1796,12 +2682,16 @@ export class Y11nSpreadsheet extends LitElement {
     const { start, end } = this._selection.range;
 
     if (start.row === end.row && start.col === end.col) {
-      this._commitEdit();
+      this._commitEdit('keep');
       return;
     }
+    // Validate the edited cell's value up front so the editor can stay open;
+    // the other cells are validated individually when the batch is vetted.
+    if (!this._checkEditValue(this._editingCellKey, value, 'keep')) return;
 
     this._isEditing = false;
     this._editingCellKey = null;
+    this._validationMessage = '';
 
     const updates: CellUpdate[] = [];
     for (let r = start.row; r <= end.row; r++) {
@@ -1816,7 +2706,8 @@ export class Y11nSpreadsheet extends LitElement {
     this._modeAnnouncement = `Filled ${cellCount} cells`;
 
     const batch = this._buildCellBatch(updates, 'fill', this._snapshotSelection());
-    if (batch) void this._runUserBatch(batch);
+    const vetted = batch && this._vetUserBatch(batch);
+    if (vetted) void this._runUserBatch(vetted);
     this.updateComplete.then(() => this._focusActiveCell());
   }
 
@@ -1828,10 +2719,77 @@ export class Y11nSpreadsheet extends LitElement {
     this._scrollLeft = target.scrollLeft;
   }
 
+  // ─── Find Bar ───────────────────────────────────────
+
+  private _handleFindInput(e: Event): void {
+    this._findQuery = (e.target as HTMLInputElement).value;
+    // Like browser find: jump to the first match at or after the active cell
+    this._findStep(1, true);
+  }
+
+  private _handleFindKeydown(e: KeyboardEvent): void {
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (e.key === 'Enter' || e.key === 'F3') {
+      e.preventDefault();
+      this._findStep(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      this.closeFind();
+    } else if (ctrl && e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      this._findInput?.select();
+    } else {
+      return;
+    }
+    e.stopPropagation();
+  }
+
+  /**
+   * Move the active cell to the next (1) or previous (-1) match after the
+   * active cell, wrapping around. With `inclusive`, the active cell itself
+   * counts. Focus stays in the find input.
+   */
+  private _findStep(direction: 1 | -1, inclusive = false): void {
+    if (!this._findQuery) {
+      this._findStatus = '';
+      return;
+    }
+    const matches = this.findCells(this._findQuery);
+    if (matches.length === 0) {
+      this._findStatus = 'No matches';
+      return;
+    }
+    const active = this._selection.activeCell;
+    const current = active.row * this.cols + active.col;
+    const position = (key: string) => {
+      const { row, col } = parseKey(key);
+      return row * this.cols + col;
+    };
+    let index = -1;
+    if (direction === 1) {
+      index = matches.findIndex((k) => (inclusive ? position(k) >= current : position(k) > current));
+      if (index < 0) index = 0;
+    } else {
+      for (let i = matches.length - 1; i >= 0; i--) {
+        if (position(matches[i]) < current) {
+          index = i;
+          break;
+        }
+      }
+      if (index < 0) index = matches.length - 1;
+    }
+    const { row, col } = parseKey(matches[index]);
+    this._selection.moveTo(row, col);
+    this._ensureCellVisible(row, col);
+    this._dispatchSelectionChange();
+    this._findStatus = `${index + 1} of ${matches.length}`;
+  }
+
   // ─── Editor Input ───────────────────────────────────
 
   private _handleEditorInput(e: Event): void {
     this._editValue = (e.target as HTMLInputElement).value;
+    this._validationMessage = '';
     this._exitRefMode();
   }
 
@@ -1848,7 +2806,15 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _handleFormulaBarCommit(e: CustomEvent<{ value: string; cellRef: string }>): void {
-    if (this.readOnly) return;
+    if (!this._applyFormulaBarCommit(e.detail)) {
+      // Rejected: drop the draft so it can't be committed into another cell later
+      this.shadowRoot?.querySelector<Y11nFormulaBar>('y11n-formula-bar')?.resetDraft();
+    }
+  }
+
+  /** Apply a formula-bar commit; returns false if nothing was written. */
+  private _applyFormulaBarCommit(detail: { value: string; cellRef: string }): boolean {
+    if (this.readOnly) return false;
 
     // Use the cell key from the event (which cell the formula bar was showing)
     // rather than the current active cell, which may have changed due to clicking.
@@ -1856,16 +2822,31 @@ export class Y11nSpreadsheet extends LitElement {
     if (this._editingCellKey) {
       targetKey = this._editingCellKey;
     } else {
-      const coord = refToCoord(e.detail.cellRef);
+      const coord = refToCoord(detail.cellRef);
       targetKey = coord ? cellKey(coord.row, coord.col) : this._getActiveCellKey();
+    }
+
+    if (this._isCellLocked(targetKey)) {
+      this._modeAnnouncement = `${coordToRef(parseKey(targetKey))} is read-only`;
+      return false;
+    }
+    const value = detail.value;
+    const oldValue = this._internalData.get(targetKey)?.rawValue ?? '';
+    const message = value === oldValue ? null : this._validate(targetKey, value);
+    if (message) {
+      this._dispatchValidationError({ errors: [{ cellId: targetKey, value, message }], operation: 'edit' });
+      this._modeAnnouncement = `Invalid value: ${message}`;
+      return false;
     }
 
     if (this._isEditing) {
       this._isEditing = false;
       this._editingCellKey = null;
+      this._validationMessage = '';
     }
 
-    this._commitRawValue(targetKey, e.detail.value);
+    // An unchanged value is a successful no-op, not a rejection
+    return this._commitRawValue(targetKey, value, { validate: false }) || value === oldValue;
   }
 
   // ─── Event Dispatching ──────────────────────────────
@@ -1890,6 +2871,18 @@ export class Y11nSpreadsheet extends LitElement {
   private _dispatchFormatChange(detail: FormatChangeDetail): void {
     this.dispatchEvent(
       new CustomEvent('format-change', { detail, bubbles: true, composed: true })
+    );
+  }
+
+  private _dispatchValidationError(detail: ValidationErrorDetail): void {
+    this.dispatchEvent(
+      new CustomEvent('validation-error', { detail, bubbles: true, composed: true })
+    );
+  }
+
+  private _dispatchStructureChange(detail: StructureChangeDetail): void {
+    this.dispatchEvent(
+      new CustomEvent('structure-change', { detail, bubbles: true, composed: true })
     );
   }
 
@@ -2021,6 +3014,16 @@ export class Y11nSpreadsheet extends LitElement {
     return styles;
   }
 
+  /** Position the validation message just below the editor. */
+  private _getValidationMessageStyle(): Record<string, string> {
+    const editor = this._getEditorStyle();
+    const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+    return {
+      top: `${parseFloat(editor.top) + cellHeight}px`,
+      left: editor.left,
+    };
+  }
+
   // ─── Render ─────────────────────────────────────────
 
   static styles = css`
@@ -2147,6 +3150,30 @@ export class Y11nSpreadsheet extends LitElement {
       cursor: cell;
       outline: none;
       user-select: none;
+      position: relative;
+    }
+
+    .ls-cell.read-only-cell:not([aria-selected='true']) {
+      background: var(--ls-readonly-cell-bg, transparent);
+    }
+
+    .ls-cell.fill-preview {
+      background: var(--ls-fill-preview-bg, rgba(26, 115, 232, 0.08));
+      outline: 1px dashed var(--ls-fill-preview-border, #1a73e8);
+      outline-offset: -1px;
+    }
+
+    .ls-fill-handle {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      width: 7px;
+      height: 7px;
+      background: var(--ls-fill-handle-color, #1a73e8);
+      border: 1px solid #fff;
+      cursor: crosshair;
+      touch-action: none;
+      z-index: 2;
     }
 
     .ls-cell:focus {
@@ -2191,6 +3218,72 @@ export class Y11nSpreadsheet extends LitElement {
       z-index: 10;
     }
 
+    .ls-validation-message {
+      position: absolute;
+      z-index: 11;
+      max-width: 280px;
+      padding: 4px 8px;
+      background: var(--ls-validation-bg, #fdecea);
+      color: var(--ls-validation-color, #8a1c12);
+      border: 1px solid var(--ls-validation-border, #d93025);
+      font-size: 12px;
+      white-space: normal;
+      pointer-events: none;
+    }
+
+    .ls-find {
+      position: absolute;
+      top: 4px;
+      right: 20px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 6px;
+      background: var(--ls-find-bg, #fff);
+      border: 1px solid var(--_border-color);
+      border-radius: 4px;
+      box-shadow: var(--_editor-shadow);
+    }
+
+    .ls-find-input {
+      width: 160px;
+      padding: 2px 4px;
+      font: inherit;
+      border: 1px solid var(--_border-color);
+      border-radius: 2px;
+    }
+
+    .ls-find-input:focus-visible,
+    .ls-find-button:focus-visible {
+      outline: var(--_focus-ring);
+      outline-offset: 1px;
+    }
+
+    .ls-find-status {
+      min-width: 5em;
+      font-size: 12px;
+      color: var(--ls-find-status-color, #555);
+      text-align: center;
+    }
+
+    .ls-find-button {
+      min-width: 24px;
+      height: 24px;
+      padding: 0 4px;
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 2px;
+      cursor: pointer;
+    }
+
+    .ls-find-button:hover {
+      background: var(--_header-bg);
+      border-color: var(--_border-color);
+    }
+
     /* Visually hidden live region for screen reader announcements */
     .sr-only {
       position: absolute;
@@ -2217,7 +3310,7 @@ export class Y11nSpreadsheet extends LitElement {
           raw-value="${activeRawValue}"
           display-value="${activeDisplayValue}"
           .mode="${this._formulaBarMode}"
-          .readOnly="${this.readOnly}"
+          .readOnly="${this.readOnly || this._isCellLocked(this._getActiveCellKey())}"
           @formula-bar-mode-change="${this._handleFormulaBarModeChange}"
           @formula-bar-commit="${this._handleFormulaBarCommit}"
         ></y11n-formula-bar>
@@ -2232,7 +3325,18 @@ export class Y11nSpreadsheet extends LitElement {
             @keydown="${this._handleEditorKeydown}"
             @blur="${this._handleEditorBlur}"
             aria-label="Cell editor"
+            aria-invalid="${this._validationMessage ? 'true' : nothing}"
+            aria-describedby="${this._validationMessage ? 'editor-error' : nothing}"
           />
+          ${this._isEditing && this._validationMessage
+            ? html`<div
+                id="editor-error"
+                class="ls-validation-message"
+                part="validation-message"
+                style=${styleMap(this._getValidationMessageStyle())}
+              >${this._validationMessage}</div>`
+            : nothing}
+          ${this._findOpen ? this._renderFindBar() : nothing}
 
           <div
             class="ls-grid"
@@ -2257,6 +3361,48 @@ export class Y11nSpreadsheet extends LitElement {
         <div class="sr-only" role="log" aria-live="assertive" aria-atomic="true">
           ${this._modeAnnouncement}
         </div>
+      </div>
+    `;
+  }
+
+  private _renderFindBar() {
+    return html`
+      <div class="ls-find" role="search" aria-label="Find in spreadsheet">
+        <input
+          id="find-input"
+          class="ls-find-input"
+          type="text"
+          aria-label="Find"
+          aria-describedby="find-status"
+          placeholder="Find"
+          autocomplete="off"
+          spellcheck="false"
+          .value="${this._findQuery}"
+          @input="${this._handleFindInput}"
+          @keydown="${this._handleFindKeydown}"
+        />
+        <span id="find-status" class="ls-find-status" role="status">${this._findStatus}</span>
+        <button
+          type="button"
+          class="ls-find-button"
+          aria-label="Previous match"
+          title="Previous match (Shift+Enter)"
+          @click="${() => this._findStep(-1)}"
+        ><span aria-hidden="true">&#x2191;</span></button>
+        <button
+          type="button"
+          class="ls-find-button"
+          aria-label="Next match"
+          title="Next match (Enter)"
+          @click="${() => this._findStep(1)}"
+        ><span aria-hidden="true">&#x2193;</span></button>
+        <button
+          type="button"
+          class="ls-find-button"
+          aria-label="Close find"
+          title="Close (Escape)"
+          @click="${() => this.closeFind()}"
+        ><span aria-hidden="true">&#x2715;</span></button>
       </div>
     `;
   }
@@ -2329,16 +3475,28 @@ export class Y11nSpreadsheet extends LitElement {
     const isRefTarget = this._refMode && row === this._refCursorRow && c === this._refCursorCol;
     const display = this._getCellDisplay(row, c);
     const key = cellKey(row, c);
+    const locked = this._isCellLocked(key);
+    const range = this._selection.range;
+    const showFillHandle =
+      !this.readOnly && !this._isEditing && row === range.end.row && c === range.end.col;
+    const preview = this._fillPreview;
+    const inFillPreview =
+      preview !== null &&
+      !isSelected &&
+      row >= preview.start.row &&
+      row <= preview.end.row &&
+      c >= preview.start.col &&
+      c <= preview.end.col;
 
     const cellStyles = this._getCellStyles(row, c);
 
     return html`
       <div
-        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''}"
+        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''}"
         role="gridcell"
         aria-colindex="${c + 2}"
         aria-selected="${isSelected}"
-        aria-readonly="${this.readOnly}"
+        aria-readonly="${this.readOnly || locked}"
         aria-current="${isActive ? 'true' : nothing}"
         data-row="${row}"
         data-col="${c}"
@@ -2349,6 +3507,13 @@ export class Y11nSpreadsheet extends LitElement {
         @dblclick="${this._handleCellDblClick}"
       >
         <span class="cell-text">${display}</span>
+        ${showFillHandle
+          ? html`<div
+              class="ls-fill-handle"
+              aria-hidden="true"
+              @pointerdown="${this._handleFillHandlePointerDown}"
+            ></div>`
+          : nothing}
       </div>
     `;
   }

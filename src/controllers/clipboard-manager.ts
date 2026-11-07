@@ -4,10 +4,9 @@ import {
   type NumberFormatOptions,
   type SelectionRange,
   cellKey,
-  colToLetter,
-  letterToCol,
 } from '../types.js';
 import { parseDelimited, quoteDelimitedField } from '../utils/delimited.js';
+import { shiftFormulaReferences } from '../utils/references.js';
 
 /** A single cell update produced by a paste operation. */
 export interface PasteUpdate {
@@ -326,68 +325,7 @@ export class ClipboardManager {
    * @returns The adjusted formula string, with `#REF!` for out-of-bounds refs
    */
   adjustFormulaReferences(formula: string, rowOffset: number, colOffset: number): string {
-    if (!formula.startsWith('=')) return formula;
-
-    // Split formula into string-literal and non-string segments
-    // so that references inside strings (e.g. =INDIRECT("A1")) are not adjusted.
-    const segments: string[] = [];
-    const isString: boolean[] = [];
-    let i = 0;
-    let current = '';
-
-    while (i < formula.length) {
-      if (formula[i] === '"') {
-        if (current) {
-          segments.push(current);
-          isString.push(false);
-          current = '';
-        }
-        let str = '"';
-        i++;
-        while (i < formula.length && formula[i] !== '"') {
-          str += formula[i];
-          i++;
-        }
-        if (i < formula.length) {
-          str += '"';
-          i++;
-        }
-        segments.push(str);
-        isString.push(true);
-      } else {
-        current += formula[i];
-        i++;
-      }
-    }
-    if (current) {
-      segments.push(current);
-      isString.push(false);
-    }
-
-    // Match cell references including optional $ markers
-    // Pattern: optional $ + column letters + optional $ + row digits
-    // Handles ranges like $A$1:$B$2 by matching each ref separately
-    // The lookarounds keep identifiers that merely contain a ref-like
-    // substring (e.g. a custom LOG10() function) from being rewritten.
-    const refPattern = /(?<![A-Z0-9_.$])(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9_.]|\s*\()/gi;
-
-    return segments.map((seg, idx) => {
-      if (isString[idx]) return seg;
-      return seg.replace(refPattern, (_match, colDollar: string, colLetters: string, rowDollar: string, rowDigits: string) => {
-        const col = letterToCol(colLetters.toUpperCase());
-        const row = parseInt(rowDigits, 10) - 1; // 1-indexed to 0-indexed
-
-        const newCol = colDollar === '$' ? col : col + colOffset;
-        const newRow = rowDollar === '$' ? row : row + rowOffset;
-
-        // Clamp to valid range (don't produce negative indices)
-        if (newCol < 0 || newRow < 0) {
-          return '#REF!';
-        }
-
-        return `${colDollar}${colToLetter(newCol)}${rowDollar}${newRow + 1}`;
-      });
-    }).join('');
+    return shiftFormulaReferences(formula, rowOffset, colOffset);
   }
 
   // ─── Serialization ──────────────────────────────────

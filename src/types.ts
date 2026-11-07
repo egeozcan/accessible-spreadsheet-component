@@ -78,6 +78,13 @@ export interface CellData {
   type: 'text' | 'number' | 'boolean' | 'error';
   /** Optional visual formatting applied to the cell */
   format?: CellFormat;
+  /**
+   * When true, the user cannot edit, clear, paste into, fill or format this
+   * cell, and it is exposed with `aria-readonly="true"`. Programmatic API
+   * calls (`setCellFormat`, `fromCSV`, `setData`, ...) are not restricted.
+   * The flag moves with the cell when rows or columns are inserted or deleted.
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -146,7 +153,88 @@ export interface DataChangeDetail {
   /** What triggered the change */
   source?: 'user' | 'undo' | 'redo' | 'programmatic';
   /** The type of operation that caused the change */
-  operation?: 'edit' | 'cut' | 'paste' | 'clear' | 'format' | 'fill' | 'import';
+  operation?: DataChangeOperation;
+}
+
+/** Operations reported in `data-change` and `before-change` events. */
+export type DataChangeOperation =
+  | 'edit'
+  | 'cut'
+  | 'paste'
+  | 'clear'
+  | 'format'
+  | 'fill'
+  | 'import'
+  | 'insert-rows'
+  | 'delete-rows'
+  | 'insert-columns'
+  | 'delete-columns';
+
+/**
+ * Detail for the cancelable `cell-edit-start` event, fired before the inline
+ * editor opens. Call `preventDefault()` to keep the cell from being edited.
+ */
+export interface CellEditStartDetail {
+  /** Cell key in `"row:col"` format */
+  cellId: string;
+  /** The cell's current raw value */
+  value: string;
+}
+
+/** One proposed cell write in a `before-change` event. */
+export interface ProposedChange {
+  /** Cell key in `"row:col"` format */
+  cellId: string;
+  /** The value about to be written. Assign to it to write something else. */
+  value: string;
+  /** The cell's current raw value */
+  oldValue: string;
+}
+
+/**
+ * Detail for the cancelable `before-change` event, fired before a user edit,
+ * paste, cut, clear or fill is applied (not for undo/redo or API calls).
+ *
+ * - `preventDefault()` cancels the whole change.
+ * - Assigning `changes[i].value` writes a different value to that cell.
+ * - Removing an entry from `changes` (e.g. with `splice`) skips that cell.
+ */
+export interface BeforeChangeDetail {
+  changes: ProposedChange[];
+  operation: DataChangeOperation;
+}
+
+/**
+ * Validator for user-entered values. Return an error message to reject the
+ * value, or `null`/`undefined` to accept it. Empty values (clearing a cell)
+ * are not validated.
+ */
+export type CellValidator = (cellId: string, value: string) => string | null | undefined;
+
+/**
+ * Detail for the `validation-error` event, fired when `validateCell` rejects
+ * one or more values.
+ */
+export interface ValidationErrorDetail {
+  errors: Array<{ cellId: string; value: string; message: string }>;
+  operation: DataChangeOperation;
+}
+
+/**
+ * Detail for `structure-change` (after rows/columns were inserted or deleted)
+ * and the cancelable `before-structure-change` (before a user-initiated one).
+ */
+export interface StructureChangeDetail {
+  /** `'row'` or `'col'` */
+  axis: 'row' | 'col';
+  /** `'insert'` or `'delete'` */
+  kind: 'insert' | 'delete';
+  /** 0-based index of the first inserted/deleted row or column */
+  index: number;
+  /** Number of rows/columns inserted or deleted */
+  count: number;
+  /** What triggered the change */
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
 }
 
 /**

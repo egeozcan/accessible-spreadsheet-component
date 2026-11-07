@@ -6,9 +6,12 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 
 - Full keyboard navigation (arrows, Ctrl+Arrow data-edge jumps, Tab, Enter, Escape, Ctrl+A)
 - Row/column selection via headers (click, Shift+click, drag) or Ctrl+Space / Shift+Space
-- Fill down/right (Ctrl+D / Ctrl+R) and multi-cell entry (Ctrl+Enter)
+- Fill down/right (Ctrl+D / Ctrl+R), a draggable fill handle that continues numeric series, and multi-cell entry (Ctrl+Enter)
+- Insert and delete rows/columns, with formula references rewritten to follow their cells
+- Find (Ctrl+F) with match count and next/previous navigation
+- Per-cell read-only flag, value validation, and cancelable `cell-edit-start` / `before-change` events
 - CSV/TSV import and export
-- Copy/cut/paste with TSV clipboard format
+- Copy/cut/paste with HTML and TSV clipboard formats
 - Undo/redo with Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)
 - Formula engine with 50+ built-in functions and custom function support
 - Arrow key cell reference insertion during formula editing
@@ -70,6 +73,7 @@ sheet.setData(data);
 | `data` | - | `GridData` | `new Map()` | Sparse cell data (`Map<string, CellData>`) |
 | `readOnly` | `read-only` | `boolean` | `false` | Disables editing |
 | `functions` | - | `Record<string, FormulaFunction>` | `{}` | Custom formula functions |
+| `validateCell` | - | `(cellId, value) => string \| null \| undefined` | - | Validates user-entered values; return a message to reject one (see [Validation and edit control](#validation-and-edit-control)) |
 
 ### Methods
 
@@ -89,7 +93,22 @@ sheet.toCSV({ values: 'raw', delimiter: '\t' }) // formulas, as TSV
 sheet.toCSV({ range: { start: { row: 0, col: 0 }, end: { row: 9, col: 3 } } })
 sheet.fromCSV(text)                             // write at A1 (undoable)
 sheet.fromCSV(text, { start: { row: 5, col: 0 }, delimiter: ';' })
+
+// Rows and columns (undoable; the grid grows/shrinks)
+sheet.insertRows(2)        // insert one row before row 3
+sheet.insertRows(0, 5)     // insert five rows at the top
+sheet.deleteRows(4, 2)     // delete rows 5–6
+sheet.insertColumns(1)     // insert a column before B
+sheet.deleteColumns(3)     // delete column D
+
+// Find
+sheet.findCells('total')                      // ['5:0', ...] in reading order
+sheet.findCells('SUM', { formulas: true, matchCase: true })
+sheet.openFind()                              // open the find bar (Ctrl/Cmd+F)
+sheet.closeFind()
 ```
+
+Inserting or deleting rows/columns moves cells with their formats and read-only flags, and rewrites formula references the way Excel does: references after the change move, ranges that span an insertion grow, ranges that lose rows/columns shrink, and references to deleted cells become `#REF!`. Absolute (`$A$1`) references move too. Out-of-range arguments throw a `RangeError`, and at least one row and column must remain.
 
 `fromCSV` drops values outside `rows` × `cols` (and throws a `RangeError` for a negative or non-integer `start`); use the exported `parseDelimited(text)` to size the grid first if needed.
 
@@ -120,11 +139,53 @@ sheet.addEventListener('selection-change', (e) => {
   console.log(e.detail.range); // { start: { row, col }, end: { row, col } }
 });
 
-// Bulk operation (paste, cut, clear, fill, import, undo, redo)
+// Bulk operation (paste, cut, clear, fill, import, row/column insert/delete, undo, redo)
 sheet.addEventListener('data-change', (e) => {
   console.log(e.detail.updates, e.detail.source, e.detail.operation);
 });
+
+// Rows/columns were inserted or deleted (also on undo/redo)
+sheet.addEventListener('structure-change', (e) => {
+  const { axis, kind, index, count, source } = e.detail; // e.g. 'row', 'insert', 2, 1, 'user'
+});
 ```
+
+### Validation and edit control
+
+```js
+// Lock individual cells: the user can't edit, clear, paste into, fill or format them
+sheet.setData(new Map([
+  ['0:0', { rawValue: 'Total', displayValue: 'Total', type: 'text', readOnly: true }],
+]));
+
+// Reject invalid input. Clearing a cell is never validated.
+sheet.validateCell = (cellId, value) =>
+  cellId.endsWith(':1') && isNaN(Number(value)) ? 'Quantity must be a number' : null;
+
+sheet.addEventListener('validation-error', (e) => {
+  console.log(e.detail.errors); // [{ cellId, value, message }]
+});
+
+// Veto or redirect editing
+sheet.addEventListener('cell-edit-start', (e) => {
+  if (e.detail.cellId === '0:3') e.preventDefault();
+});
+
+// Inspect, rewrite or cancel user changes before they are applied
+sheet.addEventListener('before-change', (e) => {
+  for (const change of e.detail.changes) change.value = change.value.trim();
+  // e.detail.changes.splice(i, 1) skips a cell; e.preventDefault() cancels everything
+});
+
+// Veto keyboard row/column insertion or deletion
+sheet.addEventListener('before-structure-change', (e) => {
+  if (e.detail.kind === 'delete') e.preventDefault();
+});
+```
+
+When Enter or Tab commits a rejected value in the inline editor, the editor stays open, shows the message below the cell (`part="validation-message"`, linked with `aria-describedby`) and announces it. If focus moves away instead, the edit is discarded. A rejected formula-bar entry is not applied and the message is announced. For paste, fill and Ctrl+Enter, rejected and read-only cells are skipped and the rest is applied; the count is announced.
+
+`before-change` fires for user edits, pastes, cuts, clears and fills (`detail.operation` says which), after read-only and validation filtering. It does not fire for undo/redo or API calls such as `fromCSV`. Rewritten values are not validated again.
 
 ### Formula engine
 
@@ -200,6 +261,13 @@ y11n-spreadsheet {
 | `--ls-ref-highlight-border` | `#1a73e8` | Reference highlight border |
 | `--ls-ref-highlight-bg` | `rgba(26, 115, 232, 0.15)` | Reference highlight fill |
 | `--ls-header-selected-bg` | `#dbe7fb` | Row/column header background for selected rows/columns |
+| `--ls-readonly-cell-bg` | `transparent` | Background of read-only cells |
+| `--ls-fill-handle-color` | `#1a73e8` | Fill handle square |
+| `--ls-fill-preview-bg` | `rgba(26, 115, 232, 0.08)` | Cells a fill-handle drag will fill |
+| `--ls-fill-preview-border` | `#1a73e8` | Dashed outline of those cells |
+| `--ls-validation-bg` / `--ls-validation-color` / `--ls-validation-border` | `#fdecea` / `#8a1c12` / `#d93025` | Validation message |
+| `--ls-find-bg` | `#fff` | Find bar background |
+| `--ls-find-status-color` | `#555` | Find bar match count |
 
 </details>
 
@@ -230,12 +298,18 @@ y11n-spreadsheet::part(editor) {
 | Delete, Backspace | Clear selected cells |
 | Ctrl/Cmd + D | Fill down (copy the top row of the selection into the rest) |
 | Ctrl/Cmd + R | Fill right (copy the left column of the selection into the rest) |
+| Ctrl + Alt + D / Ctrl + Alt + R | Fill series down / right: continue the filled leading rows/columns of the selection into its empty cells, like dragging the fill handle (on macOS use Ctrl+Option) |
+| Ctrl/Cmd + Shift + = (or Ctrl+Alt+=, Ctrl+Numpad +) | Insert as many rows/columns as are selected, before the selection. Needs whole rows (Shift+Space) or columns (Ctrl+Space) selected |
+| Ctrl/Cmd + - (or Ctrl+Alt+-, Ctrl+Numpad -) | Delete the selected whole rows/columns |
+| Ctrl/Cmd + F | Find. In the find bar: Enter / Shift+Enter (or F3 / Shift+F3) next / previous match, Escape closes |
 | Ctrl+C / X / V | Copy / Cut / Paste |
 | Ctrl+Z | Undo |
 | Ctrl+Shift+Z / Ctrl+Y | Redo |
 | Any printable character | Start editing with that character |
 
 During formula editing, arrow keys insert cell references instead of navigating.
+
+With the mouse, drag the square at the bottom-right corner of the selection (the fill handle) to fill adjacent cells. A run of two or more numbers continues its linear trend (`1, 2` → `3, 4, 5`; `10, 20` → `30, 40`); text, formulas and single numbers repeat, with relative references shifted. From the keyboard, select the cells to continue plus the empty cells after them and press Ctrl+Alt+D (down) or Ctrl+Alt+R (right); Ctrl+D / Ctrl+R copy instead of continuing a series.
 
 ## Types
 
@@ -252,6 +326,11 @@ import type {
   CellChangeDetail,
   SelectionChangeDetail,
   DataChangeDetail,
+  BeforeChangeDetail,    // { changes: ProposedChange[], operation }
+  CellEditStartDetail,   // { cellId, value }
+  ValidationErrorDetail, // { errors: [{ cellId, value, message }], operation }
+  StructureChangeDetail, // { axis, kind, index, count, source }
+  CellValidator,
 } from 'y11n-spreadsheet';
 ```
 
@@ -272,6 +351,11 @@ import { dateToSerial, dateSerialToDate, parseDelimited, serializeDelimited } fr
 dateToSerial(2024, 0, 1)          // 45292 (month is 0-indexed)
 parseDelimited('a,"b,c"\n1,2')    // [['a', 'b,c'], ['1', '2']]
 serializeDelimited([['a', 'b,c']]) // 'a,"b,c"'
+
+import { adjustFormulaForStructureChange } from 'y11n-spreadsheet';
+
+adjustFormulaForStructureChange('=SUM(A1:A3)', { axis: 'row', kind: 'insert', index: 1, count: 1 })
+// '=SUM(A1:A4)'
 ```
 
 ## Exports
@@ -338,6 +422,7 @@ src/
     formula-engine.ts               # Recursive descent formula parser
   utils/
     delimited.ts                    # CSV/TSV parsing and serialization
+    references.ts                   # Formula reference rewriting for row/column insert/delete
   __tests__/                        # Unit tests colocated with source
 e2e/                                # Playwright E2E tests
 stories/                            # Storybook stories

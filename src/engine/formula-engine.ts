@@ -20,6 +20,7 @@ type TokenType =
   | 'LPAREN'
   | 'RPAREN'
   | 'COMMA'
+  | 'ERROR'
   | 'EOF';
 
 interface Token {
@@ -885,6 +886,17 @@ export class FormulaEngine {
         continue;
       }
 
+      // Error literal such as #REF! (what deleted references are rewritten to)
+      if (ch === '#') {
+        const rest = input.slice(i).toUpperCase();
+        const code = [...ERROR_CODES].find((c) => rest.startsWith(c));
+        if (code) {
+          tokens.push({ type: 'ERROR', value: code });
+          i += code.length;
+          continue;
+        }
+      }
+
       // Comma
       if (ch === ',') {
         tokens.push({ type: 'COMMA', value: ',' });
@@ -1097,6 +1109,10 @@ export class FormulaEngine {
         this._consume(s);
         return this._resolveRange(token.value);
 
+      case 'ERROR':
+        this._consume(s);
+        throw new Error(token.value);
+
       case 'FUNC':
         return this._parseFunction(s);
 
@@ -1213,22 +1229,24 @@ export class FormulaEngine {
       this._skipArgument(s);
     }
 
-    // Parse the fallback argument (if present)
+    // The value may also be an error string without a throw (e.g. a cell
+    // whose displayValue is already an error code).
+    const useFallback = caught || isErrorCode(value);
+
+    // Evaluate the fallback only when it is used, so an error inside an
+    // unused fallback (e.g. a #REF! left by a deleted row) can't surface.
     let fallback: unknown = '';
     if (this._peek(s).type === 'COMMA') {
       this._consume(s); // consume comma
-      fallback = this._parseComparison(s);
+      if (useFallback) {
+        fallback = this._parseComparison(s);
+      } else {
+        this._skipArgument(s);
+      }
     }
     this._consume(s, 'RPAREN');
 
-    if (caught) return fallback;
-
-    // No throw — but the value itself might be an error string (e.g. from a
-    // cell whose displayValue is already an error code).
-    if (isErrorCode(value)) {
-      return fallback;
-    }
-    return value;
+    return useFallback ? fallback : value;
   }
 
   /**

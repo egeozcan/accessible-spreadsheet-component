@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-07
+
+### Added
+
+- Insert and delete rows/columns: `insertRows()`, `deleteRows()`, `insertColumns()`, `deleteColumns()` and Ctrl+Shift+= / Ctrl+- on whole-row/column selections. Formula references are rewritten to follow their cells; references to deleted cells become `#REF!`. Undoable; fires `structure-change` and the cancelable `before-structure-change`.
+- Find bar (Ctrl/Cmd+F) with match count and next/previous navigation, plus `findCells()`, `openFind()` and `closeFind()`
+- Fill handle: drag the selection's corner to fill; numeric runs continue their linear trend. Keyboard equivalent: Ctrl+Alt+D / Ctrl+Alt+R
+- Per-cell `readOnly` flag on `CellData`
+- `validateCell` property and `validation-error` event
+- Cancelable `cell-edit-start` and `before-change` events
+- `#REF!` and other error codes can be written as literals in formulas
+- `adjustFormulaForStructureChange()` and `shiftFormulaReferences()` utility exports
+
+### Fixed
+
+- `IFERROR` no longer evaluates its fallback when the value is not an error, so an error in an unused fallback can't replace a valid result
+- Copying, pasting or filling a range formula so that one end moves off the grid now yields a parseable `#REF!` instead of `#ERROR!`
+- The formula bar no longer keeps a rejected draft, which could be committed into the next cell
+
 ## [1.0.0] - 2026-02-26
 
 ### Added

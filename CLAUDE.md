@@ -31,6 +31,7 @@ src/
   controllers/clipboard-manager.ts  # Copy/cut/paste via Clipboard API + TSV
   engine/formula-engine.ts          # Recursive descent formula parser/evaluator
   utils/delimited.ts                # CSV/TSV parse + serialize (shared by clipboard and toCSV/fromCSV)
+  utils/references.ts               # Rewrites formula refs when rows/columns are inserted/deleted
 ```
 
 - **Data model**: `GridData = Map<"row:col", CellData>` (sparse)
@@ -39,7 +40,8 @@ src/
 - **Formula engine**: Tokenizer + recursive descent parser. Each `parseExpression()` call creates its own `ParserState`, so nested evaluation is safe without save/restore.
 - **Dependency tracking**: Forward/reverse dep graph in the formula engine; `recalculateAffected()` uses BFS for targeted recalc.
 - **Virtual rendering**: Only visible cells + 5-cell buffer are rendered. Scroll position drives which rows/cols appear.
-- **Undo/redo**: `CommandBatch[]` stacks tracking cell deltas + selection state. Max 100 entries.
+- **Undo/redo**: `CommandBatch[]` stacks tracking cell deltas + selection state. Max 100 entries. Row/column insert/delete batches carry a `structure` field with whole-cell before/after snapshots and grid sizes instead of deltas.
+- **User writes**: every user batch (edit, paste, cut, clear, fill) goes through `_vetUserBatch()`, which drops `CellData.readOnly` cells and values rejected by `validateCell`, then fires the cancelable `before-change`. Route new user write paths through it.
 - **Selection**: anchor/head range plus an optional active-cell override (`SelectionManager._active`) so whole-row/column selections keep the active cell in place. Read the active cell via `activeCell`, never `head`.
 
 ## Code style

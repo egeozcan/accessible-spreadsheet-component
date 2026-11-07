@@ -368,4 +368,29 @@ describe('FormulaEngine – extended functions', () => {
       expect(Number(second.displayValue) - Number(first.displayValue)).toBe(1);
     });
   });
+
+  describe('error literals', () => {
+    it('evaluates #REF! and other error codes typed into formulas', () => {
+      engine.setData(makeData({}));
+      expect(engine.evaluate('=#REF!')).toMatchObject(err('#REF!'));
+      expect(engine.evaluate('=#REF!+1')).toMatchObject(err('#REF!'));
+      expect(engine.evaluate('=SUM(#REF!)')).toMatchObject(err('#REF!'));
+      expect(engine.evaluate('=#n/a')).toMatchObject(err('#N/A'));
+      expect(engine.evaluate('=#DIV/0!')).toMatchObject(err('#DIV/0!'));
+    });
+
+    it('lets IFERROR catch them', () => {
+      engine.setData(makeData({}));
+      expect(engine.evaluate('=IFERROR(#REF!, 0)')).toMatchObject(num(0));
+      // An unused fallback is not evaluated, so its error can't surface
+      expect(engine.evaluate('=IFERROR(1, #REF!)')).toMatchObject(num(1));
+      expect(engine.evaluate('=IFERROR(1, 1/0)')).toMatchObject(num(1));
+      expect(engine.evaluate('=IFERROR(1/0, #N/A)')).toMatchObject(err('#N/A'));
+    });
+
+    it('still rejects an unknown #name', () => {
+      engine.setData(makeData({}));
+      expect(engine.evaluate('=#FOO').type).toBe('error');
+    });
+  });
 });

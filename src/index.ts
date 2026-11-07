@@ -20,8 +20,17 @@ export type {
   FormatChangeDetail,
   NumberFormatType,
   NumberFormatOptions,
+  DataChangeOperation,
+  CellEditStartDetail,
+  ProposedChange,
+  BeforeChangeDetail,
+  CellValidator,
+  ValidationErrorDetail,
+  StructureChangeDetail,
 } from './types.js';
 export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual, formatNumber, dateToSerial, dateSerialToDate } from './types.js';
 export { parseDelimited, serializeDelimited, quoteDelimitedField } from './utils/delimited.js';
 export { findDataEdge } from './controllers/selection-manager.js';
-export type { CSVExportOptions, CSVImportOptions } from './y11n-spreadsheet.js';
+export { adjustFormulaForStructureChange, shiftFormulaReferences } from './utils/references.js';
+export type { StructureChange } from './utils/references.js';
+export type { CSVExportOptions, CSVImportOptions, FindOptions } from './y11n-spreadsheet.js';

@@ -1,5 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { live } from 'lit/directives/live.js';
 
 /** Display mode for the formula bar input. */
 export type FormulaBarMode = 'raw' | 'formatted';
@@ -115,11 +116,21 @@ export class Y11nFormulaBar extends LitElement {
   willUpdate(changedProps: Map<string, unknown>): void {
     if (
       changedProps.has('mode') ||
+      changedProps.has('cellRef') ||
       changedProps.has('rawValue') ||
       changedProps.has('displayValue')
     ) {
       this._draft = this._sourceValue();
     }
+  }
+
+  /**
+   * Discard the draft and show the cell's value again. The spreadsheet calls
+   * this when it rejects a commit (read-only cell, failed validation, or a
+   * cancelled `before-change`), so the rejected text isn't committed later.
+   */
+  resetDraft(): void {
+    this._draft = this._sourceValue();
   }
 
   private _sourceValue(): string {
@@ -191,7 +202,7 @@ export class Y11nFormulaBar extends LitElement {
       </div>
       <input
         type="text"
-        .value="${this._draft}"
+        .value="${live(this._draft)}"
         ?disabled="${this.readOnly}"
         @input="${this._onInput}"
         @keydown="${this._onKeydown}"

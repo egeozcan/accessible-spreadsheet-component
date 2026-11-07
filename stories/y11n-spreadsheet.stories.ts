@@ -1065,3 +1065,87 @@ Try changing the Tax Rate in B5 to see all tax-dependent formulas update.`,
     },
   },
 };
+
+// ─── Data Entry Controls ─────────────────────────────
+
+export const DataEntryControls: StoryObj = {
+  name: 'Data Entry Controls',
+  render: () => {
+    const data = gridFromRows([
+      ['Item', 'Qty', 'Unit price', 'Total'],
+      ['Widget', '4', '2.50', '=B2*C2'],
+      ['Gadget', '1', '10', '=B3*C3'],
+      ['', '', '', ''],
+      ['Grand total', '', '', '=SUM(D2:D4)'],
+    ]);
+    // Lock the header row and the computed totals
+    for (const [key, cell] of data) {
+      const [row, col] = key.split(':').map(Number);
+      if (row === 0 || col === 3) cell.readOnly = true;
+    }
+    data.set('4:0', { ...data.get('4:0')!, readOnly: true });
+
+    const validate = (cellId: string, value: string) => {
+      const col = Number(cellId.split(':')[1]);
+      if (col === 1 && !/^\d+$/.test(value)) return 'Qty must be a whole number';
+      if (col === 2 && isNaN(Number(value))) return 'Unit price must be a number';
+      return null;
+    };
+
+    return html`
+      <y11n-spreadsheet
+        .rows=${12}
+        .cols=${6}
+        .data=${data}
+        .validateCell=${validate}
+        @before-change=${(e: CustomEvent) => {
+          for (const change of e.detail.changes) change.value = change.value.trim();
+        }}
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Per-cell \`readOnly\` locks the header row and the Total column. \`validateCell\` only accepts whole numbers in Qty and numbers in Unit price: type an invalid value and press Enter to see the message, which stays until the value is fixed or the edit is cancelled with Escape. A \`before-change\` listener trims whitespace from every value.
+
+Rows inserted with Shift+Space then Ctrl+Shift+= keep the grand total's \`SUM\` range up to date.`,
+      },
+    },
+  },
+};
+
+// ─── Find and Fill ───────────────────────────────────
+
+export const FindAndFill: StoryObj = {
+  name: 'Find, Fill Handle and Row Insertion',
+  render: () => {
+    const data = gridFromRows([
+      ['Month', 'Week', 'Sales'],
+      ['January', '1', '120'],
+      ['January', '2', '135'],
+      ['February', '3', '150'],
+      ['March', '4', '110'],
+    ]);
+    return html`
+      <y11n-spreadsheet .rows=${30} .cols=${6} .data=${data}></y11n-spreadsheet>
+    `;
+  },
+  play: async ({ canvasElement }) => {
+    const sheet = canvasElement.querySelector('y11n-spreadsheet') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      openFind(): Promise<void>;
+    };
+    await sheet.updateComplete;
+    await sheet.openFind();
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `The find bar (Ctrl/Cmd+F) is open: type "jan" and press Enter / Shift+Enter to step through matches, Escape to close.
+
+Select B2:B3 and drag the small square at the bottom-right of the selection down: the week numbers continue as a series. Select rows with Shift+Space and press Ctrl+Shift+= to insert rows above, or Ctrl+- to delete them.`,
+      },
+    },
+  },
+};
