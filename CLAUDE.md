@@ -30,6 +30,7 @@ src/
   controllers/selection-manager.ts  # Selection state (Lit ReactiveController)
   controllers/clipboard-manager.ts  # Copy/cut/paste via Clipboard API + TSV
   engine/formula-engine.ts          # Recursive descent formula parser/evaluator
+  utils/delimited.ts                # CSV/TSV parse + serialize (shared by clipboard and toCSV/fromCSV)
 ```
 
 - **Data model**: `GridData = Map<"row:col", CellData>` (sparse)
@@ -39,6 +40,7 @@ src/
 - **Dependency tracking**: Forward/reverse dep graph in the formula engine; `recalculateAffected()` uses BFS for targeted recalc.
 - **Virtual rendering**: Only visible cells + 5-cell buffer are rendered. Scroll position drives which rows/cols appear.
 - **Undo/redo**: `CommandBatch[]` stacks tracking cell deltas + selection state. Max 100 entries.
+- **Selection**: anchor/head range plus an optional active-cell override (`SelectionManager._active`) so whole-row/column selections keep the active cell in place. Read the active cell via `activeCell`, never `head`.
 
 ## Code style
 

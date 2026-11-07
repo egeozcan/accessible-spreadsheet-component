@@ -8,6 +8,8 @@ import {
   coordToRef,
   formatNumber,
   formatsEqual,
+  dateSerialToDate,
+  dateToSerial,
 } from '../types.js';
 
 describe('types utility functions', () => {
@@ -169,3 +171,42 @@ describe('formatsEqual with numberFormat', () => {
     expect(formatsEqual(a, b)).toBe(false);
   });
 });
+
+describe('date formatting', () => {
+  it('formats a date serial with the default ISO pattern', () => {
+    expect(formatNumber(dateToSerial(2024, 1, 29), { type: 'date' })).toBe('2024-02-29');
+  });
+
+  it('supports custom patterns', () => {
+    const serial = dateToSerial(2024, 0, 5, 9, 7, 3);
+    expect(formatNumber(serial, { type: 'date', datePattern: 'DD/MM/YYYY' })).toBe('05/01/2024');
+    expect(formatNumber(serial, { type: 'date', datePattern: 'M/D/YY' })).toBe('1/5/24');
+    expect(formatNumber(serial, { type: 'date', datePattern: 'YYYY-MM-DD HH:mm:ss' })).toBe('2024-01-05 09:07:03');
+  });
+
+  it('serial 1 is 1899-12-31 and 45292 is 2024-01-01 (Excel-compatible)', () => {
+    expect(formatNumber(1, { type: 'date' })).toBe('1899-12-31');
+    expect(formatNumber(45292, { type: 'date' })).toBe('2024-01-01');
+  });
+
+  it('dateSerialToDate and dateToSerial round-trip', () => {
+    const serial = dateToSerial(1999, 11, 31, 23, 59, 59);
+    const d = dateSerialToDate(serial);
+    expect([d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()])
+      .toEqual([1999, 11, 31, 23, 59, 59]);
+  });
+
+  it('a time just before midnight stays on the same date', () => {
+    const serial = dateToSerial(2023, 11, 31) + 0.999999;
+    expect(formatNumber(serial, { type: 'date' })).toBe('2023-12-31');
+    expect(formatNumber(dateToSerial(2024, 0, 1) + 0.75, { type: 'date', datePattern: 'HH:mm:ss' })).toBe('18:00:00');
+  });
+
+  it('formatsEqual compares datePattern', () => {
+    expect(formatsEqual(
+      { numberFormat: { type: 'date', datePattern: 'YYYY' } },
+      { numberFormat: { type: 'date', datePattern: 'YY' } }
+    )).toBe(false);
+  });
+});
+

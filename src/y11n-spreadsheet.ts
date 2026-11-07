@@ -18,9 +18,11 @@ import {
   coordToRef,
   formatNumber,
   formatsEqual,
+  parseKey,
   refToCoord,
 } from './types.js';
-import { SelectionManager } from './controllers/selection-manager.js';
+import { SelectionManager, findDataEdge } from './controllers/selection-manager.js';
+import { parseDelimited, serializeDelimited } from './utils/delimited.js';
 import { FormulaEngine } from './engine/formula-engine.js';
 import { ClipboardManager } from './controllers/clipboard-manager.js';
 import './components/y11n-formula-bar.js';
@@ -71,6 +73,41 @@ function windowWithExtras(start: number, end: number, extras: number[]): number[
   return out.sort((a, b) => a - b);
 }
 
+const ARROW_DELTAS: Record<string, [number, number]> = {
+  ArrowUp: [-1, 0],
+  ArrowDown: [1, 0],
+  ArrowLeft: [0, -1],
+  ArrowRight: [0, 1],
+};
+
+/**
+ * A cell write for `_buildCellBatch`. `format: undefined` leaves the cell's
+ * format alone, `null` clears it, and an object replaces it.
+ */
+interface CellUpdate {
+  id: string;
+  value: string;
+  format?: CellFormat | null;
+}
+
+/** Options for `toCSV()`. */
+export interface CSVExportOptions {
+  /** Range to export. Default: from A1 to the last row/column that has content. */
+  range?: SelectionRange;
+  /** Field separator. Default: `,` */
+  delimiter?: string;
+  /** Export computed display values (default) or raw values (formulas). */
+  values?: 'display' | 'raw';
+}
+
+/** Options for `fromCSV()`. */
+export interface CSVImportOptions {
+  /** Field separator. Default: `,` */
+  delimiter?: string;
+  /** Top-left cell to write to. Default: A1 */
+  start?: CellCoord;
+}
+
 interface CellDelta {
   id: string;
   before: string;
@@ -82,6 +119,8 @@ interface CellDelta {
 interface SelectionSnapshot {
   anchor: CellCoord;
   head: CellCoord;
+  /** Active-cell override (whole-row/column selections); null when it follows the head */
+  active: CellCoord | null;
 }
 
 interface CommandBatch {
@@ -242,6 +281,76 @@ export class Y11nSpreadsheet extends LitElement {
   registerFunction(name: string, fn: FormulaFunction): void {
     this._formulaEngine.registerFunction(name, fn);
     this._recalcAll();
+  }
+
+  /**
+   * Serialize grid contents as CSV (or TSV etc. via `delimiter`).
+   * By default exports display values from A1 to the last row and column
+   * that contain a value.
+   *
+   * @param options - Range, delimiter, and whether to export display or raw values
+   * @returns The delimited text (rows joined with `\n`); empty string for an empty grid
+   */
+  toCSV(options: CSVExportOptions = {}): string {
+    const { delimiter = ',', values = 'display' } = options;
+    let range = options.range;
+    if (!range) {
+      let maxRow = -1;
+      let maxCol = -1;
+      for (const [key, cell] of this._internalData) {
+        if (cell.rawValue === '') continue;
+        const { row, col } = parseKey(key);
+        if (row > maxRow) maxRow = row;
+        if (col > maxCol) maxCol = col;
+      }
+      if (maxRow < 0) return '';
+      range = { start: { row: 0, col: 0 }, end: { row: maxRow, col: maxCol } };
+    }
+
+    const rows: string[][] = [];
+    for (let r = range.start.row; r <= range.end.row; r++) {
+      const fields: string[] = [];
+      for (let c = range.start.col; c <= range.end.col; c++) {
+        const cell = this._internalData.get(cellKey(r, c));
+        fields.push((values === 'raw' ? cell?.rawValue : cell?.displayValue) ?? '');
+      }
+      rows.push(fields);
+    }
+    return serializeDelimited(rows, delimiter);
+  }
+
+  /**
+   * Write CSV (or TSV etc. via `delimiter`) text into the grid starting at
+   * `start` (default A1). Values beginning with `=` become formulas. Values
+   * outside the grid's `rows`/`cols` are dropped, so grow the grid first if
+   * needed. The import is a single undoable step and fires `data-change`
+   * with `operation: 'import'`.
+   *
+   * @param text - Delimited text
+   * @param options - Delimiter and top-left target cell
+   */
+  fromCSV(text: string, options: CSVImportOptions = {}): void {
+    if (this._pasteInProgress) return;
+    const { delimiter = ',', start = { row: 0, col: 0 } } = options;
+    if (!Number.isInteger(start.row) || !Number.isInteger(start.col) || start.row < 0 || start.col < 0) {
+      throw new RangeError('fromCSV: start must be a cell with non-negative integer row and col');
+    }
+    const updates: CellUpdate[] = [];
+    parseDelimited(text, delimiter).forEach((fields, r) => {
+      fields.forEach((value, c) => {
+        const row = start.row + r;
+        const col = start.col + c;
+        if (row < this.rows && col < this.cols) {
+          updates.push({ id: cellKey(row, col), value });
+        }
+      });
+    });
+
+    const selection = this._snapshotSelection();
+    const batch = this._buildCellBatch(updates, 'import', selection);
+    if (!batch) return;
+    this._applyBatch(batch, 'programmatic');
+    this._pushHistory(batch);
   }
 
   // ─── Format API ──────────────────────────────────────
@@ -450,6 +559,16 @@ export class Y11nSpreadsheet extends LitElement {
       styles['justify-content'] = justifyMap[fmt.textAlign];
     }
 
+    if (fmt.verticalAlign) {
+      const alignMap = { top: 'flex-start', middle: 'center', bottom: 'flex-end' };
+      styles['align-items'] = alignMap[fmt.verticalAlign];
+    }
+
+    if (fmt.wrap) {
+      styles['white-space'] = 'normal';
+      styles['overflow-wrap'] = 'anywhere';
+    }
+
     return styles;
   }
 
@@ -622,12 +741,12 @@ export class Y11nSpreadsheet extends LitElement {
     return {
       anchor: { ...this._selection.anchor },
       head: { ...this._selection.head },
+      active: this._selection.activeOverride,
     };
   }
 
   private _restoreSelection(snapshot: SelectionSnapshot): void {
-    this._selection.moveTo(snapshot.anchor.row, snapshot.anchor.col);
-    this._selection.moveTo(snapshot.head.row, snapshot.head.col, true);
+    this._selection.setSelection(snapshot.anchor, snapshot.head, snapshot.active);
     this._dispatchSelectionChange();
     this.updateComplete.then(() => this._focusActiveCell());
   }
@@ -658,6 +777,55 @@ export class Y11nSpreadsheet extends LitElement {
       selectionAfter,
       operation,
     };
+  }
+
+  /**
+   * Build a batch that writes values and, optionally, formats. Cells whose
+   * value and format would both be unchanged are skipped.
+   */
+  private _buildCellBatch(
+    updates: CellUpdate[],
+    operation: DataChangeOperation,
+    selection: SelectionSnapshot
+  ): CommandBatch | null {
+    const deltas: CellDelta[] = [];
+    for (const update of updates) {
+      const existing = this._internalData.get(update.id);
+      const before = existing?.rawValue ?? '';
+      const delta: CellDelta = { id: update.id, before, after: update.value };
+      if (update.format !== undefined) {
+        const formatAfter = update.format && Object.keys(update.format).length > 0
+          ? { ...update.format }
+          : undefined;
+        if (!formatsEqual(existing?.format, formatAfter)) {
+          delta.formatBefore = existing?.format ? { ...existing.format } : undefined;
+          delta.formatAfter = formatAfter;
+        }
+      }
+      if (before !== update.value || 'formatAfter' in delta) {
+        deltas.push(delta);
+      }
+    }
+    if (deltas.length === 0) return null;
+    return { deltas, selectionBefore: selection, selectionAfter: selection, operation };
+  }
+
+  /**
+   * Execute and record a user batch. Large batches are applied in chunks
+   * across animation frames so the UI stays responsive.
+   */
+  private async _runUserBatch(batch: CommandBatch): Promise<void> {
+    if (batch.deltas.length <= Y11nSpreadsheet.PASTE_CHUNK_SIZE) {
+      this._executeUserBatch(batch);
+      return;
+    }
+    this._pasteInProgress = true;
+    try {
+      await this._applyBatchProgressive(batch);
+      this._pushHistory(batch);
+    } finally {
+      this._pasteInProgress = false;
+    }
   }
 
   private _pushHistory(batch: CommandBatch): void {
@@ -1000,6 +1168,16 @@ export class Y11nSpreadsheet extends LitElement {
     const shift = e.shiftKey;
     const ctrl = e.ctrlKey || e.metaKey;
 
+    // Ctrl+Space selects columns, Shift+Space selects rows, both select all.
+    // Checked before the printable-character branch, which would otherwise
+    // treat Shift+Space as typing a space.
+    if (e.key === ' ' && (ctrl || shift) && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      this._selectWholeRowsOrColumns(ctrl, shift);
+      return;
+    }
+
     // Only stop propagation for keys we actually handle, so unhandled keys
     // (e.g. Tab) propagate normally and focus can leave the grid.
     // Start editing on printable character input. This must run before the
@@ -1021,32 +1199,26 @@ export class Y11nSpreadsheet extends LitElement {
 
     switch (key) {
       case 'ArrowUp':
-        e.preventDefault();
-        this._selection.move(-1, 0, shift);
-        this._dispatchSelectionChange();
-        this.updateComplete.then(() => this._focusActiveCell());
-        break;
-
       case 'ArrowDown':
-        e.preventDefault();
-        this._selection.move(1, 0, shift);
-        this._dispatchSelectionChange();
-        this.updateComplete.then(() => this._focusActiveCell());
-        break;
-
       case 'ArrowLeft':
+      case 'ArrowRight': {
         e.preventDefault();
-        this._selection.move(0, -1, shift);
+        const [dRow, dCol] = ARROW_DELTAS[key];
+        if (ctrl) {
+          // Jump to the edge of the data region (Ctrl/Cmd+Arrow); with Shift,
+          // extend the selection from its head to that edge.
+          const from = shift ? this._selection.head : this._selection.activeCell;
+          const target = findDataEdge(from, dRow, dCol, this.rows, this.cols, (r, c) =>
+            this._isCellFilled(r, c)
+          );
+          this._selection.moveTo(target.row, target.col, shift);
+        } else {
+          this._selection.move(dRow, dCol, shift);
+        }
         this._dispatchSelectionChange();
         this.updateComplete.then(() => this._focusActiveCell());
         break;
-
-      case 'ArrowRight':
-        e.preventDefault();
-        this._selection.move(0, 1, shift);
-        this._dispatchSelectionChange();
-        this.updateComplete.then(() => this._focusActiveCell());
-        break;
+      }
 
       case 'Enter':
         e.preventDefault();
@@ -1186,6 +1358,24 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
 
+      case 'd':
+        if (ctrl && !shift) {
+          e.preventDefault();
+          this._fillSelection('down');
+        } else {
+          handled = false;
+        }
+        break;
+
+      case 'r':
+        if (ctrl && !shift) {
+          e.preventDefault();
+          this._fillSelection('right');
+        } else {
+          handled = false;
+        }
+        break;
+
       case 'y':
         if (ctrl) {
           e.preventDefault();
@@ -1225,9 +1415,14 @@ export class Y11nSpreadsheet extends LitElement {
       case 'Enter':
         e.preventDefault();
         this._exitRefMode();
+        if (e.ctrlKey || e.metaKey) {
+          // Ctrl/Cmd+Enter: write the value into every selected cell, stay put
+          this._commitEditToSelection();
+          break;
+        }
         this._commitEdit();
-        // Move down after Enter commit
-        this._selection.move(1, 0);
+        // Enter moves down after committing, Shift+Enter moves up
+        this._selection.move(e.shiftKey ? -1 : 1, 0);
         this._dispatchSelectionChange();
         this.updateComplete.then(() => this._focusActiveCell());
         break;
@@ -1268,6 +1463,92 @@ export class Y11nSpreadsheet extends LitElement {
         }
         break;
     }
+  }
+
+  private _isCellFilled(row: number, col: number): boolean {
+    const cell = this._internalData.get(cellKey(row, col));
+    return cell !== undefined && cell.rawValue !== '';
+  }
+
+  /**
+   * Ctrl+Space: select the full columns spanned by the selection.
+   * Shift+Space: select the full rows. Both: select all.
+   * The active cell stays where it is.
+   */
+  private _selectWholeRowsOrColumns(columns: boolean, rows: boolean): void {
+    const sel = this._selection;
+    const active = sel.activeCell;
+    if (columns && rows) {
+      sel.selectAll();
+    } else if (columns) {
+      sel.selectColumns(sel.anchor.col, sel.head.col, active);
+    } else {
+      sel.selectRows(sel.anchor.row, sel.head.row, active);
+    }
+    this._dispatchSelectionChange();
+    this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  // ─── Row / Column Headers ───────────────────────────
+
+  /**
+   * Pointer selection on row/column headers: click selects the row or
+   * column, Shift+click extends from the selection's anchor, and dragging
+   * across headers selects a span. The active cell moves into the clicked
+   * column (or row) but keeps its row (or column), so the view doesn't jump.
+   */
+  private _handleHeaderPointerDown(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    const headerEl = (e.target as HTMLElement).closest(
+      '[data-header-col], [data-header-row]'
+    ) as HTMLElement | null;
+    if (!headerEl) return;
+    e.preventDefault();
+
+    if (this._isEditing) this._commitEdit();
+
+    const isCol = headerEl.dataset.headerCol !== undefined;
+    const attr = isCol ? 'headerCol' : 'headerRow';
+    const index = parseInt(headerEl.dataset[attr]!, 10);
+    const sel = this._selection;
+    const from = e.shiftKey ? (isCol ? sel.anchor.col : sel.anchor.row) : index;
+
+    const select = (to: number) => {
+      const lo = Math.min(from, to);
+      const hi = Math.max(from, to);
+      const active = sel.activeCell;
+      if (isCol) {
+        const col = e.shiftKey && active.col >= lo && active.col <= hi ? active.col : from;
+        sel.selectColumns(from, to, { row: active.row, col });
+      } else {
+        const row = e.shiftKey && active.row >= lo && active.row <= hi ? active.row : from;
+        sel.selectRows(from, to, { row, col: active.col });
+      }
+      this._dispatchSelectionChange();
+      // Keep DOM focus on the active cell, which a drag can move
+      this.updateComplete.then(() => this._focusActiveCell());
+    };
+
+    select(index);
+
+    const controller = new AbortController();
+    const { signal } = controller;
+    let last = index;
+    const onPointerMove = (ev: PointerEvent) => {
+      const el = this.shadowRoot?.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+      const over = el?.closest?.(isCol ? '[data-header-col]' : '[data-header-row]') as HTMLElement | null;
+      if (!over) return;
+      const to = parseInt(over.dataset[attr]!, 10);
+      if (to !== last) {
+        last = to;
+        select(to);
+      }
+    };
+    const end = () => controller.abort();
+    document.addEventListener('pointermove', onPointerMove, { signal });
+    document.addEventListener('pointerup', end, { signal });
+    document.addEventListener('pointercancel', end, { signal });
+    window.addEventListener('blur', end, { signal });
   }
 
   // ─── Select All (Corner Header) ─────────────────────
@@ -1386,57 +1667,14 @@ export class Y11nSpreadsheet extends LitElement {
     if (!updates || updates.length === 0) return;
 
     const selection = this._snapshotSelection();
-
-    // Build the full command batch (for undo) before applying anything
-    const valueUpdates = updates.map((u) => ({ id: u.id, value: u.value }));
-    let batch = this._buildCommandBatch(valueUpdates, 'paste', selection, selection);
-
-    // If no values changed, create an empty batch shell for format-only deltas
-    if (!batch) {
-      batch = { deltas: [], selectionBefore: selection, selectionAfter: selection, operation: 'paste' };
-    }
-
-    // Inject format deltas
-    const updateMap = new Map(updates.map((u) => [u.id, u]));
-    for (const delta of batch.deltas) {
-      const pasteUpdate = updateMap.get(delta.id);
-      if (pasteUpdate?.format) {
-        const existing = this._internalData.get(delta.id);
-        delta.formatBefore = existing?.format ? { ...existing.format } : undefined;
-        delta.formatAfter = pasteUpdate.format;
-      }
-    }
-    const deltaIds = new Set(batch.deltas.map((d) => d.id));
-    for (const u of updates) {
-      if (u.format && !deltaIds.has(u.id)) {
-        const existing = this._internalData.get(u.id);
-        batch.deltas.push({
-          id: u.id,
-          before: existing?.rawValue ?? '',
-          after: u.value,
-          formatBefore: existing?.format ? { ...existing.format } : undefined,
-          formatAfter: u.format,
-        });
-      }
-    }
-
-    // Nothing to do if no value or format changes
-    if (batch.deltas.length === 0) return;
-
-    // Small paste: apply synchronously (no overhead)
-    if (batch.deltas.length <= Y11nSpreadsheet.PASTE_CHUNK_SIZE) {
-      this._executeUserBatch(batch);
-      return;
-    }
-
-    // Large paste: apply in chunks with rAF yields
-    this._pasteInProgress = true;
-    try {
-      await this._applyBatchProgressive(batch);
-      this._pushHistory(batch);
-    } finally {
-      this._pasteInProgress = false;
-    }
+    // Pasted formats replace the target's; cells pasted without one keep theirs.
+    const batch = this._buildCellBatch(
+      updates.map((u) => ({ id: u.id, value: u.value, format: u.format })),
+      'paste',
+      selection
+    );
+    if (!batch) return;
+    await this._runUserBatch(batch);
   }
 
   /**
@@ -1497,6 +1735,89 @@ export class Y11nSpreadsheet extends LitElement {
     if (batch) {
       this._executeUserBatch(batch);
     }
+  }
+
+  // ─── Fill ───────────────────────────────────────────
+
+  /**
+   * Fill down (Ctrl+D) or right (Ctrl+R): copy the first row/column of the
+   * selection into the rest of it, shifting relative formula references and
+   * copying formats. With a single row/column selected, copies from the
+   * row above / column to the left instead.
+   */
+  private _fillSelection(direction: 'down' | 'right'): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const { start, end } = this._selection.range;
+    const down = direction === 'down';
+
+    let source = down ? start.row : start.col;
+    const last = down ? end.row : end.col;
+    if (last === source) {
+      if (source === 0) return;
+      source -= 1;
+    }
+
+    const updates: CellUpdate[] = [];
+    const crossStart = down ? start.col : start.row;
+    const crossEnd = down ? end.col : end.row;
+    for (let target = source + 1; target <= last; target++) {
+      for (let cross = crossStart; cross <= crossEnd; cross++) {
+        const srcKey = down ? cellKey(source, cross) : cellKey(cross, source);
+        const dstKey = down ? cellKey(target, cross) : cellKey(cross, target);
+        const src = this._internalData.get(srcKey);
+        const offset = target - source;
+        updates.push({
+          id: dstKey,
+          value: this._shiftFormula(src?.rawValue ?? '', down ? offset : 0, down ? 0 : offset),
+          format: src?.format ?? null,
+        });
+      }
+    }
+
+    const batch = this._buildCellBatch(updates, 'fill', this._snapshotSelection());
+    if (batch) void this._runUserBatch(batch);
+  }
+
+  /** Shift the relative references of a formula; non-formulas are returned as-is. */
+  private _shiftFormula(raw: string, rowOffset: number, colOffset: number): string {
+    if (!raw.startsWith('=') || (rowOffset === 0 && colOffset === 0)) return raw;
+    return this._clipboardManager.adjustFormulaReferences(raw, rowOffset, colOffset);
+  }
+
+  /**
+   * Ctrl/Cmd+Enter while editing: commit the edited value into every cell of
+   * the selection. Formulas are written relative to each cell, as if the
+   * edited cell were copied there.
+   */
+  private _commitEditToSelection(): void {
+    if (!this._isEditing || !this._editingCellKey) return;
+    const origin = parseKey(this._editingCellKey);
+    const value = this._editValue;
+    const { start, end } = this._selection.range;
+
+    if (start.row === end.row && start.col === end.col) {
+      this._commitEdit();
+      return;
+    }
+
+    this._isEditing = false;
+    this._editingCellKey = null;
+
+    const updates: CellUpdate[] = [];
+    for (let r = start.row; r <= end.row; r++) {
+      for (let c = start.col; c <= end.col; c++) {
+        updates.push({
+          id: cellKey(r, c),
+          value: this._shiftFormula(value, r - origin.row, c - origin.col),
+        });
+      }
+    }
+    const cellCount = updates.length;
+    this._modeAnnouncement = `Filled ${cellCount} cells`;
+
+    const batch = this._buildCellBatch(updates, 'fill', this._snapshotSelection());
+    if (batch) void this._runUserBatch(batch);
+    this.updateComplete.then(() => this._focusActiveCell());
   }
 
   // ─── Scroll Handling ────────────────────────────────
@@ -1692,7 +2013,7 @@ export class Y11nSpreadsheet extends LitElement {
     // Inherit cell formatting into the editor (via styleMap for safety)
     const fmtStyles = this._getCellStyles(row, col);
     for (const [k, v] of Object.entries(fmtStyles)) {
-      if (k !== 'justify-content' && k !== 'background-color') {
+      if (!['justify-content', 'background-color', 'align-items', 'white-space', 'overflow-wrap'].includes(k)) {
         styles[k] = v;
       }
     }
@@ -1785,6 +2106,16 @@ export class Y11nSpreadsheet extends LitElement {
       left: 0;
       z-index: 4;
       scroll-snap-align: start;
+    }
+
+    .ls-col-header,
+    .ls-row-header {
+      cursor: pointer;
+    }
+
+    .ls-col-header.in-selection,
+    .ls-row-header.in-selection {
+      background: var(--ls-header-selected-bg, #dbe7fb);
     }
 
     .ls-row-header {
@@ -1935,6 +2266,8 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _renderHeaderRow(cols: number[]) {
+    const range = this._selection.range;
+    const fullColumns = range.start.row === 0 && range.end.row === this.rows - 1;
     return html`
       <div class="ls-header-row" role="row" aria-rowindex="1">
         <div
@@ -1951,10 +2284,13 @@ export class Y11nSpreadsheet extends LitElement {
           this.cols,
           (c) => html`
             <div
-              class="ls-col-header"
+              class="ls-col-header ${c >= range.start.col && c <= range.end.col ? 'in-selection' : ''}"
               role="columnheader"
               aria-colindex="${c + 2}"
               aria-label="Column ${colToLetter(c)}"
+              aria-selected="${fullColumns && c >= range.start.col && c <= range.end.col ? 'true' : nothing}"
+              data-header-col="${c}"
+              @pointerdown="${this._handleHeaderPointerDown}"
             >
               ${colToLetter(c)}
             </div>
@@ -2018,13 +2354,19 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _renderRow(row: number, cols: number[]) {
+    const range = this._selection.range;
+    const inSelection = row >= range.start.row && row <= range.end.row;
+    const fullRow = inSelection && range.start.col === 0 && range.end.col === this.cols - 1;
     return html`
       <div class="ls-row" role="row" aria-rowindex="${row + 2}">
         <div
-          class="ls-row-header"
+          class="ls-row-header ${inSelection ? 'in-selection' : ''}"
           role="rowheader"
           aria-colindex="1"
           aria-label="Row ${row + 1}"
+          aria-selected="${fullRow ? 'true' : nothing}"
+          data-header-row="${row}"
+          @pointerdown="${this._handleHeaderPointerDown}"
         >${row + 1}</div>
         ${repeat(
           layoutWithGaps<{ key: string; tpl: unknown }>(
@@ -2050,6 +2392,17 @@ export class Y11nSpreadsheet extends LitElement {
     const selRows = range.end.row - range.start.row + 1;
     const selCols = range.end.col - range.start.col + 1;
     if (selRows > 1 || selCols > 1) {
+      const allRows = selRows === this.rows;
+      const allCols = selCols === this.cols;
+      if (allRows && !allCols) {
+        const first = colToLetter(range.start.col);
+        const cols = selCols > 1 ? `Columns ${first} to ${colToLetter(range.end.col)}` : `Column ${first}`;
+        return `${base}, ${cols} selected`;
+      }
+      if (allCols && !allRows) {
+        const rows = selRows > 1 ? `Rows ${range.start.row + 1} to ${range.end.row + 1}` : `Row ${range.start.row + 1}`;
+        return `${base}, ${rows} selected`;
+      }
       return `${base}, ${selRows} row${selRows > 1 ? 's' : ''}, ${selCols} column${selCols > 1 ? 's' : ''} selected`;
     }
 

@@ -3,6 +3,8 @@ import {
   type FormulaContext,
   type FormulaFunction,
   cellKey,
+  dateSerialToDate,
+  dateToSerial,
   refToCoord,
 } from '../types.js';
 
@@ -57,14 +59,28 @@ const MAX_EVAL_DEPTH = 64;
 
 /** Set of aggregate function names that should have RangeValue flattened into individual args */
 const AGGREGATE_FUNCTIONS = new Set([
-  'SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'COUNTA', 'CONCAT',
+  'SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'COUNTA', 'CONCAT', 'PRODUCT', 'MEDIAN',
 ]);
 
 /** Set of volatile function names whose results should never be cached */
-const VOLATILE_FUNCTIONS = new Set(['NOW']);
+const VOLATILE_FUNCTIONS = new Set(['NOW', 'TODAY']);
 
 /** Aggregates that propagate an error found anywhere in their arguments (COUNT/COUNTA skip them) */
-const ERROR_PROPAGATING_AGGREGATES = new Set(['SUM', 'AVERAGE', 'MIN', 'MAX', 'CONCAT']);
+const ERROR_PROPAGATING_AGGREGATES = new Set([
+  'SUM', 'AVERAGE', 'MIN', 'MAX', 'CONCAT', 'PRODUCT', 'MEDIAN',
+]);
+
+/**
+ * Arguments whose evaluation error is captured instead of thrown, because the
+ * function may never use them (e.g. XLOOKUP's if_not_found). Maps function
+ * name → 0-based argument index.
+ */
+const ERROR_TOLERANT_ARGS: Record<string, number> = { XLOOKUP: 3 };
+
+/** A captured argument error; the function rethrows it only if it uses the argument. */
+class ArgumentError {
+  constructor(readonly code: string) {}
+}
 
 /** Upper bound on deferred cells when resolving reference chains deeper than MAX_EVAL_DEPTH */
 const MAX_DEFERRED_CELLS = 100_000;
@@ -227,12 +243,22 @@ function matchesCriteria(value: unknown, criteria: string): boolean {
   const valLower = String(value).toLowerCase();
   const targetLower = target.toLowerCase();
 
+  // Text equality supports Excel wildcards: * (any run), ? (one char), ~ escapes.
+  const wildcard = (op === '=' || op === '<>') && !bothNumeric ? compileWildcard(target) : null;
+
+  // Wildcards only ever match text (Excel: COUNTIF(range, "*") counts text
+  // cells) — not numbers, booleans, or error values carried as strings.
+  const wildcardMatch = () =>
+    typeof value === 'string' && !isErrorCode(value) && wildcardMatches(wildcard!, value);
+
   switch (op) {
     case '=':
       if (bothNumeric) return numValue === numTarget;
+      if (wildcard) return wildcardMatch();
       return valLower === targetLower;
     case '<>':
       if (bothNumeric) return numValue !== numTarget;
+      if (wildcard) return !wildcardMatch();
       return valLower !== targetLower;
     case '>':
       return bothNumeric ? numValue > numTarget : valLower > targetLower;
@@ -245,6 +271,136 @@ function matchesCriteria(value: unknown, criteria: string): boolean {
     default:
       return false;
   }
+}
+
+type WildcardToken = { kind: 'lit'; ch: string } | { kind: 'any' } | { kind: 'star' };
+
+/**
+ * Compile an Excel wildcard pattern (`*` any run, `?` one character, `~`
+ * escapes the next `*`, `?` or `~`) into tokens for `wildcardMatches`.
+ * Returns null when the pattern has no wildcard syntax at all.
+ */
+function compileWildcard(pattern: string): WildcardToken[] | null {
+  if (!/[*?~]/.test(pattern)) return null;
+  const tokens: WildcardToken[] = [];
+  // Split into code points before lowercasing each one, so characters whose
+  // lowercase form is longer (e.g. "İ") still count as one for `?`.
+  const chars = [...pattern];
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (ch === '~' && i + 1 < chars.length && '*?~'.includes(chars[i + 1])) {
+      tokens.push({ kind: 'lit', ch: chars[++i].toLowerCase() });
+    } else if (ch === '*') {
+      // Consecutive stars are equivalent to one
+      if (tokens[tokens.length - 1]?.kind !== 'star') tokens.push({ kind: 'star' });
+    } else if (ch === '?') {
+      tokens.push({ kind: 'any' });
+    } else {
+      tokens.push({ kind: 'lit', ch: ch.toLowerCase() });
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Case-insensitive whole-string wildcard match. Greedy matching that
+ * backtracks only to the most recent star, so the worst case is
+ * O(pattern × text) — unlike a RegExp, which can backtrack exponentially
+ * on patterns such as "*a*a*a*b".
+ */
+function wildcardMatches(tokens: WildcardToken[], value: string): boolean {
+  const text = [...value];
+  let p = 0;
+  let t = 0;
+  let starP = -1;
+  let starT = 0;
+  while (t < text.length) {
+    const tok = tokens[p];
+    if (tok && (tok.kind === 'any' || (tok.kind === 'lit' && tok.ch === text[t].toLowerCase()))) {
+      p++;
+      t++;
+    } else if (tok && tok.kind === 'star') {
+      starP = p++;
+      starT = t;
+    } else if (starP !== -1) {
+      p = starP + 1;
+      t = ++starT;
+    } else {
+      return false;
+    }
+  }
+  while (tokens[p]?.kind === 'star') p++;
+  return p === tokens.length;
+}
+
+/** Criteria match that also handles empty cells (which only match "" or "="). */
+function cellMatchesCriteria(value: unknown, criteria: string): boolean {
+  if (value === undefined) return criteria === '' || criteria === '=';
+  return matchesCriteria(value, criteria);
+}
+
+/** [rows, cols] of a range argument; arrays are a column, scalars 1×1. */
+function rangeShape(arg: unknown): [number, number] {
+  if (arg instanceof RangeValue) return [arg.rows, arg.cols];
+  if (Array.isArray(arg)) return [arg.length, 1];
+  return [1, 1];
+}
+
+/** Flat list of values from a range, array, or single value. */
+function toValueList(arg: unknown): unknown[] {
+  if (arg instanceof RangeValue) return arg.values;
+  if (Array.isArray(arg)) return arg;
+  return [arg];
+}
+
+/**
+ * Evaluate `(criteria_range, criteria)` pairs as used by SUMIFS/COUNTIFS/
+ * AVERAGEIFS. Returns a mask of positions that satisfy every pair. Every
+ * criteria range must have the same shape as `shapeOf`, otherwise #VALUE!.
+ */
+function matchAllCriteria(pairs: unknown[], shapeOf: unknown): boolean[] {
+  if (pairs.length === 0 || pairs.length % 2 !== 0) throw new Error('#VALUE!');
+  const [rows, cols] = rangeShape(shapeOf);
+  const size = rows * cols;
+  const mask = new Array<boolean>(size).fill(true);
+  for (let p = 0; p < pairs.length; p += 2) {
+    const values = toValueList(pairs[p]);
+    const [r, c] = rangeShape(pairs[p]);
+    if (r !== rows || c !== cols) throw new Error('#VALUE!');
+    const criteria = String(pairs[p + 1]);
+    for (let i = 0; i < size; i++) {
+      if (mask[i] && !cellMatchesCriteria(values[i], criteria)) mask[i] = false;
+    }
+  }
+  return mask;
+}
+
+/** Numbers (or numeric strings) among flattened aggregate arguments; text and booleans are skipped. */
+function numericArgs(args: unknown[]): number[] {
+  const nums: number[] = [];
+  for (const v of args) {
+    if (typeof v === 'number') nums.push(v);
+    else if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) nums.push(Number(v));
+  }
+  return nums;
+}
+
+/**
+ * Round `n` to `digits` decimal places with the given rounding function,
+ * applied to the magnitude (so ceil rounds away from zero, floor toward it).
+ */
+function roundMagnitude(n: number, digits: number, round: (x: number) => number): number {
+  const factor = Math.pow(10, digits);
+  // Neutralise IEEE 754 drift (e.g. 1.005*100 → 100.4999…) before rounding.
+  const shifted = parseFloat((Math.abs(n) * factor).toPrecision(15));
+  return (Math.sign(n) * round(shifted)) / factor;
+}
+
+/** Date serial number argument → Date (UTC fields), rejecting negatives. */
+function serialArg(v: unknown): Date {
+  const serial = toNumber(v);
+  if (serial < 0) throw new Error('#NUM!');
+  return dateSerialToDate(Math.floor(serial));
 }
 
 export class FormulaEngine {
@@ -971,12 +1127,34 @@ export class FormulaEngine {
       return this._parseIF(s);
     }
 
+    // IFS likewise evaluates only the value of the first true condition.
+    if (name === 'IFS') {
+      return this._parseIFS(s);
+    }
+
+    // An omitted argument (e.g. the 4th in XLOOKUP(x, A:A, B:B, , -1)) is
+    // passed as undefined, which functions treat as "use the default".
+    const tolerantIndex = ERROR_TOLERANT_ARGS[name];
+    const parseArg = (): unknown => {
+      const next = this._peek(s).type;
+      if (next === 'COMMA' || next === 'RPAREN') return undefined;
+      if (args.length !== tolerantIndex) return this._parseComparison(s);
+      const savedPos = s.pos;
+      try {
+        return this._parseComparison(s);
+      } catch (e) {
+        if (e instanceof EvalDepthError) throw e;
+        s.pos = savedPos;
+        this._skipArgument(s);
+        return new ArgumentError(toErrorCode(e));
+      }
+    };
     const args: unknown[] = [];
     if (this._peek(s).type !== 'RPAREN') {
-      args.push(this._parseComparison(s));
+      args.push(parseArg());
       while (this._peek(s).type === 'COMMA') {
         this._consume(s);
-        args.push(this._parseComparison(s));
+        args.push(parseArg());
       }
     }
 
@@ -1075,6 +1253,44 @@ export class FormulaEngine {
     }
 
     this._consume(s, 'RPAREN');
+    return result;
+  }
+
+  /**
+   * Parse IFS(cond1, value1, cond2, value2, ...). Conditions are evaluated in
+   * order until one is true; only that condition's value is evaluated.
+   * No true condition → #N/A. Called after LPAREN has already been consumed.
+   */
+  private _parseIFS(s: ParserState): unknown {
+    let matched = false;
+    let result: unknown;
+
+    for (;;) {
+      let condition: unknown = false;
+      if (matched) {
+        this._skipArgument(s);
+      } else {
+        condition = this._parseComparison(s);
+        if (isErrorCode(condition)) throw new Error(condition);
+      }
+
+      // Every condition needs a value
+      if (this._peek(s).type !== 'COMMA') throw new Error('#VALUE!');
+      this._consume(s);
+
+      if (!matched && condition) {
+        result = this._parseComparison(s);
+        matched = true;
+      } else {
+        this._skipArgument(s);
+      }
+
+      if (this._peek(s).type !== 'COMMA') break;
+      this._consume(s);
+    }
+
+    this._consume(s, 'RPAREN');
+    if (!matched) throw new Error('#N/A');
     return result;
   }
 
@@ -1475,7 +1691,103 @@ export class FormulaEngine {
       return total / count;
     });
 
+    this.registerFunction('SUMIFS', (_ctx, sumRange, ...pairs) => {
+      const sumValues = toValueList(sumRange);
+      const mask = matchAllCriteria(pairs, sumRange);
+      let total = 0;
+      for (let i = 0; i < sumValues.length; i++) {
+        if (!mask[i]) continue;
+        // An error in a summed cell is the result (Excel), not a silent 0
+        const v = sumValues[i];
+        if (isErrorCode(v)) throw new Error(v);
+        // Text (even numeric-looking) and booleans in the sum range are skipped
+        if (typeof v === 'number') total += v;
+      }
+      return total;
+    });
+
+    this.registerFunction('COUNTIFS', (_ctx, ...pairs) => {
+      if (pairs.length === 0) throw new Error('#VALUE!');
+      const mask = matchAllCriteria(pairs, pairs[0]);
+      return mask.filter(Boolean).length;
+    });
+
+    this.registerFunction('AVERAGEIFS', (_ctx, avgRange, ...pairs) => {
+      const avgValues = toValueList(avgRange);
+      const mask = matchAllCriteria(pairs, avgRange);
+      let total = 0;
+      let count = 0;
+      for (let i = 0; i < avgValues.length; i++) {
+        const v = avgValues[i];
+        if (!mask[i]) continue;
+        if (isErrorCode(v)) throw new Error(v);
+        if (typeof v === 'number') {
+          total += v;
+          count++;
+        }
+      }
+      if (count === 0) throw new Error('#DIV/0!');
+      return total / count;
+    });
+
     // ─── Lookup ─────────────────────────────────────────
+
+    this.registerFunction(
+      'XLOOKUP',
+      (_ctx, lookupValue, lookupRange, returnRange, ifNotFound?, matchMode?, searchMode?) => {
+        if (!(lookupRange instanceof RangeValue) || !(returnRange instanceof RangeValue)) {
+          throw new Error('#VALUE!');
+        }
+        const vertical = lookupRange.cols === 1;
+        if (!vertical && lookupRange.rows !== 1) throw new Error('#VALUE!');
+        const keys = lookupRange.values;
+        if ((vertical ? returnRange.rows : returnRange.cols) !== keys.length) {
+          throw new Error('#VALUE!');
+        }
+
+        // 0 = exact, -1 = exact or next smaller, 1 = exact or next larger.
+        // Wildcard matching (2) is not supported.
+        const mode = matchMode === undefined ? 0 : Math.trunc(Number(matchMode));
+        if (mode !== 0 && mode !== -1 && mode !== 1) throw new Error('#VALUE!');
+        // 1 / 2 = first to last, -1 / -2 = last to first (binary search modes
+        // give the same answer on sorted data, so they search linearly).
+        const search = searchMode === undefined ? 1 : Math.trunc(Number(searchMode));
+        if (![1, -1, 2, -2].includes(search)) throw new Error('#VALUE!');
+
+        let best = -1;
+        for (let step = 0; step < keys.length; step++) {
+          const i = search < 0 ? keys.length - 1 - step : step;
+          const key = keys[i];
+          // lookupCompare orders numbers and text only; booleans match exactly
+          if (typeof lookupValue === 'boolean' || typeof key === 'boolean') {
+            if (key === lookupValue) {
+              best = i;
+              break;
+            }
+            continue;
+          }
+          const cmp = lookupCompare(key, lookupValue);
+          if (isNaN(cmp)) continue;
+          if (cmp === 0) {
+            best = i;
+            break;
+          }
+          const closer = best === -1 || (mode === -1
+            ? lookupCompare(keys[i], keys[best]) > 0
+            : lookupCompare(keys[i], keys[best]) < 0);
+          if (((mode === -1 && cmp < 0) || (mode === 1 && cmp > 0)) && closer) {
+            best = i;
+          }
+        }
+
+        if (best === -1) {
+          if (ifNotFound instanceof ArgumentError) throw new Error(ifNotFound.code);
+          if (ifNotFound !== undefined) return ifNotFound;
+          throw new Error('#N/A');
+        }
+        return vertical ? returnRange.get(best, 0) : returnRange.get(0, best);
+      }
+    );
 
     this.registerFunction('VLOOKUP', (_ctx, lookupValue, tableRange, colIndex, exactMatch?) => {
       if (!(tableRange instanceof RangeValue)) {
@@ -1637,7 +1949,57 @@ export class FormulaEngine {
       return Math.floor(q) * sig;
     });
 
+    // Omitted precision is 0; anything non-numeric is #VALUE! (not a silent 0)
+    const precision = (digits: unknown) => (digits === undefined ? 0 : Math.trunc(toNumber(digits)));
+
+    this.registerFunction('ROUNDUP', (_ctx, val, digits) => {
+      return roundMagnitude(toNumber(val), precision(digits), Math.ceil);
+    });
+
+    this.registerFunction('ROUNDDOWN', (_ctx, val, digits) => {
+      return roundMagnitude(toNumber(val), precision(digits), Math.floor);
+    });
+
+    this.registerFunction('INT', (_ctx, val) => {
+      return Math.floor(toNumber(val));
+    });
+
+    this.registerFunction('SQRT', (_ctx, val) => {
+      const n = toNumber(val);
+      if (n < 0) throw new Error('#NUM!');
+      return Math.sqrt(n);
+    });
+
+    this.registerFunction('PRODUCT', (_ctx, ...args) => {
+      const nums = numericArgs(args);
+      return nums.length ? nums.reduce((p, n) => p * n, 1) : 0;
+    });
+
+    this.registerFunction('MEDIAN', (_ctx, ...args) => {
+      const nums = numericArgs(args).sort((a, b) => a - b);
+      if (nums.length === 0) throw new Error('#NUM!');
+      const mid = Math.floor(nums.length / 2);
+      return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+    });
+
     // ─── String ─────────────────────────────────────────
+
+    this.registerFunction('TEXTJOIN', (_ctx, delimiter, ignoreEmpty, ...texts) => {
+      const parts: string[] = [];
+      for (const arg of texts) {
+        for (const v of toValueList(arg)) {
+          if (isErrorCode(v)) throw new Error(v);
+          if (v === undefined || v === '') {
+            if (!ignoreEmpty) parts.push('');
+          } else if (typeof v === 'boolean') {
+            parts.push(v ? 'TRUE' : 'FALSE');
+          } else {
+            parts.push(String(v));
+          }
+        }
+      }
+      return parts.join(String(delimiter ?? ''));
+    });
 
     this.registerFunction('LEFT', (_ctx, text, n?) => {
       const count = n !== undefined ? Number(n) : 1;
@@ -1757,10 +2119,36 @@ export class FormulaEngine {
     });
 
     this.registerFunction('NOW', () => {
+      // Serial of the local wall-clock time. Computed from date fields rather
+      // than a timestamp difference, so the timezone offset in effect in 1899
+      // (often a non-whole-hour local mean time) doesn't skew the result.
       const now = new Date();
-      const epoch = new Date(1899, 11, 30); // 1899-12-30
-      const diff = now.getTime() - epoch.getTime();
-      return diff / (1000 * 60 * 60 * 24);
+      return dateToSerial(
+        now.getFullYear(), now.getMonth(), now.getDate(),
+        now.getHours(), now.getMinutes(), now.getSeconds()
+      ) + now.getMilliseconds() / 86_400_000;
+    });
+
+    this.registerFunction('TODAY', () => {
+      const now = new Date();
+      return dateToSerial(now.getFullYear(), now.getMonth(), now.getDate());
+    });
+
+    this.registerFunction('YEAR', (_ctx, serial) => serialArg(serial).getUTCFullYear());
+
+    this.registerFunction('MONTH', (_ctx, serial) => serialArg(serial).getUTCMonth() + 1);
+
+    this.registerFunction('DAY', (_ctx, serial) => serialArg(serial).getUTCDate());
+
+    this.registerFunction('WEEKDAY', (_ctx, serial, returnType?) => {
+      const day = serialArg(serial).getUTCDay(); // 0 = Sunday
+      const type = returnType === undefined ? 1 : Math.trunc(Number(returnType));
+      switch (type) {
+        case 1: return day + 1;             // Sunday = 1 … Saturday = 7
+        case 2: return ((day + 6) % 7) + 1; // Monday = 1 … Sunday = 7
+        case 3: return (day + 6) % 7;       // Monday = 0 … Sunday = 6
+        default: throw new Error('#NUM!');
+      }
     });
   }
 }

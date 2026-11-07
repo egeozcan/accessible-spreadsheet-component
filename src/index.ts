@@ -21,4 +21,7 @@ export type {
   NumberFormatType,
   NumberFormatOptions,
 } from './types.js';
-export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual, formatNumber } from './types.js';
+export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual, formatNumber, dateToSerial, dateSerialToDate } from './types.js';
+export { parseDelimited, serializeDelimited, quoteDelimitedField } from './utils/delimited.js';
+export { findDataEdge } from './controllers/selection-manager.js';
+export type { CSVExportOptions, CSVImportOptions } from './y11n-spreadsheet.js';

@@ -28,14 +28,26 @@ export interface CellFormat {
   backgroundColor?: string;
   /** Horizontal text alignment */
   textAlign?: 'left' | 'center' | 'right';
+  /** Vertical text alignment within the cell (default: middle) */
+  verticalAlign?: 'top' | 'middle' | 'bottom';
+  /**
+   * Wrap long text onto multiple lines instead of truncating it with an
+   * ellipsis. Rows keep their fixed height (`--ls-cell-height`), so only the
+   * lines that fit are visible.
+   */
+  wrap?: boolean;
   /** Font size in pixels */
   fontSize?: number;
   /** Numeric display format (e.g. currency, percent) */
   numberFormat?: NumberFormatOptions;
 }
 
-/** Available preset number format types */
-export type NumberFormatType = 'number' | 'currency' | 'percent' | 'scientific';
+/**
+ * Available preset number format types. `date` renders a date serial number
+ * (days since 1899-12-30, as returned by `DATE()`, `TODAY()` and `NOW()`)
+ * using `datePattern`.
+ */
+export type NumberFormatType = 'number' | 'currency' | 'percent' | 'scientific' | 'date';
 
 /** Options for number formatting */
 export interface NumberFormatOptions {
@@ -46,6 +58,12 @@ export interface NumberFormatOptions {
   currencySymbol?: string;
   /** Whether to use thousands separators (default: true for 'number' and 'currency') */
   thousandsSep?: boolean;
+  /**
+   * Pattern for the 'date' type (default: `'YYYY-MM-DD'`). Tokens: `YYYY`, `YY`,
+   * `MM`, `M`, `DD`, `D`, `HH`, `H`, `mm`, `ss`. Other characters are literal,
+   * e.g. `'DD/MM/YYYY'` or `'YYYY-MM-DD HH:mm'`.
+   */
+  datePattern?: string;
 }
 
 /**
@@ -128,7 +146,7 @@ export interface DataChangeDetail {
   /** What triggered the change */
   source?: 'user' | 'undo' | 'redo' | 'programmatic';
   /** The type of operation that caused the change */
-  operation?: 'edit' | 'cut' | 'paste' | 'clear' | 'format';
+  operation?: 'edit' | 'cut' | 'paste' | 'clear' | 'format' | 'fill' | 'import';
 }
 
 /**
@@ -171,7 +189,8 @@ function numberFormatEqual(a: NumberFormatOptions | undefined, b: NumberFormatOp
   return a.type === b.type
     && a.decimals === b.decimals
     && a.currencySymbol === b.currencySymbol
-    && a.thousandsSep === b.thousandsSep;
+    && a.thousandsSep === b.thousandsSep
+    && a.datePattern === b.datePattern;
 }
 
 /**
@@ -201,7 +220,75 @@ export function formatNumber(value: number, opts: NumberFormatOptions): string {
       const fixed = stripNegZero(value.toFixed(decimals));
       return useSep ? addThousandsSep(fixed) : fixed;
     }
+    case 'date':
+      return formatDateSerial(value, opts.datePattern ?? 'YYYY-MM-DD');
   }
+}
+
+/** Milliseconds timestamp of the date-serial epoch (serial 0 = 1899-12-30), in UTC. */
+const DATE_SERIAL_EPOCH_MS = Date.UTC(1899, 11, 30);
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Convert a date serial number (days since 1899-12-30; the fraction is the
+ * time of day) to a `Date` whose UTC fields hold the wall-clock date and time.
+ * Read it with `getUTCFullYear()`, `getUTCHours()`, etc.
+ *
+ * @param serial - Date serial number
+ * @returns The corresponding date, truncated to the second
+ */
+export function dateSerialToDate(serial: number): Date {
+  // Round to the millisecond to absorb float drift (0.75 → exactly 18:00),
+  // then truncate to the second so 23:59:59.9 never displays as the next day.
+  const ms = Math.round(serial * MS_PER_DAY);
+  return new Date(DATE_SERIAL_EPOCH_MS + Math.floor(ms / 1000) * 1000);
+}
+
+/**
+ * Convert wall-clock date/time fields to a date serial number. Uses UTC
+ * arithmetic so daylight-saving and historical timezone offsets never shift
+ * the result.
+ *
+ * @param year - Full year (e.g. 2024; 0-99 are not remapped)
+ * @param month - 0-indexed month
+ * @param day - Day of month (overflow rolls into the next month)
+ * @param hours - Hours (default 0)
+ * @param minutes - Minutes (default 0)
+ * @param seconds - Seconds (default 0)
+ * @returns The date serial number
+ */
+export function dateToSerial(
+  year: number,
+  month: number,
+  day: number,
+  hours = 0,
+  minutes = 0,
+  seconds = 0
+): number {
+  const d = new Date(0);
+  d.setUTCFullYear(year, month, day);
+  d.setUTCHours(hours, minutes, seconds, 0);
+  return (d.getTime() - DATE_SERIAL_EPOCH_MS) / MS_PER_DAY;
+}
+
+/** Render a date serial number with a `YYYY-MM-DD`-style pattern. */
+function formatDateSerial(serial: number, pattern: string): string {
+  if (!Number.isFinite(serial)) return String(serial);
+  const d = dateSerialToDate(serial);
+  const pad = (n: number, len = 2) => String(n).padStart(len, '0');
+  const tokens: Record<string, string> = {
+    YYYY: pad(d.getUTCFullYear(), 4),
+    YY: pad(d.getUTCFullYear() % 100),
+    MM: pad(d.getUTCMonth() + 1),
+    M: String(d.getUTCMonth() + 1),
+    DD: pad(d.getUTCDate()),
+    D: String(d.getUTCDate()),
+    HH: pad(d.getUTCHours()),
+    H: String(d.getUTCHours()),
+    mm: pad(d.getUTCMinutes()),
+    ss: pad(d.getUTCSeconds()),
+  };
+  return pattern.replace(/YYYY|YY|MM|M|DD|D|HH|H|mm|ss/g, (t) => tokens[t]);
 }
 
 /** Remove negative sign from "-0", "-0.00", etc. produced by toFixed */

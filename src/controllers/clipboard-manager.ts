@@ -7,6 +7,7 @@ import {
   colToLetter,
   letterToCol,
 } from '../types.js';
+import { parseDelimited, quoteDelimitedField } from '../utils/delimited.js';
 
 /** A single cell update produced by a paste operation. */
 export interface PasteUpdate {
@@ -294,7 +295,7 @@ export class ClipboardManager {
     maxRows: number,
     maxCols: number
   ): Array<{ id: string; value: string }> {
-    const rows = this._parseTSVRows(text);
+    const rows = parseDelimited(text, '\t');
     const updates: Array<{ id: string; value: string }> = [];
 
     for (let r = 0; r < rows.length; r++) {
@@ -309,79 +310,6 @@ export class ClipboardManager {
     }
 
     return updates;
-  }
-
-  /**
-   * Parse TSV text into a 2D array of strings, respecting quoted fields.
-   * Quoted fields may contain tabs, newlines, and escaped quotes ("").
-   */
-  private _parseTSVRows(text: string): string[][] {
-    const rows: string[][] = [];
-    let currentRow: string[] = [];
-    let currentField = '';
-    let inQuotes = false;
-    let i = 0;
-
-    while (i < text.length) {
-      const ch = text[i];
-
-      if (inQuotes) {
-        if (ch === '"') {
-          // Check for escaped quote ""
-          if (i + 1 < text.length && text[i + 1] === '"') {
-            currentField += '"';
-            i += 2;
-          } else {
-            // End of quoted field
-            inQuotes = false;
-            i++;
-          }
-        } else {
-          currentField += ch;
-          i++;
-        }
-      } else {
-        // A quote only opens a quoted field at the start of the field; a quote
-        // mid-field (e.g. `5" screen`, which Excel leaves unquoted) is literal.
-        if (ch === '"' && currentField === '') {
-          inQuotes = true;
-          i++;
-        } else if (ch === '\t') {
-          currentRow.push(currentField);
-          currentField = '';
-          i++;
-        } else if (ch === '\r') {
-          // Handle \r\n and bare \r
-          currentRow.push(currentField);
-          currentField = '';
-          if (i + 1 < text.length && text[i + 1] === '\n') {
-            i += 2;
-          } else {
-            i++;
-          }
-          rows.push(currentRow);
-          currentRow = [];
-        } else if (ch === '\n') {
-          currentRow.push(currentField);
-          currentField = '';
-          i++;
-          rows.push(currentRow);
-          currentRow = [];
-        } else {
-          currentField += ch;
-          i++;
-        }
-      }
-    }
-
-    // Push the last field and row
-    currentRow.push(currentField);
-    // Only add the last row if it's not a single empty field (trailing newline)
-    if (currentRow.length > 1 || currentRow[0] !== '') {
-      rows.push(currentRow);
-    }
-
-    return rows;
   }
 
   // ─── Reference Adjustment ─────────────────────────
@@ -472,20 +400,12 @@ export class ClipboardManager {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const cell = data.get(cellKey(r, c));
         const val = cell?.displayValue ?? '';
-        cols.push(this._quoteTSVField(val));
+        cols.push(quoteDelimitedField(val, '\t'));
       }
       lines.push(cols.join('\t'));
     }
 
     return lines.join('\n');
-  }
-
-  /** Quote a TSV field if it contains tabs, newlines, or double-quotes */
-  private _quoteTSVField(value: string): string {
-    if (value.includes('\t') || value.includes('\n') || value.includes('\r') || value.includes('"')) {
-      return `"${value.replace(/"/g, '""')}"`;
-    }
-    return value;
   }
 
   /**
@@ -536,6 +456,8 @@ export class ClipboardManager {
     if (format.textColor) parts.push(`color: ${format.textColor}`);
     if (format.backgroundColor) parts.push(`background-color: ${format.backgroundColor}`);
     if (format.textAlign) parts.push(`text-align: ${format.textAlign}`);
+    if (format.verticalAlign) parts.push(`vertical-align: ${format.verticalAlign}`);
+    if (format.wrap) parts.push('white-space: normal');
     if (format.fontSize) parts.push(`font-size: ${format.fontSize}px`);
     return parts.join('; ');
   }
@@ -570,6 +492,10 @@ export class ClipboardManager {
       fmt.textAlign = textAlign;
     }
 
+    // vertical-align and white-space are deliberately not read back: Google
+    // Sheets and Excel emit them on every cell as their defaults, which would
+    // stamp a format onto every pasted cell. They round-trip via data-format.
+
     const fontSize = this._extractStyleProp(style, 'font-size');
     if (fontSize) {
       const px = parseInt(fontSize, 10);
@@ -587,6 +513,7 @@ export class ClipboardManager {
     const fmt: CellFormat = {};
     const validColorPattern = /^[a-zA-Z0-9#(),.\s%/-]+$/;
     const validAligns = new Set(['left', 'center', 'right']);
+    const validVerticalAligns = new Set(['top', 'middle', 'bottom']);
 
     if (typeof obj.bold === 'boolean') fmt.bold = obj.bold;
     if (typeof obj.italic === 'boolean') fmt.italic = obj.italic;
@@ -602,6 +529,10 @@ export class ClipboardManager {
     if (typeof obj.textAlign === 'string' && validAligns.has(obj.textAlign)) {
       fmt.textAlign = obj.textAlign as CellFormat['textAlign'];
     }
+    if (typeof obj.verticalAlign === 'string' && validVerticalAligns.has(obj.verticalAlign)) {
+      fmt.verticalAlign = obj.verticalAlign as CellFormat['verticalAlign'];
+    }
+    if (typeof obj.wrap === 'boolean') fmt.wrap = obj.wrap;
     if (typeof obj.fontSize === 'number' && obj.fontSize > 0 && obj.fontSize <= 200) {
       fmt.fontSize = obj.fontSize;
     }
@@ -614,7 +545,7 @@ export class ClipboardManager {
   private _sanitizeNumberFormat(raw: unknown): NumberFormatOptions | undefined {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
     const obj = raw as Record<string, unknown>;
-    const validTypes = new Set(['number', 'currency', 'percent', 'scientific']);
+    const validTypes = new Set(['number', 'currency', 'percent', 'scientific', 'date']);
     if (typeof obj.type !== 'string' || !validTypes.has(obj.type)) return undefined;
 
     const nf: NumberFormatOptions = { type: obj.type as NumberFormatOptions['type'] };
@@ -626,6 +557,9 @@ export class ClipboardManager {
       nf.currencySymbol = obj.currencySymbol;
     }
     if (typeof obj.thousandsSep === 'boolean') nf.thousandsSep = obj.thousandsSep;
+    if (typeof obj.datePattern === 'string' && obj.datePattern.length <= 64) {
+      nf.datePattern = obj.datePattern;
+    }
     return nf;
   }
 

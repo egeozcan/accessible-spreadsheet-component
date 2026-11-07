@@ -4,10 +4,13 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 
 ## Features
 
-- Full keyboard navigation (arrows, Tab, Enter, Escape, Ctrl+A)
+- Full keyboard navigation (arrows, Ctrl+Arrow data-edge jumps, Tab, Enter, Escape, Ctrl+A)
+- Row/column selection via headers (click, Shift+click, drag) or Ctrl+Space / Shift+Space
+- Fill down/right (Ctrl+D / Ctrl+R) and multi-cell entry (Ctrl+Enter)
+- CSV/TSV import and export
 - Copy/cut/paste with TSV clipboard format
 - Undo/redo with Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)
-- Formula engine with 20+ built-in functions and custom function support
+- Formula engine with 50+ built-in functions and custom function support
 - Arrow key cell reference insertion during formula editing
 - Virtual rendering for large datasets (1000+ rows)
 - Dual-mode formula bar (raw / formatted)
@@ -74,7 +77,35 @@ sheet.setData(data);
 sheet.getData()          // Returns a copy of the grid data
 sheet.setData(data)      // Replaces grid data (clears undo/redo)
 sheet.registerFunction('DOUBLE', (ctx, val) => Number(val) * 2)
+
+// Formatting
+sheet.setCellFormat('0:0', { bold: true, verticalAlign: 'top', wrap: true })
+sheet.setRangeFormat({ start: { row: 1, col: 1 }, end: { row: 9, col: 1 } },
+  { numberFormat: { type: 'date', datePattern: 'DD/MM/YYYY' } })
+
+// CSV / TSV
+sheet.toCSV()                                   // display values, A1 → last used cell
+sheet.toCSV({ values: 'raw', delimiter: '\t' }) // formulas, as TSV
+sheet.toCSV({ range: { start: { row: 0, col: 0 }, end: { row: 9, col: 3 } } })
+sheet.fromCSV(text)                             // write at A1 (undoable)
+sheet.fromCSV(text, { start: { row: 5, col: 0 }, delimiter: ';' })
 ```
+
+`fromCSV` drops values outside `rows` × `cols` (and throws a `RangeError` for a negative or non-integer `start`); use the exported `parseDelimited(text)` to size the grid first if needed.
+
+### Cell formats
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `bold`, `italic`, `underline`, `strikethrough` | `boolean` | Text styling |
+| `textColor`, `backgroundColor` | `string` | CSS colors |
+| `textAlign` | `'left' \| 'center' \| 'right'` | Horizontal alignment |
+| `verticalAlign` | `'top' \| 'middle' \| 'bottom'` | Vertical alignment (default middle) |
+| `wrap` | `boolean` | Wrap text instead of truncating. Rows keep their fixed height, so only the lines that fit are shown |
+| `fontSize` | `number` | Font size in px |
+| `numberFormat` | `NumberFormatOptions` | `{ type: 'number' \| 'currency' \| 'percent' \| 'scientific' \| 'date', decimals?, currencySymbol?, thousandsSep?, datePattern? }` |
+
+The `date` type renders date serial numbers (as returned by `DATE`, `TODAY`, `NOW`) using `datePattern` (default `YYYY-MM-DD`; tokens `YYYY YY MM M DD D HH H mm ss`).
 
 ### Events
 
@@ -89,7 +120,7 @@ sheet.addEventListener('selection-change', (e) => {
   console.log(e.detail.range); // { start: { row, col }, end: { row, col } }
 });
 
-// Bulk operation (paste, cut, clear, undo, redo)
+// Bulk operation (paste, cut, clear, fill, import, undo, redo)
 sheet.addEventListener('data-change', (e) => {
   console.log(e.detail.updates, e.detail.source, e.detail.operation);
 });
@@ -107,10 +138,15 @@ Formulas start with `=`. Supported syntax:
 
 | Category | Functions |
 |----------|-----------|
-| Aggregates | `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA` |
-| Conditional | `IF(condition, trueVal, falseVal)` |
-| Math | `ABS`, `ROUND` |
-| String | `CONCAT`, `UPPER`, `LOWER`, `LEN`, `TRIM` |
+| Aggregates | `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `PRODUCT`, `MEDIAN` |
+| Conditional aggregates | `SUMIF`, `COUNTIF`, `AVERAGEIF`, `SUMIFS`, `COUNTIFS`, `AVERAGEIFS` |
+| Logic | `IF`, `IFS`, `IFERROR`, `AND`, `OR`, `NOT` |
+| Lookup | `VLOOKUP`, `HLOOKUP`, `XLOOKUP`, `INDEX`, `MATCH` |
+| Math | `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `INT`, `MOD`, `POWER`, `SQRT`, `CEILING`, `FLOOR` |
+| Text | `CONCAT`, `TEXTJOIN`, `UPPER`, `LOWER`, `LEN`, `TRIM`, `LEFT`, `RIGHT`, `MID`, `SUBSTITUTE`, `FIND`, `TEXT`, `VALUE` |
+| Date | `DATE`, `TODAY`, `NOW`, `YEAR`, `MONTH`, `DAY`, `WEEKDAY` |
+
+Omitted arguments use their defaults, e.g. `=XLOOKUP(75, A1:A9, B1:B9, , -1)`. Criteria in `SUMIF`/`COUNTIF`/`AVERAGEIF` and the `*IFS` functions accept operators (`">5"`, `"<>x"`) and wildcards (`*`, `?`, `~` to escape). `XLOOKUP` supports match modes `0`, `-1`, `1` (not wildcard mode `2`) and search modes `1`/`-1`; it returns a single value (no spilling).
 
 **Custom functions**:
 
@@ -163,6 +199,7 @@ y11n-spreadsheet {
 | `--ls-formula-mode-active-bg` | `#dbeafe` | Active mode toggle background |
 | `--ls-ref-highlight-border` | `#1a73e8` | Reference highlight border |
 | `--ls-ref-highlight-bg` | `rgba(26, 115, 232, 0.15)` | Reference highlight fill |
+| `--ls-header-selected-bg` | `#dbe7fb` | Row/column header background for selected rows/columns |
 
 </details>
 
@@ -180,11 +217,19 @@ y11n-spreadsheet::part(editor) {
 |-----|--------|
 | Arrow keys | Move active cell |
 | Shift + Arrow | Extend selection |
+| Ctrl/Cmd + Arrow | Jump to the edge of the data region |
+| Ctrl/Cmd + Shift + Arrow | Extend selection to the edge of the data region |
+| Ctrl + Space | Select entire column(s) |
+| Shift + Space | Select entire row(s) |
+| Ctrl + Shift + Space, Ctrl+A | Select all |
 | Tab / Shift+Tab | Move right / left |
-| Enter | Start editing / commit edit |
+| Enter / Shift+Enter (editing) | Commit edit and move down / up |
+| Ctrl/Cmd + Enter (editing) | Commit the value into every selected cell |
+| Enter, F2 | Start editing |
 | Escape | Cancel edit / clear selection |
 | Delete, Backspace | Clear selected cells |
-| Ctrl+A | Select all |
+| Ctrl/Cmd + D | Fill down (copy the top row of the selection into the rest) |
+| Ctrl/Cmd + R | Fill right (copy the left column of the selection into the rest) |
 | Ctrl+C / X / V | Copy / Cut / Paste |
 | Ctrl+Z | Undo |
 | Ctrl+Shift+Z / Ctrl+Y | Redo |
@@ -210,7 +255,7 @@ import type {
 } from 'y11n-spreadsheet';
 ```
 
-Utility functions for coordinate conversion:
+Utility functions for coordinate conversion, dates, and delimited text:
 
 ```ts
 import { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef } from 'y11n-spreadsheet';
@@ -221,6 +266,12 @@ colToLetter(0)        // "A"
 letterToCol("AA")     // 26
 refToCoord("B3")      // { row: 2, col: 1 }
 coordToRef({row:0, col:0}) // "A1"
+
+import { dateToSerial, dateSerialToDate, parseDelimited, serializeDelimited } from 'y11n-spreadsheet';
+
+dateToSerial(2024, 0, 1)          // 45292 (month is 0-indexed)
+parseDelimited('a,"b,c"\n1,2')    // [['a', 'b,c'], ['1', '2']]
+serializeDelimited([['a', 'b,c']]) // 'a,"b,c"'
 ```
 
 ## Exports
@@ -282,9 +333,11 @@ src/
   components/y11n-formula-bar.ts    # Formula bar sub-component
   controllers/
     selection-manager.ts            # Selection state (Lit ReactiveController)
-    clipboard-manager.ts            # Clipboard operations (TSV format)
+    clipboard-manager.ts            # Clipboard operations (TSV + HTML formats)
   engine/
     formula-engine.ts               # Recursive descent formula parser
+  utils/
+    delimited.ts                    # CSV/TSV parsing and serialization
   __tests__/                        # Unit tests colocated with source
 e2e/                                # Playwright E2E tests
 stories/                            # Storybook stories

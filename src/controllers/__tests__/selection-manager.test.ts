@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { SelectionManager } from '../selection-manager.js';
+import { SelectionManager, findDataEdge } from '../selection-manager.js';
 
 function createMockHost() {
   return {
@@ -282,5 +282,98 @@ describe('SelectionManager', () => {
       manager.hostDisconnected();
       expect(manager.isDragging).toBe(false);
     });
+  });
+
+  describe('row and column selection', () => {
+    it('selectColumns spans every row and keeps the given active cell', () => {
+      manager.selectColumns(2, 4, { row: 10, col: 3 });
+      expect(manager.range).toEqual({ start: { row: 0, col: 2 }, end: { row: 99, col: 4 } });
+      expect(manager.activeCell).toEqual({ row: 10, col: 3 });
+      expect(manager.isCellActive(10, 3)).toBe(true);
+      expect(manager.isCellActive(99, 4)).toBe(false);
+    });
+
+    it('selectColumns defaults the active cell to the current row in the target column', () => {
+      manager.moveTo(7, 0);
+      manager.selectColumns(5, 5);
+      expect(manager.activeCell).toEqual({ row: 7, col: 5 });
+    });
+
+    it('selectRows spans every column and keeps the given active cell', () => {
+      manager.selectRows(3, 1, { row: 2, col: 9 });
+      expect(manager.range).toEqual({ start: { row: 1, col: 0 }, end: { row: 3, col: 25 } });
+      expect(manager.activeCell).toEqual({ row: 2, col: 9 });
+    });
+
+    it('Shift+Arrow grows whole columns and keeps the active cell', () => {
+      manager.selectColumns(2, 2, { row: 5, col: 2 });
+      manager.move(0, 1, true);
+      expect(manager.range).toEqual({ start: { row: 0, col: 2 }, end: { row: 99, col: 3 } });
+      expect(manager.activeCell).toEqual({ row: 5, col: 2 });
+    });
+
+    it('a plain move starts from the active cell and collapses the selection', () => {
+      manager.selectColumns(2, 4, { row: 5, col: 3 });
+      manager.move(1, 0);
+      expect(manager.activeCell).toEqual({ row: 6, col: 3 });
+      expect(manager.range).toEqual({ start: { row: 6, col: 3 }, end: { row: 6, col: 3 } });
+    });
+
+    it('drops the active override once the range no longer contains it', () => {
+      manager.selectColumns(2, 3, { row: 5, col: 3 });
+      manager.move(0, -1, true); // head back to column 2, column 3 deselected
+      expect(manager.activeCell).toEqual(manager.head);
+    });
+
+    it('clearSelection collapses to the active cell', () => {
+      manager.selectRows(4, 6, { row: 5, col: 2 });
+      manager.clearSelection();
+      expect(manager.activeCell).toEqual({ row: 5, col: 2 });
+      expect(manager.range).toEqual({ start: { row: 5, col: 2 }, end: { row: 5, col: 2 } });
+    });
+
+    it('setSelection restores anchor, head and active cell', () => {
+      manager.setSelection({ row: 0, col: 1 }, { row: 99, col: 1 }, { row: 40, col: 1 });
+      expect(manager.activeCell).toEqual({ row: 40, col: 1 });
+      manager.setSelection({ row: 0, col: 0 }, { row: 2, col: 2 });
+      expect(manager.activeCell).toEqual({ row: 2, col: 2 });
+    });
+  });
+});
+
+describe('findDataEdge', () => {
+  // Column A (rows 0-9): filled at rows 2,3,4 and 8
+  const filled = new Set([2, 3, 4, 8]);
+  const isFilled = (row: number, col: number) => col === 0 && filled.has(row);
+  const jump = (row: number, dRow: number) => findDataEdge({ row, col: 0 }, dRow, 0, 10, 1, isFilled);
+
+  it('from an empty cell, jumps to the next filled cell', () => {
+    expect(jump(0, 1)).toEqual({ row: 2, col: 0 });
+  });
+
+  it('inside a filled run, jumps to the end of the run', () => {
+    expect(jump(2, 1)).toEqual({ row: 4, col: 0 });
+    expect(jump(4, -1)).toEqual({ row: 2, col: 0 });
+  });
+
+  it('at the end of a run, jumps across the gap to the next filled cell', () => {
+    expect(jump(4, 1)).toEqual({ row: 8, col: 0 });
+  });
+
+  it('with nothing further, jumps to the grid edge', () => {
+    expect(jump(8, 1)).toEqual({ row: 9, col: 0 });
+    expect(jump(2, -1)).toEqual({ row: 0, col: 0 });
+  });
+
+  it('stays put at the edge', () => {
+    expect(jump(9, 1)).toEqual({ row: 9, col: 0 });
+    expect(jump(0, -1)).toEqual({ row: 0, col: 0 });
+  });
+
+  it('works horizontally', () => {
+    const rowFilled = (row: number, col: number) => row === 0 && (col === 3 || col === 4);
+    expect(findDataEdge({ row: 0, col: 0 }, 0, 1, 1, 10, rowFilled)).toEqual({ row: 0, col: 3 });
+    expect(findDataEdge({ row: 0, col: 3 }, 0, 1, 1, 10, rowFilled)).toEqual({ row: 0, col: 4 });
+    expect(findDataEdge({ row: 0, col: 9 }, 0, -1, 1, 10, rowFilled)).toEqual({ row: 0, col: 4 });
   });
 });
