@@ -7,6 +7,9 @@ const config: StorybookConfig = {
     name: '@storybook/web-components-vite',
     options: {},
   },
+  features: {
+    sidebarOnboardingChecklist: false,
+  },
 };
 
 export default config;

@@ -224,7 +224,7 @@ test.describe('Clipboard with Formatting', () => {
 
     // Copy
     await spreadsheet.clickCell(0, 0);
-    await spreadsheet.cell(0, 0).press('Control+c');
+    await spreadsheet.copyFromCell(0, 0);
 
     // Paste to new location
     await spreadsheet.clickCell(2, 0);

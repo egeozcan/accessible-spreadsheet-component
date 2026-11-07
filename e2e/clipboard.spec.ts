@@ -8,7 +8,7 @@ test.describe('Clipboard Operations', () => {
   test('Ctrl+C copies cell value to clipboard', async ({ spreadsheet }) => {
     // Cell A1 has "Item"
     await spreadsheet.clickCell(0, 0);
-    await spreadsheet.cell(0, 0).press('Control+c');
+    await spreadsheet.copyFromCell(0, 0);
 
     const clipboardText = await spreadsheet.page.evaluate(() =>
       navigator.clipboard.readText()
@@ -52,7 +52,7 @@ test.describe('Clipboard Operations', () => {
     await spreadsheet.waitForCellText(1, 0, 'Widget A');
 
     await spreadsheet.clickCell(1, 0);
-    await spreadsheet.cell(1, 0).press('Control+x');
+    await spreadsheet.copyFromCell(1, 0, 'Control+x');
 
     // Cell should be cleared
     await spreadsheet.waitForCellText(1, 0, '');
@@ -78,7 +78,7 @@ test.describe('Clipboard Operations', () => {
     await spreadsheet.cell(0, 1).press('Shift+ArrowDown');
 
     // Copy
-    await spreadsheet.cell(1, 1).press('Control+c');
+    await spreadsheet.copyFromCell(1, 1);
 
     // Verify clipboard has TSV format
     const clipboardText = await spreadsheet.page.evaluate(() =>
@@ -125,7 +125,7 @@ test.describe('Clipboard Operations', () => {
     await spreadsheet.cell(3, 4).press('Shift+ArrowRight');
 
     // Cut
-    await spreadsheet.cell(3, 5).press('Control+x');
+    await spreadsheet.copyFromCell(3, 5, 'Control+x');
 
     // Source cells should be cleared
     await spreadsheet.waitForCellText(3, 4, '');
@@ -142,15 +142,16 @@ test.describe('Clipboard Operations', () => {
 
     // Copy A1 (which has bold formatting)
     await spreadsheet.clickCell(0, 0);
-    await spreadsheet.cell(0, 0).press('Control+c');
+    await spreadsheet.copyFromCell(0, 0);
 
     // Paste onto B1 (same value "Hello" but no bold)
     await spreadsheet.clickCell(0, 1);
     await spreadsheet.cell(0, 1).press('Control+v');
 
     // B1 should now have bold formatting from the paste
-    const format = await spreadsheet.getCellFormat('0:1');
-    expect(format?.bold).toBe(true);
+    await expect
+      .poll(async () => (await spreadsheet.getCellFormat('0:1'))?.bold)
+      .toBe(true);
   });
 
   test('external clipboard overwrites stale internal copy data', async ({ spreadsheet }) => {
@@ -161,7 +162,7 @@ test.describe('Clipboard Operations', () => {
 
     // Internal copy of A1
     await spreadsheet.clickCell(0, 0);
-    await spreadsheet.cell(0, 0).press('Control+c');
+    await spreadsheet.copyFromCell(0, 0);
 
     // Simulate an external app overwriting the clipboard
     await spreadsheet.page.evaluate(() =>

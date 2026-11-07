@@ -233,6 +233,20 @@ export class SpreadsheetPage {
     return style !== null && !style.includes('display:none') && !style.includes('display: none');
   }
 
+  /**
+   * Press a copy/cut shortcut on a cell and wait until the async clipboard
+   * write has actually landed, so subsequent clipboard reads/pastes don't race it.
+   */
+  async copyFromCell(row: number, col: number, key: 'Control+c' | 'Control+x' = 'Control+c') {
+    const sentinel = `__pending_copy_${Date.now()}_${Math.random()}__`;
+    await this.page.evaluate((t) => navigator.clipboard.writeText(t), sentinel);
+    await this.cell(row, col).press(key);
+    await this.page.waitForFunction(
+      async (t) => (await navigator.clipboard.readText()) !== t,
+      sentinel
+    );
+  }
+
   /** Wait for cell to have specific text */
   async waitForCellText(row: number, col: number, text: string) {
     await this.page.waitForFunction(
