@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Sorting: `sort(range, keys, { hasHeader })` sorts the rows of a range by one or more columns, and `sortSelection(direction)` / Alt+Shift+Up / Alt+Shift+Down sort the selection or the table around the active cell by its column, keeping a detected header row in place. Numbers, text, `FALSE`, `TRUE`, errors, then blanks (always last); stable. Formulas in moved rows keep pointing at their own row. Undoable; fires `data-change` (`operation: 'sort'`), `sort-change` and, for user sorts, the cancelable `before-sort`. User sorts refuse to move read-only cells.
+- `compareSortValues()` and `sortValueOf()` utility exports
+
 ### Fixed
 
+- Undo no longer reverts changes in the wrong order, scrambling data, when an event listener makes a change while another is applied (for example re-sorting on every `data-change`). Each change is now recorded for undo before its events fire; a change made during undo clears the redo stack.
 - Pasting an HTML table with merged cells (`colspan`/`rowspan`), as Excel and Google Sheets put on the clipboard, no longer shifts the following values into the wrong columns. The value lands in the merge's top-left cell and the cells it covered are pasted as empty.
 - `--ls-cell-width` and `--ls-cell-height` now accept any CSS length (`7rem`, `2em`, `calc(...)`). Non-px values were read as px (`7rem` as 7px), which broke scrolling, virtual rendering and editor placement. Changing either variable at runtime now re-renders the grid.
 - The grid now sets `aria-multiselectable="true"`, since a rectangular selection selects many cells at once

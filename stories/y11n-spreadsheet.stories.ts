@@ -1149,3 +1149,44 @@ Select B2:B3 and drag the small square at the bottom-right of the selection down
     },
   },
 };
+
+export const Sorting: StoryObj = {
+  name: 'Sorting',
+  render: () => {
+    const data = gridFromRows([
+      ['Name', 'Team', 'Score', 'Bonus'],
+      ['Dana', 'Blue', '82', '=C2*0.1'],
+      ['Ali', 'Red', '95', '=C3*0.1'],
+      ['Chen', 'Blue', '78', '=C4*0.1'],
+      ['Bea', 'Red', '95', '=C5*0.1'],
+      ['Emil', 'Green', '', '=C6*0.1'],
+      [],
+      ['Top score', '', '=MAX(C2:C6)'],
+    ]);
+    const sheet = () => document.querySelector<Y11nSpreadsheet>('#sort-demo')!;
+    const sortBy = (direction: 'ascending' | 'descending') => () => sheet().sortSelection(direction);
+    return html`
+      <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+        <button type="button" @click=${sortBy('ascending')}>Sort A to Z</button>
+        <button type="button" @click=${sortBy('descending')}>Sort Z to A</button>
+        <button
+          type="button"
+          @click=${() =>
+            sheet().sort(
+              { start: { row: 0, col: 0 }, end: { row: 5, col: 3 } },
+              [{ col: 1 }, { col: 2, direction: 'descending' }],
+              { hasHeader: true }
+            )}
+        >Sort by team, then score</button>
+      </div>
+      <y11n-spreadsheet id="sort-demo" .rows=${20} .cols=${6} .data=${data}></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Click a cell in the table and press Alt+Shift+Up (ascending) or Alt+Shift+Down (descending), or use the buttons: the table around the active cell is sorted by its column, and row 1 is kept as the header. The bonus formulas move with their rows; "Top score" below the blank row is not part of the table and stays put. Blank scores sort last either way. Ctrl+Z undoes a sort.`,
+      },
+    },
+  },
+};

@@ -38,6 +38,7 @@ const spreadsheetStories: StoryMeta[] = [
   { id: 'components-y11n-spreadsheet--absolute-references', name: 'Absolute References', waitFor: 'y11n-spreadsheet' },
   { id: 'components-y11n-spreadsheet--data-entry-controls', name: 'Data Entry Controls', waitFor: 'y11n-spreadsheet' },
   { id: 'components-y11n-spreadsheet--find-and-fill', name: 'Find, Fill Handle and Row Insertion', waitFor: '#find-input' },
+  { id: 'components-y11n-spreadsheet--sorting', name: 'Sorting', waitFor: 'y11n-spreadsheet' },
 ];
 
 const toolbarStories: StoryMeta[] = [
