@@ -330,7 +330,37 @@ export class Y11nSpreadsheet extends LitElement {
   private static readonly INITIAL_VIEW_COLS = 8;
   private static readonly ROW_HEADER_WIDTH = 50;
 
+  /**
+   * Rendered cell size in px, measured from `--ls-cell-width` /
+   * `--ls-cell-height` (see `_measureCellSize()`). Defaults match the CSS
+   * fallbacks until the first measurement.
+   */
+  private _cellSize = { width: 100, height: 28 };
+  /** The `_cellSize` object the last render used */
+  private _renderedCellSize = this._cellSize;
+  private _cellSizeObserver: ResizeObserver | null = null;
+
   // ─── Lifecycle ──────────────────────────────────────
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    // Re-attach after a move in the DOM; the first attach happens in firstUpdated
+    if (this.hasUpdated) this._observeCellSize();
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this._cellSizeObserver?.disconnect();
+  }
+
+  protected firstUpdated(): void {
+    // Measure synchronously so API calls right after the first render
+    // (scrolling, editor placement) already use the real size. The re-render
+    // with it is left to the ResizeObserver's initial callback: requesting an
+    // update from firstUpdated trips Lit's change-in-update warning.
+    this._measureCellSize();
+    if (!this._observeCellSize() && this._cellSize !== this._renderedCellSize) this.requestUpdate();
+  }
 
   willUpdate(changedProps: Map<string, unknown>): void {
     if (changedProps.has('data') && this.data !== this._lastSyncedDataRef) {
@@ -1886,7 +1916,7 @@ export class Y11nSpreadsheet extends LitElement {
 
       case 'PageDown': {
         e.preventDefault();
-        const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+        const cellHeight = this._cellSize.height;
         const gridEl = this._grid;
         const viewHeight = gridEl?.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
         const pageRows = Math.max(1, Math.floor(viewHeight / cellHeight) - 1);
@@ -1898,7 +1928,7 @@ export class Y11nSpreadsheet extends LitElement {
 
       case 'PageUp': {
         e.preventDefault();
-        const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+        const cellHeight = this._cellSize.height;
         const gridEl = this._grid;
         const viewHeight = gridEl?.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
         const pageRows = Math.max(1, Math.floor(viewHeight / cellHeight) - 1);
@@ -2893,8 +2923,8 @@ export class Y11nSpreadsheet extends LitElement {
    * We add a buffer of extra rows/cols for smooth scrolling.
    */
   private _getVisibleRange(): { rows: number[]; cols: number[] } {
-    const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
-    const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
+    const cellHeight = this._cellSize.height;
+    const cellWidth = this._cellSize.width;
     const gridEl = this._grid;
     const viewHeight =
       gridEl?.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
@@ -2930,8 +2960,8 @@ export class Y11nSpreadsheet extends LitElement {
     const gridEl = this._grid;
     if (!gridEl) return;
 
-    const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
-    const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
+    const cellHeight = this._cellSize.height;
+    const cellWidth = this._cellSize.width;
     const viewHeight =
       gridEl.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
     const viewWidth =
@@ -2971,13 +3001,40 @@ export class Y11nSpreadsheet extends LitElement {
     }
   }
 
-  private _getCSSVarPx(name: string, fallback: number): number {
-    const val = getComputedStyle(this).getPropertyValue(name);
-    if (val) {
-      const parsed = parseInt(val, 10);
-      if (!isNaN(parsed)) return parsed;
-    }
-    return fallback;
+  // ─── Cell Size ──────────────────────────────────────
+
+  /**
+   * Measure the rendered cell size from the hidden probe, which is sized with
+   * the same `--_cell-width` / `--_cell-height` as the cells. This resolves
+   * any CSS length (`7rem`, `2em`, `calc(...)`), not just px values.
+   */
+  private _measureCellSize(): void {
+    const probe = this.renderRoot.querySelector<HTMLElement>('.ls-size-probe');
+    if (!probe) return;
+    const style = getComputedStyle(probe);
+    this._setCellSize(parseFloat(style.width), parseFloat(style.height));
+  }
+
+  private _setCellSize(width: number, height: number): void {
+    // A hidden (display: none) grid measures 0: keep the last good size
+    if (!(width > 0) || !(height > 0)) return;
+    if (width === this._cellSize.width && height === this._cellSize.height) return;
+    this._cellSize = { width, height };
+  }
+
+  /** Re-measure whenever the probe resizes. Returns false where ResizeObserver is unavailable. */
+  private _observeCellSize(): boolean {
+    const probe = this.renderRoot.querySelector<HTMLElement>('.ls-size-probe');
+    if (!probe || typeof ResizeObserver === 'undefined') return false;
+    this._cellSizeObserver ??= new ResizeObserver((entries) => {
+      const entry = entries[entries.length - 1];
+      const box = entry.borderBoxSize?.[0];
+      if (box) this._setCellSize(box.inlineSize, box.blockSize);
+      else this._setCellSize(entry.contentRect.width, entry.contentRect.height);
+      if (this._cellSize !== this._renderedCellSize) this.requestUpdate();
+    });
+    this._cellSizeObserver.observe(probe);
+    return true;
   }
 
   // ─── Editor Positioning ─────────────────────────────
@@ -2986,8 +3043,8 @@ export class Y11nSpreadsheet extends LitElement {
     if (!this._isEditing) return { display: 'none' };
 
     const { row, col } = this._selection.activeCell;
-    const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
-    const cellWidth = this._getCSSVarPx('--ls-cell-width', 100);
+    const cellHeight = this._cellSize.height;
+    const cellWidth = this._cellSize.width;
     const headerWidth = Y11nSpreadsheet.ROW_HEADER_WIDTH;
 
     const top = (row + 1) * cellHeight - this._scrollTop; // +1 for header, offset by scroll
@@ -3017,7 +3074,7 @@ export class Y11nSpreadsheet extends LitElement {
   /** Position the validation message just below the editor. */
   private _getValidationMessageStyle(): Record<string, string> {
     const editor = this._getEditorStyle();
-    const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+    const cellHeight = this._cellSize.height;
     return {
       top: `${parseFloat(editor.top) + cellHeight}px`,
       left: editor.left,
@@ -3066,6 +3123,17 @@ export class Y11nSpreadsheet extends LitElement {
       flex: 1 1 auto;
       min-height: 0;
       overflow: hidden;
+    }
+
+    /* Sized like a cell so the component can read the resolved px size */
+    .ls-size-probe {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: var(--_cell-width);
+      height: var(--_cell-height);
+      visibility: hidden;
+      pointer-events: none;
     }
 
     .ls-grid {
@@ -3298,6 +3366,7 @@ export class Y11nSpreadsheet extends LitElement {
   `;
 
   protected render() {
+    this._renderedCellSize = this._cellSize;
     const { rows, cols } = this._getVisibleRange();
     const activeCell = this._selection.activeCell;
     const activeRawValue = this._getCellRaw(activeCell.row, activeCell.col);
@@ -3316,6 +3385,7 @@ export class Y11nSpreadsheet extends LitElement {
         ></y11n-formula-bar>
 
         <div class="ls-grid-shell">
+          <div class="ls-size-probe" aria-hidden="true"></div>
           <input
             id="editor"
             part="editor"
@@ -3345,6 +3415,7 @@ export class Y11nSpreadsheet extends LitElement {
             aria-rowcount="${this.rows + 1}"
             aria-colcount="${this.cols + 1}"
             aria-readonly="${this.readOnly}"
+            aria-multiselectable="true"
             style="--cols: ${this.cols};"
             tabindex="-1"
             @keydown="${this._handleGridKeydown}"
@@ -3448,7 +3519,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _renderRows(rows: number[], cols: number[]) {
-    const cellHeight = this._getCSSVarPx('--ls-cell-height', 28);
+    const cellHeight = this._cellSize.height;
     type Segment = { key: string; row: number; gap: number };
     const segments = layoutWithGaps<Segment>(
       rows,

@@ -27,6 +27,29 @@ test.describe('Clipboard Operations', () => {
     await spreadsheet.waitForCellText(7, 0, 'Pasted Value');
   });
 
+  test('pasting an HTML table with merged cells keeps values in their columns', async ({ spreadsheet }) => {
+    // What Excel/Sheets put on the clipboard for a title merged across B:C
+    await spreadsheet.page.evaluate(async () => {
+      const html =
+        '<table><tr><td>Left</td><td colspan="2">Title</td><td>Right</td></tr>' +
+        '<tr><td>1</td><td>2</td><td>3</td><td>4</td></tr></table>';
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': new Blob([html], { type: 'text/html' }),
+          'text/plain': new Blob(['Left\tTitle\t\tRight\n1\t2\t3\t4'], { type: 'text/plain' }),
+        }),
+      ]);
+    });
+
+    await spreadsheet.clickCell(10, 0);
+    await spreadsheet.cell(10, 0).press('Control+v');
+
+    await spreadsheet.waitForCellText(10, 3, 'Right');
+    expect(await spreadsheet.getCellText(10, 1)).toBe('Title');
+    expect(await spreadsheet.getCellText(10, 2)).toBe('');
+    expect(await spreadsheet.getCellText(11, 3)).toBe('4');
+  });
+
   test('paste anchors at the top-left of the selection, not the active cell', async ({ spreadsheet }) => {
     await spreadsheet.page.evaluate(() => navigator.clipboard.writeText('X'));
 
