@@ -32,6 +32,7 @@ src/
   engine/formula-engine.ts          # Recursive descent formula parser/evaluator
   utils/delimited.ts                # CSV/TSV parse + serialize (shared by clipboard and toCSV/fromCSV)
   utils/references.ts               # Rewrites formula refs when rows/columns are inserted/deleted
+  utils/sort.ts                     # Sort value ordering (numbers, text, FALSE, TRUE, errors, blanks last)
 ```
 
 - **Data model**: `GridData = Map<"row:col", CellData>` (sparse)
@@ -40,7 +41,7 @@ src/
 - **Formula engine**: Tokenizer + recursive descent parser. Each `parseExpression()` call creates its own `ParserState`, so nested evaluation is safe without save/restore.
 - **Dependency tracking**: Forward/reverse dep graph in the formula engine; `recalculateAffected()` uses BFS for targeted recalc.
 - **Virtual rendering**: Only visible cells + 5-cell buffer are rendered. Scroll position drives which rows/cols appear.
-- **Undo/redo**: `CommandBatch[]` stacks tracking cell deltas + selection state. Max 100 entries. Row/column insert/delete batches carry a `structure` field with whole-cell before/after snapshots and grid sizes instead of deltas.
+- **Undo/redo**: `CommandBatch[]` stacks tracking cell deltas + selection state. Max 100 entries. Row/column insert/delete batches carry a `structure` field with whole-cell before/after snapshots and grid sizes instead of deltas; sort batches carry a `sort` field with whole-cell snapshots and the sort spec. Apply batches with `_commitBatch()`, which records history *before* applying, so changes made by event listeners during the apply are recorded after it.
 - **User writes**: every user batch (edit, paste, cut, clear, fill) goes through `_vetUserBatch()`, which drops `CellData.readOnly` cells and values rejected by `validateCell`, then fires the cancelable `before-change`. Route new user write paths through it.
 - **Selection**: anchor/head range plus an optional active-cell override (`SelectionManager._active`) so whole-row/column selections keep the active cell in place. Read the active cell via `activeCell`, never `head`.
 

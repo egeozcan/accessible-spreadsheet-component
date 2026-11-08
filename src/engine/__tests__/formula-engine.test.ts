@@ -2037,9 +2037,48 @@ describe('FormulaEngine', () => {
     });
   });
 
+  // ─── resultFor ──────────────────────────────────────
+
+  describe('resultFor', () => {
+    it('returns the cached result of a recalculated formula without re-evaluating it', () => {
+      const data = makeData({ '0:0': '2', '0:1': '=A1*3' });
+      engine.setData(data);
+      engine.recalculate();
+      // Change the precedent behind the engine's back: the cached result is still used
+      data.set('0:0', cell('100', 'number'));
+      expect(engine.resultFor('0:1', '=A1*3')).toEqual({ displayValue: '6', type: 'number' });
+    });
+
+    it('evaluates when the formula text differs from the cached one, or is not cached', () => {
+      const data = makeData({ '0:0': '2', '0:1': '=A1*3' });
+      engine.setData(data);
+      engine.recalculate();
+      expect(engine.resultFor('0:1', '=A1*4')).toEqual({ displayValue: '8', type: 'number' });
+      expect(engine.resultFor('5:5', '=A1+1')).toEqual({ displayValue: '3', type: 'number' });
+      expect(engine.resultFor('5:5', '42')).toEqual({ displayValue: '42', type: 'number' });
+    });
+  });
+
   // ─── recalculateAffected ────────────────────────────
 
   describe('recalculateAffected', () => {
+    it('handles a very large batch of changed keys in linear time', () => {
+      // A non-empty dependency graph takes the BFS path rather than a full recalculate
+      const data = makeData({ '0:0': '1', '0:1': '=A1+1' });
+      const keys: string[] = [];
+      for (let r = 1; r <= 400_000; r++) {
+        const key = `${r}:0`;
+        data.set(key, cell(String(r), 'number'));
+        keys.push(key);
+      }
+      engine.setData(data);
+      engine.recalculate();
+      const start = performance.now();
+      engine.recalculateAffected(keys);
+      // Quadratic queue handling took seconds here
+      expect(performance.now() - start).toBeLessThan(1500);
+    });
+
     it('recalculates a direct dependent when input changes', () => {
       const data = makeData({ '0:0': '10', '0:1': '=A1*2' });
       engine.setData(data);

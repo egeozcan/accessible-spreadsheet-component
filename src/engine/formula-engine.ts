@@ -483,6 +483,32 @@ export class FormulaEngine {
   }
 
   /**
+   * The unformatted result of a cell's raw value: for a formula, the result
+   * cached by the last evaluation of that cell (`recalculate()`,
+   * `recalculateAffected()` or `evaluate(rawValue, key)`), when it was
+   * computed from the same formula text. Falls back to evaluating
+   * `rawValue` without recording dependencies (volatile formulas, cells not
+   * evaluated yet).
+   *
+   * Prefer this over `evaluate(rawValue)` for cells that were just
+   * recalculated: a standalone evaluation re-walks every precedent, which
+   * makes formatting a long formula chain quadratic.
+   *
+   * @param key - Cell key in `"row:col"` format
+   * @param rawValue - The cell's raw value
+   * @returns The display value and resolved type
+   */
+  resultFor(key: string, rawValue: string): EvalResult {
+    if (rawValue.startsWith('=')) {
+      const cached = this._cache.get(key);
+      if (cached && cached.rawValue === rawValue) {
+        return { displayValue: cached.displayValue, type: cached.type };
+      }
+    }
+    return this.evaluate(rawValue);
+  }
+
+  /**
    * Evaluate a raw value. If it starts with `=`, parse and execute the formula.
    * Otherwise, return the value as-is (possibly coerced to number/boolean).
    *
@@ -708,8 +734,9 @@ export class FormulaEngine {
     // computed from a stale cached precedent.
     const affected = new Set<string>(changedKeys);
     const queue = [...changedKeys];
-    while (queue.length > 0) {
-      const key = queue.shift()!;
+    // Walk with an index: queue.shift() is O(n), quadratic for large batches
+    for (let head = 0; head < queue.length; head++) {
+      const key = queue[head];
       const dependents = this._reverseDeps.get(key);
       if (dependents) {
         for (const dep of dependents) {

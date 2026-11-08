@@ -168,7 +168,8 @@ export type DataChangeOperation =
   | 'insert-rows'
   | 'delete-rows'
   | 'insert-columns'
-  | 'delete-columns';
+  | 'delete-columns'
+  | 'sort';
 
 /**
  * Detail for the cancelable `cell-edit-start` event, fired before the inline
@@ -234,6 +235,39 @@ export interface StructureChangeDetail {
   /** Number of rows/columns inserted or deleted */
   count: number;
   /** What triggered the change */
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
+}
+
+/** Sort order: `'ascending'` (A to Z, smallest first) or `'descending'`. */
+export type SortDirection = 'ascending' | 'descending';
+
+/** One sort key: the column to sort by and its direction. */
+export interface SortKey {
+  /** 0-based column index; must be inside the sorted range */
+  col: number;
+  /** Default: `'ascending'` */
+  direction?: SortDirection;
+}
+
+/** Options for `sort()`. */
+export interface SortOptions {
+  /** Keep the range's first row in place as a header row. Default: false */
+  hasHeader?: boolean;
+}
+
+/**
+ * Detail for `sort-change` (after a range was sorted, and on undo/redo of a
+ * sort) and the cancelable `before-sort` (before a user-initiated sort).
+ * On undo, it describes the sort that was undone.
+ */
+export interface SortDetail {
+  /** The range that was sorted, including the header row when `hasHeader` */
+  range: SelectionRange;
+  /** Sort keys in priority order */
+  keys: Array<{ col: number; direction: SortDirection }>;
+  /** Whether the range's first row was kept in place as a header */
+  hasHeader: boolean;
+  /** What triggered the sort */
   source: 'user' | 'undo' | 'redo' | 'programmatic';
 }
 

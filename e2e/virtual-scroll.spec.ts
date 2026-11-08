@@ -158,31 +158,25 @@ test.describe('Cell sizes in non-px units', () => {
       grid.scrollTop = 800;
     });
 
+    // Compare the rendered cell with the expected one in a single read: scroll
+    // snapping may still adjust scrollTop after it is set
     await expect
       .poll(() =>
-        spreadsheet.page.evaluate(() => {
+        spreadsheet.page.evaluate((size) => {
           const sheet = document.querySelector('y11n-spreadsheet')!;
-          const grid = sheet.shadowRoot!.querySelector('[role="grid"]')!;
+          const grid = sheet.shadowRoot!.querySelector<HTMLElement>('[role="grid"]')!;
           const rect = grid.getBoundingClientRect();
-          const hit = sheet.shadowRoot!.elementFromPoint(
-            rect.left + rect.width / 2,
-            rect.top + rect.height / 2
-          );
-          const cell = hit?.closest<HTMLElement>('[data-row][data-col]');
-          return cell ? `${cell.dataset.row}:${cell.dataset.col}` : null;
-        })
+          const cell = sheet
+            .shadowRoot!.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+            ?.closest<HTMLElement>('[data-row][data-col]');
+          const rowHeader = 50;
+          const row = Math.floor((grid.scrollTop + rect.height / 2 - size.height) / size.height);
+          const col = Math.floor((grid.scrollLeft + rect.width / 2 - rowHeader) / size.width);
+          const rendered = cell ? `${cell.dataset.row}:${cell.dataset.col}` : 'no cell';
+          return rendered === `${row}:${col}` ? 'match' : `rendered ${rendered}, expected ${row}:${col}`;
+        }, { width: WIDTH, height: HEIGHT })
       )
-      .toBe(
-        await spreadsheet.grid.evaluate(
-          (grid, size) => {
-            const rowHeader = 50;
-            const row = Math.floor((grid.scrollTop + grid.clientHeight / 2 - size.height) / size.height);
-            const col = Math.floor((grid.scrollLeft + grid.clientWidth / 2 - rowHeader) / size.width);
-            return `${row}:${col}`;
-          },
-          { width: WIDTH, height: HEIGHT }
-        )
-      );
+      .toBe('match');
   });
 
   test('keyboard navigation keeps the active cell inside the data viewport', async ({ spreadsheet }) => {

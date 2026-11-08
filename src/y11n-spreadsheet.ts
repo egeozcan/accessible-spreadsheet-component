@@ -20,6 +20,10 @@ import {
   type CellValidator,
   type ValidationErrorDetail,
   type StructureChangeDetail,
+  type SortDirection,
+  type SortKey,
+  type SortOptions,
+  type SortDetail,
   cellKey,
   colToLetter,
   coordToRef,
@@ -31,6 +35,7 @@ import {
 import { SelectionManager, findDataEdge } from './controllers/selection-manager.js';
 import { parseDelimited, serializeDelimited } from './utils/delimited.js';
 import { adjustFormulaForStructureChange, type StructureChange } from './utils/references.js';
+import { compareSortValues, sortValueOf, type SortValue } from './utils/sort.js';
 import { FormulaEngine } from './engine/formula-engine.js';
 import { ClipboardManager } from './controllers/clipboard-manager.js';
 import './components/y11n-formula-bar.js';
@@ -154,6 +159,12 @@ interface StructureBatch {
   colsAfter: number;
 }
 
+/** Whole-cell before/after state for a sort, plus what was sorted. */
+interface SortBatch {
+  detail: Omit<SortDetail, 'source'>;
+  cells: StructureCellDelta[];
+}
+
 interface CommandBatch {
   deltas: CellDelta[];
   selectionBefore: SelectionSnapshot;
@@ -161,6 +172,8 @@ interface CommandBatch {
   operation: DataChangeOperation;
   /** Set for row/column insertions and deletions, which replace whole cells */
   structure?: StructureBatch;
+  /** Set for sorts, which move whole cells */
+  sort?: SortBatch;
 }
 
 const STRUCTURE_OPERATIONS: Record<string, DataChangeOperation> = {
@@ -215,6 +228,8 @@ function formatSeriesNumber(value: number): string {
  * @fires validation-error - When `validateCell` rejects one or more values
  * @fires before-structure-change - Before a user inserts or deletes rows/columns (cancelable)
  * @fires structure-change - After rows/columns are inserted or deleted
+ * @fires before-sort - Before a user sorts a range (cancelable)
+ * @fires sort-change - After a range is sorted (also on undo/redo)
  *
  * @csspart editor - The inline cell editor input element
  * @csspart validation-message - The message shown under the editor when a value is rejected
@@ -493,9 +508,7 @@ export class Y11nSpreadsheet extends LitElement {
     const selection = this._snapshotSelection();
     const batch = this._buildCellBatch(updates, 'import', selection);
     if (!batch) return;
-    const generation = this._dataGeneration;
-    this._applyBatch(batch, 'programmatic');
-    this._pushHistory(batch, generation);
+    this._commitBatch(batch, 'programmatic');
   }
 
   // ─── Rows / Columns API ──────────────────────────────
@@ -546,6 +559,101 @@ export class Y11nSpreadsheet extends LitElement {
    */
   deleteColumns(index: number, count = 1): void {
     this._changeStructure({ axis: 'col', kind: 'delete', index, count }, 'programmatic');
+  }
+
+  // ─── Sort API ────────────────────────────────────────
+
+  /**
+   * Sort the rows of `range` by one or more key columns. Only cells inside
+   * the range move; with `hasHeader`, its first row stays in place.
+   *
+   * Ascending order is numbers (smallest first), text (A to Z, ignoring
+   * case), FALSE, TRUE, then errors; descending reverses it. Blank cells go
+   * last either way. The sort is stable, and later keys break ties of
+   * earlier ones. Cells move with their formats and read-only flags.
+   * Formulas in moved cells shift their relative references by the rows they
+   * moved, as if copied; references from outside the range are not changed.
+   *
+   * One undoable step; fires `data-change` and `sort-change` (not
+   * `before-sort`). Throws a RangeError for a range outside the grid or a key
+   * column outside the range.
+   *
+   * @param range - The cells to sort
+   * @param keys - Sort key(s) in priority order
+   * @param options - Whether the first row is a header
+   * @returns Whether any cell moved
+   */
+  sort(range: SelectionRange, keys: SortKey | SortKey[], options: SortOptions = {}): boolean {
+    const keyList = Array.isArray(keys) ? keys : [keys];
+    const start = range?.start;
+    const end = range?.end;
+    const isIndex = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 0;
+    if (!start || !end || ![start.row, start.col, end.row, end.col].every(isIndex)) {
+      throw new RangeError('sort: range must have non-negative integer start and end coordinates');
+    }
+    const normalized: SelectionRange = {
+      start: { row: Math.min(start.row, end.row), col: Math.min(start.col, end.col) },
+      end: { row: Math.max(start.row, end.row), col: Math.max(start.col, end.col) },
+    };
+    if (normalized.end.row >= this.rows || normalized.end.col >= this.cols) {
+      throw new RangeError(`sort: the range is outside the grid (${this.rows} rows, ${this.cols} columns)`);
+    }
+    if (keyList.length === 0) throw new RangeError('sort: at least one key is required');
+    const resolved = keyList.map((key) => {
+      if (!key || !Number.isInteger(key.col) || key.col < normalized.start.col || key.col > normalized.end.col) {
+        throw new RangeError(`sort: key column ${key?.col} is outside the range`);
+      }
+      const direction = key.direction ?? 'ascending';
+      if (direction !== 'ascending' && direction !== 'descending') {
+        throw new RangeError(`sort: direction must be 'ascending' or 'descending'`);
+      }
+      return { col: key.col, direction };
+    });
+    return this._sortRange(
+      { range: normalized, keys: resolved, hasHeader: options.hasHeader === true },
+      'programmatic'
+    );
+  }
+
+  /**
+   * Sort as the user would with Alt+Shift+Up / Alt+Shift+Down: by the
+   * active cell's column, over the selection, or over the block of data
+   * around the active cell when a single cell or a single column of a wider
+   * table is selected. A first row of
+   * text headers over other data is detected and kept in place. Respects
+   * `readOnly`, refuses to move read-only cells, and fires the cancelable
+   * `before-sort`. The outcome is announced to screen readers. Use this to
+   * back a "Sort A to Z" button.
+   *
+   * @param direction - Default: `'ascending'`
+   * @returns Whether any cell moved
+   */
+  sortSelection(direction: SortDirection = 'ascending'): boolean {
+    if (this.readOnly || this._pasteInProgress) return false;
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+
+    const active = this._selection.activeCell;
+    const selected = this._selection.range;
+    const single = selected.start.row === selected.end.row && selected.start.col === selected.end.col;
+    let range = single ? this._currentRegion(active.row, active.col) : this._clipToData(selected, active);
+    // Sorting one column of a wider table would split its records apart, so
+    // sort the whole table instead (Excel's default when it asks)
+    if (range && range.start.col === range.end.col) {
+      // Grow from the column's first filled cell: the active cell may be below the data
+      let row = range.start.row;
+      while (row < range.end.row && !this._isCellFilled(row, range.start.col)) row++;
+      const region = this._currentRegion(row, range.start.col);
+      if (region && region.start.col < region.end.col) range = region;
+    }
+    if (!range) {
+      this._modeAnnouncement = 'Nothing to sort';
+      return false;
+    }
+    return this._sortRange(
+      { range, keys: [{ col: active.col, direction }], hasHeader: this._looksLikeHeader(range) },
+      'user'
+    );
   }
 
   // ─── Find API ────────────────────────────────────────
@@ -698,9 +806,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (source === 'user') {
       this._executeUserBatch(batch);
     } else {
-      const generation = this._dataGeneration;
-      this._applyBatch(batch, source);
-      this._pushHistory(batch, generation);
+      this._commitBatch(batch, source);
     }
 
     this._dispatchFormatChange({ cellIds, format, source });
@@ -735,9 +841,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (source === 'user') {
       this._executeUserBatch(batch);
     } else {
-      const generation = this._dataGeneration;
-      this._applyBatch(batch, source);
-      this._pushHistory(batch, generation);
+      this._commitBatch(batch, source);
     }
 
     this._dispatchFormatChange({ cellIds, format: {}, source });
@@ -931,10 +1035,10 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   /** Apply number formatting to a single cell using rawValue for robustness */
-  private _applyNumberFormatToCell(_key: string, cell: CellData): void {
+  private _applyNumberFormatToCell(key: string, cell: CellData): void {
     if (cell.type === 'number' && cell.format?.numberFormat) {
       const numericValue = cell.rawValue.startsWith('=')
-        ? Number(this._formulaEngine.evaluate(cell.rawValue).displayValue)
+        ? Number(this._formulaEngine.resultFor(key, cell.rawValue).displayValue)
         : Number(cell.rawValue);
       cell.displayValue = formatNumber(numericValue, cell.format.numberFormat);
     }
@@ -1134,6 +1238,10 @@ export class Y11nSpreadsheet extends LitElement {
       this._applyStructureBatch(batch, 'after', source);
       return;
     }
+    if (batch.sort) {
+      this._applySortBatch(batch, 'after', source);
+      return;
+    }
     for (const delta of batch.deltas) {
       this._applyRawValueByString(delta.id, delta.after);
       if ('formatAfter' in delta) {
@@ -1149,6 +1257,10 @@ export class Y11nSpreadsheet extends LitElement {
     this._mutationCount++;
     if (batch.structure) {
       this._applyStructureBatch(batch, 'before', 'undo');
+      return;
+    }
+    if (batch.sort) {
+      this._applySortBatch(batch, 'before', 'undo');
       return;
     }
     for (const delta of batch.deltas) {
@@ -1182,25 +1294,35 @@ export class Y11nSpreadsheet extends LitElement {
     }
     // Re-apply number format to display value
     if (cell.type === 'number' && cell.format?.numberFormat) {
-      // For formula cells, re-evaluate to get the raw numeric value
+      // For formula cells, get the unformatted result from the engine
       // (displayValue may already be formatted, e.g., "$1,234.50")
       if (cell.rawValue.startsWith('=')) {
-        const evaluated = this._formulaEngine.evaluate(cell.rawValue);
+        const evaluated = this._formulaEngine.resultFor(cellId, cell.rawValue);
         cell.displayValue = formatNumber(Number(evaluated.displayValue), cell.format.numberFormat);
       } else {
         cell.displayValue = formatNumber(Number(cell.rawValue), cell.format.numberFormat);
       }
     } else if (cell.type === 'number' && !cell.format?.numberFormat) {
-      // Remove number formatting — re-evaluate to get plain display
-      const evaluated = this._formulaEngine.evaluate(cell.rawValue);
+      // Remove number formatting — show the plain result
+      const evaluated = this._formulaEngine.resultFor(cellId, cell.rawValue);
       cell.displayValue = evaluated.displayValue;
     }
   }
 
   private _executeUserBatch(batch: CommandBatch): void {
-    const generation = this._dataGeneration;
-    this._applyBatch(batch, 'user');
-    this._pushHistory(batch, generation);
+    this._commitBatch(batch, 'user');
+  }
+
+  /**
+   * Record a batch for undo, then apply it. Recording first keeps the history
+   * in order when a listener of the events fired while applying makes a
+   * change of its own (say, re-sorting on every `data-change`): that change
+   * is recorded after this one, so undo reverts them in the right order. If a
+   * listener replaces the data instead, the history is cleared with it.
+   */
+  private _commitBatch(batch: CommandBatch, source: ChangeSource): void {
+    this._pushHistory(batch, this._dataGeneration);
+    this._applyBatch(batch, source);
   }
 
   private _commitRawValue(key: string, newValue: string, options: { validate?: boolean } = {}): boolean {
@@ -1396,9 +1518,7 @@ export class Y11nSpreadsheet extends LitElement {
         colsAfter,
       },
     };
-    const generation = this._dataGeneration;
-    this._applyBatch(batch, source);
-    this._pushHistory(batch, generation);
+    this._commitBatch(batch, source);
 
     if (source === 'user') {
       const label = (i: number) => (axis === 'row' ? String(i + 1) : colToLetter(i));
@@ -1524,15 +1644,274 @@ export class Y11nSpreadsheet extends LitElement {
     this.requestUpdate();
   }
 
+  // ─── Sorting ────────────────────────────────────────
+
+  private _sortRange(spec: Omit<SortDetail, 'source'>, source: 'user' | 'programmatic'): boolean {
+    if (this._pasteInProgress) return false;
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    if (source === 'user' && this.readOnly) return false;
+
+    const { range, hasHeader } = spec;
+    const first = range.start.row + (hasHeader ? 1 : 0);
+    const order = this._computeSortOrder(first, range.end.row, spec.keys);
+    const moved = order.filter((src, i) => src !== first + i);
+    if (moved.length === 0) {
+      if (source === 'user') this._modeAnnouncement = 'Already sorted';
+      return false;
+    }
+
+    if (source === 'user') {
+      const locked = moved.some((row) => {
+        for (let c = range.start.col; c <= range.end.col; c++) {
+          if (this._isCellLocked(cellKey(row, c))) return true;
+        }
+        return false;
+      });
+      if (locked) {
+        this._modeAnnouncement = 'Cannot sort: the rows to move contain read-only cells';
+        return false;
+      }
+      // A copy, so a listener that mutates the detail can't change what is sorted
+      const detail: SortDetail = {
+        range: { start: { ...range.start }, end: { ...range.end } },
+        keys: spec.keys.map((k) => ({ ...k })),
+        hasHeader,
+        source,
+      };
+      const event = new CustomEvent<SortDetail>('before-sort', {
+        detail,
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      const mutations = this._mutationCount;
+      if (!this.dispatchEvent(event)) {
+        this._modeAnnouncement = 'Sort cancelled';
+        return false;
+      }
+      if (this._changedSince(mutations)) {
+        this._modeAnnouncement = 'Sort not applied because the data changed';
+        return false;
+      }
+    }
+
+    const cells = this._computeSortCells(order, first, range.start.col, range.end.col);
+    const selection = this._snapshotSelection();
+    const batch: CommandBatch = {
+      deltas: [],
+      selectionBefore: selection,
+      selectionAfter: selection,
+      operation: 'sort',
+      sort: {
+        detail: {
+          range: { start: { ...range.start }, end: { ...range.end } },
+          keys: spec.keys.map((k) => ({ ...k })),
+          hasHeader,
+        },
+        cells,
+      },
+    };
+    this._commitBatch(batch, source);
+
+    if (source === 'user') {
+      const sortedRef = `${coordToRef({ row: first, col: range.start.col })}:${coordToRef(range.end)}`;
+      const by = spec.keys.map((k) => `column ${colToLetter(k.col)}, ${k.direction}`).join(', then ');
+      this._modeAnnouncement =
+        `Sorted ${sortedRef} by ${by}` + (hasHeader ? `. Row ${range.start.row + 1} kept as the header` : '');
+    }
+    return true;
+  }
+
+  /** Source row for each target row `first..last`, in sorted order (stable). */
+  private _computeSortOrder(first: number, last: number, keys: SortDetail['keys']): number[] {
+    const rows: Array<{ row: number; values: SortValue[] }> = [];
+    for (let row = first; row <= last; row++) {
+      rows.push({
+        row,
+        values: keys.map((k) => {
+          const key = cellKey(row, k.col);
+          return sortValueOf(this._internalData.get(key), (cell) => this._sortNumber(key, cell));
+        }),
+      });
+    }
+    // Array.prototype.sort is stable (ES2019)
+    rows.sort((a, b) => {
+      for (let i = 0; i < keys.length; i++) {
+        const result = compareSortValues(a.values[i], b.values[i], keys[i].direction);
+        if (result !== 0) return result;
+      }
+      return 0;
+    });
+    return rows.map((r) => r.row);
+  }
+
+  /** The number behind a number cell, whose display may be formatted. */
+  private _sortNumber(key: string, cell: CellData): number {
+    if (!cell.format?.numberFormat) return Number(cell.displayValue);
+    return Number(this._formulaEngine.resultFor(key, cell.rawValue).displayValue);
+  }
+
+  /** Before/after state of every cell in columns `c0..c1` that the sort changes. */
+  private _computeSortCells(order: number[], first: number, c0: number, c1: number): StructureCellDelta[] {
+    const cells: StructureCellDelta[] = [];
+    order.forEach((src, i) => {
+      const target = first + i;
+      if (src === target) return;
+      for (let c = c0; c <= c1; c++) {
+        const id = cellKey(target, c);
+        const before = this._internalData.get(id);
+        const source = this._internalData.get(cellKey(src, c));
+        let after: CellData | undefined;
+        if (source) {
+          after = cloneCell(source);
+          after.rawValue = this._shiftFormula(source.rawValue, target - src, 0);
+        }
+        if (
+          before &&
+          after &&
+          before.rawValue === after.rawValue &&
+          formatsEqual(before.format, after.format) &&
+          !!before.readOnly === !!after.readOnly
+        ) {
+          continue;
+        }
+        if (!before && !after) continue;
+        cells.push({ id, before: before && cloneCell(before), after });
+      }
+    });
+    return cells;
+  }
+
+  private _applySortBatch(batch: CommandBatch, side: 'before' | 'after', source: ChangeSource): void {
+    const sort = batch.sort!;
+    for (const cell of sort.cells) {
+      const value = side === 'after' ? cell.after : cell.before;
+      if (value) {
+        this._internalData.set(cell.id, cloneCell(value));
+      } else {
+        this._internalData.delete(cell.id);
+      }
+    }
+    this._lastSyncedDataRef = this.data;
+
+    const ids = sort.cells.map((cell) => cell.id);
+    this._formulaEngine.updateData(this._internalData, ids);
+    this._recalcAffected(ids);
+    this._applyNumberFormatsToKeys(new Set(ids));
+    this._restoreSelection(side === 'after' ? batch.selectionAfter : batch.selectionBefore);
+
+    this._dispatchDataChange({
+      updates: sort.cells.map((cell) => ({
+        id: cell.id,
+        value: (side === 'after' ? cell.after : cell.before)?.rawValue ?? '',
+      })),
+      source,
+      operation: 'sort',
+    });
+    const { range, keys, hasHeader } = sort.detail;
+    this._dispatchSortChange({
+      range: { start: { ...range.start }, end: { ...range.end } },
+      keys: keys.map((k) => ({ ...k })),
+      hasHeader,
+      source,
+    });
+    this.requestUpdate();
+  }
+
+  /**
+   * The block of data around a cell, like Excel's current region: grown
+   * while any cell bordering it (diagonals included) is filled. Null when the
+   * block is a single empty cell.
+   */
+  private _currentRegion(row: number, col: number): SelectionRange | null {
+    let r0 = row;
+    let r1 = row;
+    let c0 = col;
+    let c1 = col;
+    const rowHasData = (r: number) => {
+      for (let c = Math.max(0, c0 - 1); c <= Math.min(this.cols - 1, c1 + 1); c++) {
+        if (this._isCellFilled(r, c)) return true;
+      }
+      return false;
+    };
+    const colHasData = (c: number) => {
+      for (let r = Math.max(0, r0 - 1); r <= Math.min(this.rows - 1, r1 + 1); r++) {
+        if (this._isCellFilled(r, c)) return true;
+      }
+      return false;
+    };
+    let grew = true;
+    while (grew) {
+      const before = [r0, r1, c0, c1].join();
+      if (r0 > 0 && rowHasData(r0 - 1)) r0--;
+      if (r1 < this.rows - 1 && rowHasData(r1 + 1)) r1++;
+      if (c0 > 0 && colHasData(c0 - 1)) c0--;
+      if (c1 < this.cols - 1 && colHasData(c1 + 1)) c1++;
+      grew = [r0, r1, c0, c1].join() !== before;
+    }
+    if (r0 === r1 && c0 === c1 && !this._isCellFilled(row, col)) return null;
+    return { start: { row: r0, col: c0 }, end: { row: r1, col: c1 } };
+  }
+
+  /**
+   * A selection trimmed to its last filled row and column, so sorting whole
+   * columns doesn't move blank rows around. Keeps the active cell's column
+   * (the sort key) inside. Null when the selection has no data.
+   */
+  private _clipToData(range: SelectionRange, active: CellCoord): SelectionRange | null {
+    let lastRow = -1;
+    let lastCol = -1;
+    for (const [key, cell] of this._internalData) {
+      if (cell.rawValue === '') continue;
+      const { row, col } = parseKey(key);
+      if (row < range.start.row || row > range.end.row || col < range.start.col || col > range.end.col) continue;
+      if (row > lastRow) lastRow = row;
+      if (col > lastCol) lastCol = col;
+    }
+    if (lastRow < 0) return null;
+    return {
+      start: { ...range.start },
+      end: { row: lastRow, col: Math.max(lastCol, active.col) },
+    };
+  }
+
+  /**
+   * Whether the range's first row looks like column headers: every cell is
+   * non-empty text, and either some column has non-text data below it or
+   * the first row is bold while the second isn't.
+   */
+  private _looksLikeHeader(range: SelectionRange): boolean {
+    const { start, end } = range;
+    if (end.row <= start.row) return false;
+    for (let c = start.col; c <= end.col; c++) {
+      const cell = this._internalData.get(cellKey(start.row, c));
+      if (!cell || cell.rawValue === '' || cell.type !== 'text') return false;
+    }
+    for (const [key, cell] of this._internalData) {
+      if (cell.rawValue === '' || cell.type === 'text') continue;
+      const { row, col } = parseKey(key);
+      if (row > start.row && row <= end.row && col >= start.col && col <= end.col) return true;
+    }
+    const bold = (row: number) => {
+      for (let c = start.col; c <= end.col; c++) {
+        if (!this._internalData.get(cellKey(row, c))?.format?.bold) return false;
+      }
+      return true;
+    };
+    return bold(start.row) && !bold(start.row + 1);
+  }
+
   private _undo(): void {
     if (this.readOnly || this._pasteInProgress) return;
 
     const batch = this._undoStack.pop();
     if (!batch) return;
 
-    const generation = this._dataGeneration;
+    // Recorded before reverting, for the same reason as in _commitBatch: a
+    // change a listener makes while it reverts clears the redo stack
+    this._redoStack.push(batch);
     this._revertBatch(batch);
-    if (generation === this._dataGeneration) this._redoStack.push(batch);
     this._dispatchFormatChangeForBatch(batch, 'undo');
   }
 
@@ -1542,12 +1921,12 @@ export class Y11nSpreadsheet extends LitElement {
     const batch = this._redoStack.pop();
     if (!batch) return;
 
-    const generation = this._dataGeneration;
-    this._applyBatch(batch, 'redo');
-    if (generation === this._dataGeneration) this._undoStack.push(batch);
+    // Recorded before applying (see _commitBatch)
+    this._undoStack.push(batch);
     if (this._undoStack.length > this._maxHistory) {
       this._undoStack.shift();
     }
+    this._applyBatch(batch, 'redo');
     this._dispatchFormatChangeForBatch(batch, 'redo');
   }
 
@@ -1833,6 +2212,15 @@ export class Y11nSpreadsheet extends LitElement {
       e.preventDefault();
       e.stopPropagation();
       this._fillSeriesInSelection(e.code === 'KeyD' ? 'down' : 'right');
+      return;
+    }
+
+    // Alt+Shift+Up / Alt+Shift+Down: sort ascending / descending by the
+    // active cell's column
+    if (e.altKey && shift && !ctrl && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.sortSelection(e.key === 'ArrowUp' ? 'ascending' : 'descending');
       return;
     }
 
@@ -2914,6 +3302,10 @@ export class Y11nSpreadsheet extends LitElement {
     this.dispatchEvent(
       new CustomEvent('structure-change', { detail, bubbles: true, composed: true })
     );
+  }
+
+  private _dispatchSortChange(detail: SortDetail): void {
+    this.dispatchEvent(new CustomEvent('sort-change', { detail, bubbles: true, composed: true }));
   }
 
   // ─── Virtual Rendering ──────────────────────────────
