@@ -24,6 +24,7 @@ import {
   type SortKey,
   type SortOptions,
   type SortDetail,
+  type ColumnResizeDetail,
   cellKey,
   colToLetter,
   coordToRef,
@@ -157,6 +158,15 @@ interface StructureBatch {
   colsBefore: number;
   rowsAfter: number;
   colsAfter: number;
+  /** Custom column widths before/after, when columns with custom widths move */
+  colWidths?: { before: Map<number, number>; after: Map<number, number> };
+}
+
+/** A column width change; `null` is the default width (`--ls-cell-width`). */
+interface WidthDelta {
+  col: number;
+  before: number | null;
+  after: number | null;
 }
 
 /** Whole-cell before/after state for a sort, plus what was sorted. */
@@ -174,6 +184,8 @@ interface CommandBatch {
   structure?: StructureBatch;
   /** Set for sorts, which move whole cells */
   sort?: SortBatch;
+  /** Set for column width changes, which touch no cells */
+  widths?: WidthDelta[];
 }
 
 const STRUCTURE_OPERATIONS: Record<string, DataChangeOperation> = {
@@ -230,6 +242,8 @@ function formatSeriesNumber(value: number): string {
  * @fires structure-change - After rows/columns are inserted or deleted
  * @fires before-sort - Before a user sorts a range (cancelable)
  * @fires sort-change - After a range is sorted (also on undo/redo)
+ * @fires before-column-resize - Before a user resizes columns (cancelable)
+ * @fires column-resize - After column widths change (also on undo/redo)
  *
  * @csspart editor - The inline cell editor input element
  * @csspart validation-message - The message shown under the editor when a value is rejected
@@ -351,6 +365,21 @@ export class Y11nSpreadsheet extends LitElement {
    * fallbacks until the first measurement.
    */
   private _cellSize = { width: 100, height: 28 };
+
+  /** Column widths set by the user or API, in px; other columns use `_cellSize.width` */
+  private _colWidths = new Map<number, number>();
+  /** Live widths while a header border is dragged, before the resize is committed */
+  private _resizePreview: { cols: number[]; width: number } | null = null;
+  /** Bumped whenever a column width (or preview) changes, to invalidate `_colLayout` */
+  private _colWidthsRevision = 0;
+  /** Cached left offsets of every column (`cols + 1` entries), see `_colOffsets()` */
+  private _colLayout: { key: string; offsets: Float64Array } | null = null;
+  private _measureCanvas: CanvasRenderingContext2D | null | undefined;
+
+  private static readonly MIN_COL_WIDTH = 20;
+  private static readonly MAX_COL_WIDTH = 2000;
+  /** Alt+Shift+Left/Right step, in px */
+  private static readonly COL_RESIZE_STEP = 8;
   /** The `_cellSize` object the last render used */
   private _renderedCellSize = this._cellSize;
   private _cellSizeObserver: ResizeObserver | null = null;
@@ -654,6 +683,81 @@ export class Y11nSpreadsheet extends LitElement {
       { range, keys: [{ col: active.col, direction }], hasHeader: this._looksLikeHeader(range) },
       'user'
     );
+  }
+
+  // ─── Column Widths API ───────────────────────────────
+
+  /**
+   * The width of a column in px: its custom width, or the default from
+   * `--ls-cell-width`.
+   *
+   * @param col - 0-based column index
+   */
+  getColumnWidth(col: number): number {
+    return this._colWidth(col);
+  }
+
+  /**
+   * The custom column widths, keyed by 0-based column index. Columns at the
+   * default width are left out. Pass the result to `setColumnWidths()` to
+   * restore a saved layout.
+   */
+  getColumnWidths(): Record<number, number> {
+    const out: Record<number, number> = {};
+    for (const [col, width] of [...this._colWidths].sort((a, b) => a[0] - b[0])) {
+      if (col < this.cols) out[col] = width;
+    }
+    return out;
+  }
+
+  /**
+   * Set the width of a column in px, or `null` for the default width.
+   * Widths are rounded and clamped to 20–2000px. Undoable; fires
+   * `column-resize`.
+   *
+   * @param col - 0-based column index
+   * @param width - Width in px, or null to reset
+   */
+  setColumnWidth(col: number, width: number | null): void {
+    this.setColumnWidths({ [col]: width });
+  }
+
+  /**
+   * Set several column widths at once (one undo step). Keys are 0-based
+   * column indices; `null` resets a column to the default width. Throws a
+   * RangeError for a column outside the grid or a width that isn't a
+   * positive number.
+   *
+   * @param widths - Widths in px keyed by column index
+   */
+  setColumnWidths(widths: Record<number, number | null>): void {
+    const changes = Object.entries(widths).map(([key, width]) => {
+      const col = Number(key);
+      if (!Number.isInteger(col) || col < 0 || col >= this.cols) {
+        throw new RangeError(`setColumnWidths: column ${key} is outside the grid (${this.cols} columns)`);
+      }
+      if (width !== null && !(typeof width === 'number' && Number.isFinite(width) && width > 0)) {
+        throw new RangeError(`setColumnWidths: the width of column ${key} must be a positive number or null`);
+      }
+      return { col, width };
+    });
+    this._resizeColumns(changes, 'programmatic');
+  }
+
+  /**
+   * Fit columns to their widest value, as a double-click on a header border
+   * does. Empty columns go back to the default width. Undoable; fires
+   * `column-resize`.
+   *
+   * @param cols - 0-based column indices
+   */
+  autoFitColumns(cols: number[]): void {
+    for (const col of cols) {
+      if (!Number.isInteger(col) || col < 0 || col >= this.cols) {
+        throw new RangeError(`autoFitColumns: column ${col} is outside the grid (${this.cols} columns)`);
+      }
+    }
+    this._resizeColumns(cols.map((col) => ({ col, width: this._fitWidth(col) })), 'programmatic');
   }
 
   // ─── Find API ────────────────────────────────────────
@@ -1233,13 +1337,18 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _applyBatch(batch: CommandBatch, source: ChangeSource): void {
-    this._mutationCount++;
+    // Column widths are layout, not data: they must not make pending writes look stale
+    if (!batch.widths) this._mutationCount++;
     if (batch.structure) {
       this._applyStructureBatch(batch, 'after', source);
       return;
     }
     if (batch.sort) {
       this._applySortBatch(batch, 'after', source);
+      return;
+    }
+    if (batch.widths) {
+      this._applyWidthBatch(batch, 'after', source);
       return;
     }
     for (const delta of batch.deltas) {
@@ -1254,13 +1363,17 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _revertBatch(batch: CommandBatch): void {
-    this._mutationCount++;
+    if (!batch.widths) this._mutationCount++;
     if (batch.structure) {
       this._applyStructureBatch(batch, 'before', 'undo');
       return;
     }
     if (batch.sort) {
       this._applySortBatch(batch, 'before', 'undo');
+      return;
+    }
+    if (batch.widths) {
+      this._applyWidthBatch(batch, 'before', 'undo');
       return;
     }
     for (const delta of batch.deltas) {
@@ -1516,6 +1629,7 @@ export class Y11nSpreadsheet extends LitElement {
         colsBefore,
         rowsAfter,
         colsAfter,
+        colWidths: this._computeStructureWidths(change),
       },
     };
     this._commitBatch(batch, source);
@@ -1529,6 +1643,19 @@ export class Y11nSpreadsheet extends LitElement {
       this._modeAnnouncement = `${kind === 'insert' ? 'Inserted' : 'Deleted'} ${what}`;
     }
     return true;
+  }
+
+  /** Custom column widths after a column insertion or deletion: they move with their columns. */
+  private _computeStructureWidths(change: StructureChange): StructureBatch['colWidths'] {
+    if (change.axis !== 'col' || this._colWidths.size === 0) return undefined;
+    const { kind, index, count } = change;
+    const after = new Map<number, number>();
+    for (const [col, width] of this._colWidths) {
+      if (kind === 'insert') after.set(col >= index ? col + count : col, width);
+      else if (col < index) after.set(col, width);
+      else if (col >= index + count) after.set(col - count, width);
+    }
+    return { before: new Map(this._colWidths), after };
   }
 
   private _hasLockedCellIn(change: StructureChange): boolean {
@@ -1620,6 +1747,18 @@ export class Y11nSpreadsheet extends LitElement {
       }
     }
     this._structureRevision++;
+    let movedWidths: ColumnResizeDetail['columns'] = [];
+    if (structure.colWidths) {
+      const from = side === 'after' ? structure.colWidths.before : structure.colWidths.after;
+      const to = side === 'after' ? structure.colWidths.after : structure.colWidths.before;
+      this._colWidths = new Map(to);
+      this._colWidthsRevision++;
+      // Columns whose width changed as widths moved with their columns
+      const cols = [...new Set([...from.keys(), ...to.keys()])].sort((a, b) => a - b);
+      movedWidths = cols
+        .filter((c) => from.get(c) !== to.get(c))
+        .map((c) => ({ col: c, width: to.get(c) ?? this._cellSize.width }));
+    }
     this.rows = side === 'after' ? structure.rowsAfter : structure.rowsBefore;
     this.cols = side === 'after' ? structure.colsAfter : structure.colsBefore;
     this._selection.setBounds(this.rows, this.cols);
@@ -1641,6 +1780,16 @@ export class Y11nSpreadsheet extends LitElement {
     const { change } = structure;
     const kind = side === 'after' ? change.kind : change.kind === 'insert' ? 'delete' : 'insert';
     this._dispatchStructureChange({ ...change, kind, source });
+    if (movedWidths.length > 0) {
+      // So hosts that save widths on column-resize see them move
+      this.dispatchEvent(
+        new CustomEvent<ColumnResizeDetail>('column-resize', {
+          detail: { columns: movedWidths, source },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    }
     this.requestUpdate();
   }
 
@@ -1900,6 +2049,290 @@ export class Y11nSpreadsheet extends LitElement {
       return true;
     };
     return bold(start.row) && !bold(start.row + 1);
+  }
+
+  // ─── Column Widths ──────────────────────────────────
+
+  private _colWidth(col: number): number {
+    if (this._resizePreview?.cols.includes(col)) return this._resizePreview.width;
+    return this._colWidths.get(col) ?? this._cellSize.width;
+  }
+
+  /** Left offset of every column within the data area, plus the total width at `[cols]`. */
+  private _colOffsets(): Float64Array {
+    const key = `${this.cols}|${this._cellSize.width}|${this._colWidthsRevision}`;
+    if (this._colLayout?.key !== key) {
+      const offsets = new Float64Array(this.cols + 1);
+      for (let c = 0; c < this.cols; c++) offsets[c + 1] = offsets[c] + this._colWidth(c);
+      this._colLayout = { key, offsets };
+    }
+    return this._colLayout.offsets;
+  }
+
+  private _colLeft(col: number): number {
+    return this._colOffsets()[Math.max(0, Math.min(col, this.cols))];
+  }
+
+  /** The column at `x` px into the data area (clamped to the grid). */
+  private _colAt(x: number): number {
+    const offsets = this._colOffsets();
+    let lo = 0;
+    let hi = this.cols - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (offsets[mid] <= x) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  /** `grid-template-columns`, with runs of default-width columns kept as `repeat()`. */
+  private _gridTemplateColumns(): string {
+    const parts = ['var(--_row-header-width)'];
+    let run = 0;
+    const flush = () => {
+      if (run > 0) parts.push(run === 1 ? 'var(--_cell-width)' : `repeat(${run}, var(--_cell-width))`);
+      run = 0;
+    };
+    for (let c = 0; c < this.cols; c++) {
+      const custom = this._resizePreview?.cols.includes(c) ? this._resizePreview.width : this._colWidths.get(c);
+      if (custom === undefined) {
+        run++;
+      } else {
+        flush();
+        parts.push(`${custom}px`);
+      }
+    }
+    flush();
+    return parts.join(' ');
+  }
+
+  private _clampWidth(width: number): number {
+    return Math.round(Math.min(Y11nSpreadsheet.MAX_COL_WIDTH, Math.max(Y11nSpreadsheet.MIN_COL_WIDTH, width)));
+  }
+
+  /**
+   * Resize columns as one undoable step. User resizes (allowed in read-only
+   * mode: widths are presentation, not data) can be vetoed via
+   * `before-column-resize`. Returns whether anything changed.
+   */
+  private _resizeColumns(
+    changes: Array<{ col: number; width: number | null }>,
+    source: 'user' | 'programmatic'
+  ): 'applied' | 'unchanged' | 'cancelled' {
+    const deltas: WidthDelta[] = [];
+    const seen = new Set<number>();
+    for (const { col, width } of changes) {
+      if (seen.has(col)) continue;
+      seen.add(col);
+      const before = this._colWidths.get(col) ?? null;
+      const after = width === null ? null : this._clampWidth(width);
+      if (after !== before) deltas.push({ col, before, after });
+    }
+    if (deltas.length === 0) return 'unchanged';
+
+    if (source === 'user') {
+      const detail: ColumnResizeDetail = { columns: this._resizedColumns(deltas, 'after'), source };
+      const event = new CustomEvent<ColumnResizeDetail>('before-column-resize', {
+        detail,
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      if (!this.dispatchEvent(event)) return 'cancelled';
+    }
+
+    const selection = this._snapshotSelection();
+    this._commitBatch(
+      // `operation` is never reported for width batches: they fire column-resize, not data-change
+      { deltas: [], selectionBefore: selection, selectionAfter: selection, operation: 'format', widths: deltas },
+      source
+    );
+    return 'applied';
+  }
+
+  /** Effective widths of the columns in `deltas` on one side of the change. */
+  private _resizedColumns(deltas: WidthDelta[], side: 'before' | 'after'): ColumnResizeDetail['columns'] {
+    return deltas.map((d) => ({ col: d.col, width: d[side] ?? this._cellSize.width }));
+  }
+
+  private _applyWidthBatch(batch: CommandBatch, side: 'before' | 'after', source: ChangeSource): void {
+    const deltas = batch.widths!;
+    const { row, col } = this._selection.activeCell;
+    const activeInView = this._isCellInView(row, col);
+    for (const delta of deltas) {
+      const width = delta[side];
+      if (width === null) this._colWidths.delete(delta.col);
+      else this._colWidths.set(delta.col, width);
+    }
+    this._colWidthsRevision++;
+    // The selection is unchanged, so don't restore it (which would move focus,
+    // e.g. when a page restores saved widths). If the active cell was in view,
+    // keep it there: widening its column can push it off-screen. Scroll after
+    // the render, once the grid has its new width (requested first, so
+    // updateComplete waits for that render).
+    this.requestUpdate();
+    this.updateComplete.then(() => {
+      if (activeInView && source !== 'programmatic') this._ensureCellVisible(row, col);
+      // Narrower columns can shrink the scroll range under the current position
+      const gridEl = this._grid;
+      if (gridEl && gridEl.scrollLeft !== this._scrollLeft) this._scrollLeft = gridEl.scrollLeft;
+    });
+    this.dispatchEvent(
+      new CustomEvent<ColumnResizeDetail>('column-resize', {
+        detail: { columns: this._resizedColumns(deltas, side), source },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /** Whether any part of a cell is inside the scrolled data viewport. */
+  private _isCellInView(row: number, col: number): boolean {
+    const gridEl = this._grid;
+    if (!gridEl) return false;
+    const left = this._colLeft(col);
+    const right = left + this._colWidth(col);
+    const top = row * this._cellSize.height;
+    const viewWidth = gridEl.clientWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH;
+    const viewHeight = gridEl.clientHeight - this._cellSize.height;
+    return (
+      right > this._scrollLeft &&
+      left < this._scrollLeft + viewWidth &&
+      top + this._cellSize.height > this._scrollTop &&
+      top < this._scrollTop + viewHeight
+    );
+  }
+
+  /** The columns a resize of `col` applies to: all selected whole columns, if `col` is one of them. */
+  private _columnsToResize(col: number): number[] {
+    const { start, end } = this._selection.range;
+    const wholeColumns = start.row === 0 && end.row === this.rows - 1;
+    if (wholeColumns && col >= start.col && col <= end.col) {
+      return Array.from({ length: end.col - start.col + 1 }, (_, i) => start.col + i);
+    }
+    return [col];
+  }
+
+  /** Alt+Shift+Left/Right: resize the selected columns from the active column's width. */
+  private _resizeSelectedColumns(delta: number): void {
+    const { start, end } = this._selection.range;
+    const active = this._selection.activeCell.col;
+    const width = this._clampWidth(this._colWidth(active) + delta);
+    const cols = Array.from({ length: end.col - start.col + 1 }, (_, i) => start.col + i);
+    this._announceWidths(cols, this._resizeColumns(cols.map((col) => ({ col, width })), 'user'));
+  }
+
+  /** Alt+Shift+0 and header-border double-click: fit columns to their content. */
+  private _autoFitUserColumns(cols: number[]): void {
+    this._announceWidths(cols, this._resizeColumns(cols.map((col) => ({ col, width: this._fitWidth(col) })), 'user'));
+  }
+
+  /** Announce the widths after a user resize (also when they didn't change, e.g. at the minimum). */
+  private _announceWidths(cols: number[], result: ReturnType<Y11nSpreadsheet['_resizeColumns']>): void {
+    if (result === 'cancelled') {
+      this._modeAnnouncement = 'Resize cancelled';
+      return;
+    }
+    const first = colToLetter(cols[0]);
+    const last = colToLetter(cols[cols.length - 1]);
+    const widths = new Set(cols.map((c) => Math.round(this._colWidth(c))));
+    const what = cols.length === 1 ? `Column ${first}` : `Columns ${first} to ${last}`;
+    this._modeAnnouncement =
+      widths.size === 1 ? `${what} width ${[...widths][0]} pixels` : `${what} resized to fit their content`;
+  }
+
+  /**
+   * The width that fits a column's widest displayed value, or null (the
+   * default width) for an empty column. Text is measured on a canvas, so
+   * rows outside the rendered window count too.
+   */
+  private _fitWidth(col: number): number | null {
+    const host = getComputedStyle(this);
+    const family = host.fontFamily || 'sans-serif';
+    const baseSize = parseFloat(host.fontSize) || 13;
+    if (this._measureCanvas === undefined) {
+      try {
+        this._measureCanvas = document.createElement('canvas').getContext('2d');
+      } catch {
+        this._measureCanvas = null;
+      }
+    }
+    const ctx = this._measureCanvas;
+    let widest = 0;
+    for (const [key, cell] of this._internalData) {
+      if (!cell.displayValue) continue;
+      const pos = parseKey(key);
+      if (pos.col !== col || pos.row >= this.rows) continue;
+      const fmt = cell.format;
+      const size = fmt?.fontSize ?? baseSize;
+      let width: number;
+      if (ctx) {
+        ctx.font = `${fmt?.italic ? 'italic ' : ''}${fmt?.bold ? 'bold ' : ''}${size}px ${family}`;
+        width = ctx.measureText(cell.displayValue).width;
+      } else {
+        width = cell.displayValue.length * size * 0.6; // no canvas (e.g. a test DOM): estimate
+      }
+      widest = Math.max(widest, width);
+    }
+    if (widest === 0) return null;
+    // Cell padding (2 x 4px), right border, and a little room so text isn't cut off
+    return this._clampWidth(Math.ceil(widest) + 15);
+  }
+
+  /** Pointer drag on a column header's right border: resize with a live preview. */
+  private _handleResizerPointerDown(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    const handle = e.currentTarget as HTMLElement;
+    const col = parseInt(handle.dataset.resizeCol!, 10);
+    e.preventDefault();
+    e.stopPropagation();
+    if (this._isEditing) this._commitEdit();
+
+    const cols = this._columnsToResize(col);
+    const startX = e.clientX;
+    const startWidth = this._colWidth(col);
+    const controller = new AbortController();
+    const { signal } = controller;
+    const setPreview = (preview: typeof this._resizePreview) => {
+      this._resizePreview = preview;
+      this._colWidthsRevision++;
+      this.requestUpdate();
+    };
+
+    const onMove = (ev: PointerEvent) => {
+      setPreview({ cols, width: this._clampWidth(startWidth + ev.clientX - startX) });
+    };
+    const finish = (commit: boolean) => {
+      controller.abort();
+      const width = this._resizePreview?.width;
+      setPreview(null);
+      if (commit && width !== undefined) {
+        this._announceWidths(cols, this._resizeColumns(cols.map((c) => ({ col: c, width })), 'user'));
+      }
+    };
+    document.addEventListener('pointermove', onMove, { signal });
+    document.addEventListener('pointerup', () => finish(true), { signal });
+    document.addEventListener('pointercancel', () => finish(false), { signal });
+    // Escape cancels the drag, restoring the width
+    document.addEventListener(
+      'keydown',
+      (ev) => {
+        if (ev.key !== 'Escape') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        finish(false);
+      },
+      { signal, capture: true }
+    );
+    window.addEventListener('blur', () => finish(false), { signal });
+  }
+
+  private _handleResizerDblClick(e: MouseEvent): void {
+    e.preventDefault();
+    e.stopPropagation();
+    const col = parseInt((e.currentTarget as HTMLElement).dataset.resizeCol!, 10);
+    this._autoFitUserColumns(this._columnsToResize(col));
   }
 
   private _undo(): void {
@@ -2212,6 +2645,21 @@ export class Y11nSpreadsheet extends LitElement {
       e.preventDefault();
       e.stopPropagation();
       this._fillSeriesInSelection(e.code === 'KeyD' ? 'down' : 'right');
+      return;
+    }
+
+    // Alt+Shift+Left / Alt+Shift+Right: narrow / widen the selected columns.
+    // Alt+Shift+0: fit them to their content. Allowed in read-only mode.
+    if (e.altKey && shift && !ctrl && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.code === 'Digit0')) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.code === 'Digit0') {
+        const { start, end } = this._selection.range;
+        this._autoFitUserColumns(Array.from({ length: end.col - start.col + 1 }, (_, i) => start.col + i));
+      } else {
+        const step = Y11nSpreadsheet.COL_RESIZE_STEP;
+        this._resizeSelectedColumns(e.key === 'ArrowLeft' ? -step : step);
+      }
       return;
     }
 
@@ -3327,8 +3775,8 @@ export class Y11nSpreadsheet extends LitElement {
 
     const startRow = Math.max(0, Math.floor(this._scrollTop / cellHeight) - buffer);
     const endRow = Math.min(this.rows, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
-    const startCol = Math.max(0, Math.floor(this._scrollLeft / cellWidth) - buffer);
-    const endCol = Math.min(this.cols, Math.ceil((this._scrollLeft + viewWidth) / cellWidth) + buffer);
+    const startCol = Math.max(0, this._colAt(this._scrollLeft) - buffer);
+    const endCol = Math.min(this.cols, this._colAt(this._scrollLeft + viewWidth) + 1 + buffer);
 
     // The active cell (roving tabindex target) and the reference cursor must
     // always be in the DOM. Render them individually rather than stretching
@@ -3359,7 +3807,7 @@ export class Y11nSpreadsheet extends LitElement {
     const viewWidth =
       gridEl.clientWidth || cellWidth * Y11nSpreadsheet.INITIAL_VIEW_COLS;
     const dataViewportWidth = Math.max(
-      cellWidth,
+      this._colWidth(col),
       viewWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH
     );
     // Subtract the sticky column header height so cells aren't scrolled
@@ -3368,8 +3816,8 @@ export class Y11nSpreadsheet extends LitElement {
 
     const cellTop = row * cellHeight;
     const cellBottom = cellTop + cellHeight;
-    const cellLeft = col * cellWidth;
-    const cellRight = cellLeft + cellWidth;
+    const cellLeft = this._colLeft(col);
+    const cellRight = cellLeft + this._colWidth(col);
 
     let nextScrollTop = this._scrollTop;
     if (cellTop < nextScrollTop) {
@@ -3390,6 +3838,9 @@ export class Y11nSpreadsheet extends LitElement {
       this._scrollLeft = nextScrollLeft;
       gridEl.scrollTop = nextScrollTop;
       gridEl.scrollLeft = nextScrollLeft;
+      // The browser clamps to the scrollable size without firing a scroll
+      // event when the position doesn't change: keep the state in sync
+      this._scrollLeft = gridEl.scrollLeft;
     }
   }
 
@@ -3436,11 +3887,11 @@ export class Y11nSpreadsheet extends LitElement {
 
     const { row, col } = this._selection.activeCell;
     const cellHeight = this._cellSize.height;
-    const cellWidth = this._cellSize.width;
+    const cellWidth = this._colWidth(col);
     const headerWidth = Y11nSpreadsheet.ROW_HEADER_WIDTH;
 
     const top = (row + 1) * cellHeight - this._scrollTop; // +1 for header, offset by scroll
-    const left = headerWidth + col * cellWidth - this._scrollLeft;
+    const left = headerWidth + this._colLeft(col) - this._scrollLeft;
 
     const styles: Record<string, string> = {
       display: 'block',
@@ -3574,6 +4025,22 @@ export class Y11nSpreadsheet extends LitElement {
     .ls-col-header,
     .ls-row-header {
       cursor: pointer;
+    }
+
+    /* Drag handle on a column header's right border */
+    .ls-col-resizer {
+      position: absolute;
+      top: 0;
+      right: -1px;
+      width: 7px;
+      height: 100%;
+      cursor: col-resize;
+      touch-action: none;
+      z-index: 1;
+    }
+
+    .ls-col-resizer:hover {
+      background: linear-gradient(to right, transparent 2px, var(--ls-resizer-color, #1a73e8) 2px, var(--ls-resizer-color, #1a73e8) 4px, transparent 4px);
     }
 
     .ls-col-header.in-selection,
@@ -3808,7 +4275,7 @@ export class Y11nSpreadsheet extends LitElement {
             aria-colcount="${this.cols + 1}"
             aria-readonly="${this.readOnly}"
             aria-multiselectable="true"
-            style="--cols: ${this.cols};"
+            style="--cols: ${this.cols}; grid-template-columns: ${this._gridTemplateColumns()};"
             tabindex="-1"
             @keydown="${this._handleGridKeydown}"
             @scroll="${this._handleScroll}"
@@ -3902,6 +4369,14 @@ export class Y11nSpreadsheet extends LitElement {
               @pointerdown="${this._handleHeaderPointerDown}"
             >
               ${colToLetter(c)}
+              <div
+                class="ls-col-resizer"
+                aria-hidden="true"
+                title="Drag to resize, double-click to fit (Alt+Shift+Left/Right, Alt+Shift+0)"
+                data-resize-col="${c}"
+                @pointerdown="${this._handleResizerPointerDown}"
+                @dblclick="${this._handleResizerDblClick}"
+              ></div>
             </div>
           `,
           (_start, size) => this._renderColumnSpacer(size)

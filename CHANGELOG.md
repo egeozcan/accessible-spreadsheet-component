@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Sorting: `sort(range, keys, { hasHeader })` sorts the rows of a range by one or more columns, and `sortSelection(direction)` / Alt+Shift+Up / Alt+Shift+Down sort the selection or the table around the active cell by its column, keeping a detected header row in place. Numbers, text, `FALSE`, `TRUE`, errors, then blanks (always last); stable. Formulas in moved rows keep pointing at their own row. Undoable; fires `data-change` (`operation: 'sort'`), `sort-change` and, for user sorts, the cancelable `before-sort`. User sorts refuse to move read-only cells.
 - `compareSortValues()` and `sortValueOf()` utility exports
+- Resizable columns: drag a column header's right border (Escape cancels), double-click it to fit the content, or press Alt+Shift+Left / Right (8px steps, announced) and Alt+Shift+0 (fit). Selected whole columns resize together. Works in read-only mode. API: `getColumnWidth()`, `getColumnWidths()`, `setColumnWidth()`, `setColumnWidths()`, `autoFitColumns()`. Undoable; fires `column-resize` and, for user resizes, the cancelable `before-column-resize`. Widths move with their columns on insert/delete.
 
 ### Fixed
 
