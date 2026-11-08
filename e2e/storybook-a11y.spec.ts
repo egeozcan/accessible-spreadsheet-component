@@ -40,6 +40,7 @@ const spreadsheetStories: StoryMeta[] = [
   { id: 'components-y11n-spreadsheet--find-and-fill', name: 'Find, Fill Handle and Row Insertion', waitFor: '#find-input' },
   { id: 'components-y11n-spreadsheet--sorting', name: 'Sorting', waitFor: 'y11n-spreadsheet' },
   { id: 'components-y11n-spreadsheet--column-widths', name: 'Column Widths', waitFor: 'y11n-spreadsheet' },
+  { id: 'components-y11n-spreadsheet--frozen-panes', name: 'Frozen Panes', waitFor: 'y11n-spreadsheet' },
 ];
 
 const toolbarStories: StoryMeta[] = [
