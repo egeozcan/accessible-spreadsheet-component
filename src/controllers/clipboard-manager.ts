@@ -203,6 +203,10 @@ export class ClipboardManager {
   /**
    * Parse an HTML string and extract table data with format information.
    * Prefers data-format (lossless) over inline styles (best-effort).
+   *
+   * `colspan`/`rowspan` are honoured the way Excel and Google Sheets write
+   * merged ranges: the value lands in the merge's top-left slot and the other
+   * slots it covers become empty cells, so later values keep their columns.
    */
   parseHTMLTableWithFormat(html: string): Array<Array<{ value: string; format?: CellFormat }>> | null {
     const parser = new DOMParser();
@@ -210,16 +214,21 @@ export class ClipboardManager {
     const table = doc.querySelector('table');
     if (!table) return null;
 
-    const rows: Array<Array<{ value: string; format?: CellFormat }>> = [];
-    const trElements = table.querySelectorAll('tr');
+    type ParsedCell = { value: string; format?: CellFormat };
+    // `table.rows` / `tr.cells` skip rows and cells of nested tables
+    const trElements = Array.from(table.rows);
+    const grid: ParsedCell[][] = trElements.map(() => []);
+    let cellCount = 0;
 
-    for (const tr of trElements) {
-      const cells: Array<{ value: string; format?: CellFormat }> = [];
-      const cellElements = tr.querySelectorAll('td, th');
-      for (const cellEl of cellElements) {
-        const el = cellEl as Element;
+    for (let r = 0; r < trElements.length; r++) {
+      const row = grid[r];
+      let col = 0;
+      for (const el of Array.from(trElements[r].cells)) {
+        // Skip slots already covered by a rowspan from a row above
+        while (row[col]) col++;
+
         const raw = el.getAttribute('data-raw');
-        const value = raw ?? (cellEl.textContent ?? '').trim();
+        const value = raw ?? (el.textContent ?? '').trim();
 
         // Try lossless data-format first, then parse inline styles
         let format: CellFormat | undefined;
@@ -238,14 +247,23 @@ export class ClipboardManager {
           }
         }
 
-        cells.push({ value, format });
-      }
-      if (cells.length > 0) {
-        rows.push(cells);
+        // The DOM clamps colSpan to 1..1000 and rowSpan to 0..65534;
+        // rowspan="0" means "to the end of the table".
+        const colSpan = Math.max(1, el.colSpan);
+        const rowSpan = el.rowSpan === 0 ? trElements.length - r : Math.min(el.rowSpan, trElements.length - r);
+        for (let dr = 0; dr < Math.max(1, rowSpan); dr++) {
+          for (let dc = 0; dc < colSpan; dc++) {
+            grid[r + dr][col + dc] = dr === 0 && dc === 0 ? { value, format } : { value: '' };
+          }
+        }
+        col += colSpan;
+        cellCount++;
       }
     }
 
-    return rows.length > 0 ? rows : null;
+    if (cellCount === 0) return null;
+    // Fill holes left by ragged rows next to a rowspan, so every slot is a cell
+    return grid.map((row) => Array.from(row, (cell) => cell ?? { value: '' }));
   }
 
   /**

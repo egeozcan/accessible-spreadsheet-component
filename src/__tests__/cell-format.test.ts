@@ -329,6 +329,92 @@ describe('Cell Format Utilities', () => {
       expect(result![0][0].value).toBe('=A1+1');
     });
 
+    describe('merged cells (colspan / rowspan)', () => {
+      const values = (html: string) =>
+        manager.parseHTMLTableWithFormat(html)!.map((row) => row.map((cell) => cell.value));
+
+      it('keeps later values in their columns after a colspan', () => {
+        const html = '<table><tr><td colspan="2">Title</td><td>C</td></tr><tr><td>a</td><td>b</td><td>c</td></tr></table>';
+        expect(values(html)).toEqual([
+          ['Title', '', 'C'],
+          ['a', 'b', 'c'],
+        ]);
+      });
+
+      it('shifts cells in following rows past a rowspan', () => {
+        const html = '<table><tr><td rowspan="2">A</td><td>B1</td></tr><tr><td>B2</td></tr></table>';
+        expect(values(html)).toEqual([
+          ['A', 'B1'],
+          ['', 'B2'],
+        ]);
+      });
+
+      it('handles a merge spanning rows and columns in the middle of a table', () => {
+        const html = `<table>
+          <tr><td>1</td><td colspan="2" rowspan="2">M</td><td>4</td></tr>
+          <tr><td>5</td><td>8</td></tr>
+          <tr><td>9</td><td>10</td><td>11</td><td>12</td></tr>
+        </table>`;
+        expect(values(html)).toEqual([
+          ['1', 'M', '', '4'],
+          ['5', '', '', '8'],
+          ['9', '10', '11', '12'],
+        ]);
+      });
+
+      it('keeps a row that is fully covered by a rowspan from the row above', () => {
+        const html = '<table><tr><td rowspan="2">A</td><td rowspan="2">B</td></tr><tr></tr><tr><td>x</td><td>y</td></tr></table>';
+        expect(values(html)).toEqual([
+          ['A', 'B'],
+          ['', ''],
+          ['x', 'y'],
+        ]);
+      });
+
+      it('clamps a rowspan that runs past the last row, and treats rowspan="0" as "to the end"', () => {
+        expect(values('<table><tr><td rowspan="5">A</td><td>B</td></tr><tr><td>C</td></tr></table>')).toEqual([
+          ['A', 'B'],
+          ['', 'C'],
+        ]);
+        expect(values('<table><tr><td rowspan="0">A</td><td>B</td></tr><tr><td>C</td></tr><tr><td>D</td></tr></table>')).toEqual([
+          ['A', 'B'],
+          ['', 'C'],
+          ['', 'D'],
+        ]);
+      });
+
+      it('parses Excel-style HTML with thead/tbody and a merged header', () => {
+        const html = `<html><body><table>
+          <thead><tr><th colspan="3" style="font-weight: bold">Q1 Sales</th></tr></thead>
+          <tbody><tr><td>Jan</td><td>Feb</td><td>Mar</td></tr></tbody>
+        </table></body></html>`;
+        const result = manager.parseHTMLTableWithFormat(html)!;
+        expect(result.map((row) => row.map((cell) => cell.value))).toEqual([
+          ['Q1 Sales', '', ''],
+          ['Jan', 'Feb', 'Mar'],
+        ]);
+        // Formatting stays on the merge's top-left cell only
+        expect(result[0][0].format?.bold).toBe(true);
+        expect(result[0][1].format).toBeUndefined();
+      });
+
+      it('ignores rows and cells of a nested table', () => {
+        const html = '<table><tr><td>A<table><tr><td>inner</td></tr></table></td><td>B</td></tr></table>';
+        const result = values(html);
+        expect(result).toHaveLength(1);
+        expect(result[0]).toHaveLength(2);
+        expect(result[0][1]).toBe('B');
+      });
+
+      it('fills holes in ragged rows next to a rowspan with empty cells', () => {
+        const html = '<table><tr><td>a</td><td>b</td><td rowspan="2">c</td></tr><tr><td>d</td></tr></table>';
+        expect(values(html)).toEqual([
+          ['a', 'b', 'c'],
+          ['d', '', ''],
+        ]);
+      });
+    });
+
     it('sanitizes data-format rejecting invalid types', () => {
       const html = '<table><tr><td data-format=\'{"bold":"yes","fontSize":-5,"textAlign":"justify"}\'>x</td></tr></table>';
       const result = manager.parseHTMLTableWithFormat(html);

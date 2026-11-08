@@ -246,8 +246,8 @@ y11n-spreadsheet {
 | `--ls-font-family` | `system-ui` | Font family |
 | `--ls-font-size` | `13px` | Base font size |
 | `--ls-text-color` | `#333` | Cell text color |
-| `--ls-cell-width` | `100px` | Column width |
-| `--ls-cell-height` | `28px` | Row height |
+| `--ls-cell-width` | `100px` | Column width (any CSS length, e.g. `7rem`) |
+| `--ls-cell-height` | `28px` | Row height (any CSS length) |
 | `--ls-header-bg` | `#f3f3f3` | Header background |
 | `--ls-border-color` | `#e0e0e0` | Cell border color |
 | `--ls-selection-border` | `2px solid #1a73e8` | Selection outline |

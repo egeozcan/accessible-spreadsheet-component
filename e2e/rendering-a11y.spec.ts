@@ -6,6 +6,8 @@ test.describe('Rendering & Accessibility', () => {
     await expect(grid).toHaveRole('grid');
     await expect(grid).toHaveAttribute('aria-rowcount');
     await expect(grid).toHaveAttribute('aria-colcount');
+    // Rectangular selections select many cells at once
+    await expect(grid).toHaveAttribute('aria-multiselectable', 'true');
   });
 
   test('grid has correct aria-rowcount and aria-colcount', async ({ spreadsheet }) => {

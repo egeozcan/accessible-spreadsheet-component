@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Pasting an HTML table with merged cells (`colspan`/`rowspan`), as Excel and Google Sheets put on the clipboard, no longer shifts the following values into the wrong columns. The value lands in the merge's top-left cell and the cells it covered are pasted as empty.
+- `--ls-cell-width` and `--ls-cell-height` now accept any CSS length (`7rem`, `2em`, `calc(...)`). Non-px values were read as px (`7rem` as 7px), which broke scrolling, virtual rendering and editor placement. Changing either variable at runtime now re-renders the grid.
+- The grid now sets `aria-multiselectable="true"`, since a rectangular selection selects many cells at once
+
 ## [1.2.0] - 2026-11-07
 
 ### Added
