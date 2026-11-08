@@ -297,6 +297,40 @@ export interface FreezeChangeDetail {
   source: 'user' | 'undo' | 'redo' | 'programmatic';
 }
 
+/** One column's filter: the displayed values whose rows stay visible. */
+export interface FilterColumn {
+  /** 0-based column index, inside the filter range */
+  col: number;
+  /** Displayed values (as shown, number formats included) to keep; `''` keeps blank cells */
+  values: string[];
+}
+
+/** The current filter, as returned by `getFilter()`. */
+export interface FilterInfo {
+  /** The filtered range; its first row is the header row, which is never hidden */
+  range: SelectionRange;
+  /** Columns with criteria, in column order */
+  columns: FilterColumn[];
+  /** Rows the filter hides, ascending */
+  hiddenRows: number[];
+}
+
+/**
+ * Detail for `filter-change` (after a filter was added, changed, reapplied
+ * or removed, also on undo/redo and when rows/columns move it) and the
+ * cancelable `before-filter` (before a user change, describing the result).
+ */
+export interface FilterChangeDetail {
+  /** The filtered range, or `null` when the filter was removed */
+  range: SelectionRange | null;
+  /** Columns with criteria, in column order */
+  columns: FilterColumn[];
+  /** Rows the filter hides, ascending */
+  hiddenRows: number[];
+  /** What triggered the change */
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
+}
+
 /**
  * Detail for the `format-change` event, fired when cell formatting is modified.
  */

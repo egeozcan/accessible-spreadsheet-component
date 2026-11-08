@@ -8,6 +8,16 @@ import {
 import { parseDelimited, quoteDelimitedField } from '../utils/delimited.js';
 import { shiftFormulaReferences } from '../utils/references.js';
 
+/** Maps the index of a pasted row to the grid row it goes to (-1 drops it). */
+export type RowMapper = (index: number) => number;
+
+/** Every row of a range, ascending. */
+function rangeRows(range: SelectionRange): number[] {
+  const rows: number[] = [];
+  for (let r = range.start.row; r <= range.end.row; r++) rows.push(r);
+  return rows;
+}
+
 /** A single cell update produced by a paste operation. */
 export interface PasteUpdate {
   /** Cell key in `"row:col"` format */
@@ -25,6 +35,8 @@ export interface PasteUpdate {
 export class ClipboardManager {
   /** Source range and data from the last internal copy/cut, used for reference adjustment on paste */
   private _copySourceRange: SelectionRange | null = null;
+  /** The rows of `_copySourceRange` that were copied; null for all of them */
+  private _copySourceRows: number[] | null = null;
   private _copySourceData: GridData | null = null;
   /** The TSV text we last wrote to the clipboard, used to detect external overwrites */
   private _lastWrittenText: string | null = null;
@@ -36,12 +48,17 @@ export class ClipboardManager {
    *
    * @param data - The grid data to read cell values from
    * @param range - The rectangular range to copy
+   * @param rows - The rows of the range to copy, ascending (default: all of
+   *   them). Rows left out (e.g. hidden by a filter) are skipped, so the copy
+   *   holds the remaining rows next to each other.
    */
-  async copy(data: GridData, range: SelectionRange): Promise<void> {
+  async copy(data: GridData, range: SelectionRange, rows?: number[]): Promise<void> {
     this._copySourceRange = range;
+    const copied = rows ?? rangeRows(range);
+    this._copySourceRows = rows ?? null;
     // Snapshot only the cells in the range so later mutations (e.g. cut) don't invalidate the data
     const snapshot: GridData = new Map();
-    for (let r = range.start.row; r <= range.end.row; r++) {
+    for (const r of copied) {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const key = cellKey(r, c);
         const cell = data.get(key);
@@ -51,9 +68,9 @@ export class ClipboardManager {
       }
     }
     this._copySourceData = snapshot;
-    const tsv = this.serializeRange(data, range);
+    const tsv = this.serializeRange(data, range, copied);
     this._lastWrittenText = tsv;
-    const htmlStr = this._serializeRangeAsHTML(data, range);
+    const htmlStr = this._serializeRangeAsHTML(data, range, copied);
 
     try {
       // Try writing both HTML and plain text using ClipboardItem
@@ -79,12 +96,14 @@ export class ClipboardManager {
    *
    * @param data - The grid data to read cell values from
    * @param range - The rectangular range to cut
+   * @param rows - The rows of the range to cut (default: all), as for `copy()`
    * @returns Array of cell keys (in `"row:col"` format) that were included in the cut
    */
-  async cut(data: GridData, range: SelectionRange): Promise<string[]> {
-    await this.copy(data, range);
+  async cut(data: GridData, range: SelectionRange, rows?: number[]): Promise<string[]> {
+    const cutRows = rows ?? rangeRows(range);
+    await this.copy(data, range, cutRows);
     const keys: string[] = [];
-    for (let r = range.start.row; r <= range.end.row; r++) {
+    for (const r of cutRows) {
       for (let c = range.start.col; c <= range.end.col; c++) {
         keys.push(cellKey(r, c));
       }
@@ -101,14 +120,18 @@ export class ClipboardManager {
    * @param targetCol - 0-indexed column of the top-left paste destination
    * @param maxRows - Grid row count (for bounds clamping)
    * @param maxCols - Grid column count (for bounds clamping)
+   * @param rowFor - The grid row the `i`-th pasted row goes to, or -1 to drop
+   *   it (default: `targetRow + i`). Lets a paste skip rows hidden by a filter.
    * @returns Array of cell updates to apply, or null if clipboard is empty/inaccessible
    */
   async paste(
     targetRow: number,
     targetCol: number,
     maxRows: number,
-    maxCols: number
+    maxCols: number,
+    rowFor?: RowMapper
   ): Promise<PasteUpdate[] | null> {
+    const toRow = rowFor ?? ((i: number) => targetRow + i);
     // Try internal paste with formula reference adjustment, but only if
     // the system clipboard still contains what we wrote (i.e. the user
     // hasn't copied something from an external app since the last copy).
@@ -124,7 +147,7 @@ export class ClipboardManager {
         clipboardMatchesInternal = true;
       }
       if (clipboardMatchesInternal) {
-        const internalResult = this._pasteInternal(targetRow, targetCol, maxRows, maxCols);
+        const internalResult = this._pasteInternal(targetRow, targetCol, maxRows, maxCols, toRow);
         if (internalResult) return internalResult;
       }
     }
@@ -138,7 +161,7 @@ export class ClipboardManager {
           const htmlText = await blob.text();
           const parsed = this.parseHTMLTableWithFormat(htmlText);
           if (parsed) {
-            return this._applyParsedRowsWithFormat(parsed, targetRow, targetCol, maxRows, maxCols);
+            return this._applyParsedRowsWithFormat(parsed, targetCol, maxRows, maxCols, toRow);
           }
         }
       }
@@ -154,7 +177,7 @@ export class ClipboardManager {
       return null;
     }
 
-    return this.parseTSV(text, targetRow, targetCol, maxRows, maxCols);
+    return this.parseTSV(text, targetRow, targetCol, maxRows, maxCols, toRow);
   }
 
   /**
@@ -165,21 +188,25 @@ export class ClipboardManager {
     targetRow: number,
     targetCol: number,
     maxRows: number,
-    maxCols: number
+    maxCols: number,
+    rowFor: RowMapper = (i) => targetRow + i
   ): PasteUpdate[] | null {
     const srcRange = this._copySourceRange;
     const srcData = this._copySourceData;
     if (!srcRange || !srcData) return null;
 
-    const rowOffset = targetRow - srcRange.start.row;
     const colOffset = targetCol - srcRange.start.col;
     const updates: PasteUpdate[] = [];
 
-    for (let r = srcRange.start.row; r <= srcRange.end.row; r++) {
+    (this._copySourceRows ?? rangeRows(srcRange)).forEach((r, i) => {
+      const newRow = rowFor(i);
+      if (newRow < 0 || newRow >= maxRows) return;
+      // Each row shifts its references by how far it actually moved, which
+      // differs per row when copied or pasted rows skip hidden ones
+      const rowOffset = newRow - r;
       for (let c = srcRange.start.col; c <= srcRange.end.col; c++) {
-        const newRow = r + rowOffset;
         const newCol = c + colOffset;
-        if (newRow >= maxRows || newCol >= maxCols) continue;
+        if (newCol >= maxCols) continue;
 
         const cell = srcData.get(cellKey(r, c));
         let value = cell?.rawValue ?? '';
@@ -195,7 +222,7 @@ export class ClipboardManager {
         }
         updates.push(update);
       }
-    }
+    });
 
     return updates;
   }
@@ -271,17 +298,17 @@ export class ClipboardManager {
    */
   private _applyParsedRowsWithFormat(
     rows: Array<Array<{ value: string; format?: CellFormat }>>,
-    targetRow: number,
     targetCol: number,
     maxRows: number,
-    maxCols: number
+    maxCols: number,
+    rowFor: RowMapper
   ): PasteUpdate[] {
     const updates: PasteUpdate[] = [];
     for (let r = 0; r < rows.length; r++) {
+      const row = rowFor(r);
       for (let c = 0; c < rows[r].length; c++) {
-        const row = targetRow + r;
         const col = targetCol + c;
-        if (row < maxRows && col < maxCols) {
+        if (row >= 0 && row < maxRows && col < maxCols) {
           const { value, format } = rows[r][c];
           const update: PasteUpdate = { id: cellKey(row, col), value };
           if (format) update.format = format;
@@ -303,6 +330,7 @@ export class ClipboardManager {
    * @param targetCol - 0-indexed column of the top-left paste destination
    * @param maxRows - Grid row count (for bounds clamping)
    * @param maxCols - Grid column count (for bounds clamping)
+   * @param rowFor - The grid row the `i`-th pasted row goes to, or -1 to drop it
    * @returns Array of cell updates with keys and values
    */
   parseTSV(
@@ -310,17 +338,18 @@ export class ClipboardManager {
     targetRow: number,
     targetCol: number,
     maxRows: number,
-    maxCols: number
+    maxCols: number,
+    rowFor: RowMapper = (i) => targetRow + i
   ): Array<{ id: string; value: string }> {
     const rows = parseDelimited(text, '\t');
     const updates: Array<{ id: string; value: string }> = [];
 
     for (let r = 0; r < rows.length; r++) {
       const cells = rows[r];
+      const row = rowFor(r);
       for (let c = 0; c < cells.length; c++) {
-        const row = targetRow + r;
         const col = targetCol + c;
-        if (row < maxRows && col < maxCols) {
+        if (row >= 0 && row < maxRows && col < maxCols) {
           updates.push({ id: cellKey(row, col), value: cells[c] });
         }
       }
@@ -348,10 +377,10 @@ export class ClipboardManager {
 
   // ─── Serialization ──────────────────────────────────
 
-  private serializeRange(data: GridData, range: SelectionRange): string {
+  private serializeRange(data: GridData, range: SelectionRange, rows = rangeRows(range)): string {
     const lines: string[] = [];
 
-    for (let r = range.start.row; r <= range.end.row; r++) {
+    for (const r of rows) {
       const cols: string[] = [];
       for (let c = range.start.col; c <= range.end.col; c++) {
         const cell = data.get(cellKey(r, c));
@@ -368,10 +397,10 @@ export class ClipboardManager {
    * Convert a selection range to an HTML table string.
    * Includes inline styles for visual formatting and data-format for lossless round-trip.
    */
-  private _serializeRangeAsHTML(data: GridData, range: SelectionRange): string {
+  private _serializeRangeAsHTML(data: GridData, range: SelectionRange, rowList = rangeRows(range)): string {
     const rows: string[] = [];
 
-    for (let r = range.start.row; r <= range.end.row; r++) {
+    for (const r of rowList) {
       const cells: string[] = [];
       for (let c = range.start.col; c <= range.end.col; c++) {
         const cell = data.get(cellKey(r, c));

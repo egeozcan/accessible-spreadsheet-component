@@ -33,6 +33,9 @@ export type {
   SortDetail,
   ColumnResizeDetail,
   FreezeChangeDetail,
+  FilterColumn,
+  FilterInfo,
+  FilterChangeDetail,
 } from './types.js';
 export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual, formatNumber, dateToSerial, dateSerialToDate } from './types.js';
 export { parseDelimited, serializeDelimited, quoteDelimitedField } from './utils/delimited.js';

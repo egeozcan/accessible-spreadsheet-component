@@ -1,4 +1,4 @@
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, svg } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { styleMap } from 'lit/directives/style-map.js';
@@ -26,6 +26,9 @@ import {
   type SortDetail,
   type ColumnResizeDetail,
   type FreezeChangeDetail,
+  type FilterColumn,
+  type FilterInfo,
+  type FilterChangeDetail,
   cellKey,
   colToLetter,
   coordToRef,
@@ -77,6 +80,18 @@ function layoutWithGaps<T>(
   return out;
 }
 
+/** Index of the first element of a sorted array that is >= `value` (its length if none). */
+function lowerBound(sorted: ArrayLike<number>, value: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /** Contiguous `[start, end)` indices plus any `extras` outside that window, sorted. */
 function windowWithExtras(start: number, end: number, extras: number[]): number[] {
   const out: number[] = [];
@@ -86,6 +101,10 @@ function windowWithExtras(start: number, end: number, extras: number[]): number[
   }
   return out.sort((a, b) => a - b);
 }
+
+/** Filter button icons: a dropdown chevron, and a funnel for a filtered column. */
+const CHEVRON_ICON = svg`<svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M1.5 3.5 5 7l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
+const FUNNEL_ICON = svg`<svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M1 1.5h8L6 5.2V9L4 8V5.2z" fill="currentColor"/></svg>`;
 
 const ARROW_DELTAS: Record<string, [number, number]> = {
   ArrowUp: [-1, 0],
@@ -176,6 +195,35 @@ interface SortBatch {
   cells: StructureCellDelta[];
 }
 
+/**
+ * A filter: its range (the first row is the header), the displayed values
+ * each filtered column keeps, and the rows it hides. Treated as immutable:
+ * every change builds a new one, so undo can hold on to old states.
+ */
+interface FilterState {
+  range: SelectionRange;
+  /** Column -> displayed values to keep (`''` keeps blank cells) */
+  criteria: Map<number, Set<string>>;
+  /**
+   * Rows hidden as of when the filter was last applied. Editing a cell
+   * doesn't re-filter (as in Excel): rows only hide or reappear when the
+   * filter is changed or reapplied.
+   */
+  hidden: Set<number>;
+}
+
+/** State of the open filter menu. */
+interface FilterMenuState {
+  col: number;
+  /** The column's distinct displayed values, in ascending sort order; `''` is (Blanks) */
+  values: string[];
+  /** Values that are checked */
+  checked: Set<string>;
+  search: string;
+  /** Index of the list item with the roving tab stop (0 = Select all) */
+  focus: number;
+}
+
 interface CommandBatch {
   deltas: CellDelta[];
   selectionBefore: SelectionSnapshot;
@@ -187,6 +235,11 @@ interface CommandBatch {
   sort?: SortBatch;
   /** Set for column width changes, which touch no cells */
   widths?: WidthDelta[];
+  /**
+   * Filter before/after. On its own (no deltas, structure or sort), the
+   * batch is a filter change; structure batches carry it when they move the filter.
+   */
+  filter?: { before: FilterState | null; after: FilterState | null };
 }
 
 const STRUCTURE_OPERATIONS: Record<string, DataChangeOperation> = {
@@ -308,6 +361,9 @@ export class Y11nSpreadsheet extends LitElement {
   /** Cells a fill-handle drag would fill, for the drag preview */
   @state() private _fillPreview: SelectionRange | null = null;
 
+  /** The open filter menu, if any */
+  @state() private _filterMenu: FilterMenuState | null = null;
+
   /** Track scroll position for virtual rendering */
   @state() private _scrollTop = 0;
   @state() private _scrollLeft = 0;
@@ -320,7 +376,7 @@ export class Y11nSpreadsheet extends LitElement {
 
   // ─── Controllers / Managers ─────────────────────────
 
-  private _selection = new SelectionManager(this, this.rows, this.cols);
+  private _selection = new SelectionManager(this, this.rows, this.cols, (row) => this._isRowHidden(row));
   private _formulaEngine = new FormulaEngine();
   private _clipboardManager = new ClipboardManager();
 
@@ -388,6 +444,17 @@ export class Y11nSpreadsheet extends LitElement {
   private _colLayout: { key: string; offsets: Float64Array } | null = null;
   private _measureCanvas: CanvasRenderingContext2D | null | undefined;
 
+  /** The filter, if any (see `FilterState`) */
+  private _filter: FilterState | null = null;
+  /** Bumped whenever the filter changes, to invalidate `_rowLayout` and stale async work */
+  private _filterRevision = 0;
+  /** Cached ascending list of the rows not hidden by the filter, see `_visibleRowList()` */
+  private _rowLayout: { key: string; visible: Int32Array | null } | null = null;
+  /** Removes the filter menu's outside-click listener */
+  private _filterMenuCleanup: (() => void) | null = null;
+  /** Most values the filter menu lists at once; the search box narrows the rest */
+  private static readonly FILTER_MENU_MAX_VALUES = 500;
+
   private static readonly MIN_COL_WIDTH = 20;
   private static readonly MAX_COL_WIDTH = 2000;
   /** Alt+Shift+Left/Right step, in px */
@@ -407,6 +474,7 @@ export class Y11nSpreadsheet extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this._cellSizeObserver?.disconnect();
+    this._closeFilterMenu(false);
   }
 
   protected firstUpdated(): void {
@@ -626,19 +694,7 @@ export class Y11nSpreadsheet extends LitElement {
    */
   sort(range: SelectionRange, keys: SortKey | SortKey[], options: SortOptions = {}): boolean {
     const keyList = Array.isArray(keys) ? keys : [keys];
-    const start = range?.start;
-    const end = range?.end;
-    const isIndex = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 0;
-    if (!start || !end || ![start.row, start.col, end.row, end.col].every(isIndex)) {
-      throw new RangeError('sort: range must have non-negative integer start and end coordinates');
-    }
-    const normalized: SelectionRange = {
-      start: { row: Math.min(start.row, end.row), col: Math.min(start.col, end.col) },
-      end: { row: Math.max(start.row, end.row), col: Math.max(start.col, end.col) },
-    };
-    if (normalized.end.row >= this.rows || normalized.end.col >= this.cols) {
-      throw new RangeError(`sort: the range is outside the grid (${this.rows} rows, ${this.cols} columns)`);
-    }
+    const normalized = this._normalizeRange(range, 'sort');
     if (keyList.length === 0) throw new RangeError('sort: at least one key is required');
     const resolved = keyList.map((key) => {
       if (!key || !Number.isInteger(key.col) || key.col < normalized.start.col || key.col > normalized.end.col) {
@@ -677,6 +733,18 @@ export class Y11nSpreadsheet extends LitElement {
     const active = this._selection.activeCell;
     const selected = this._selection.range;
     const single = selected.start.row === selected.end.row && selected.start.col === selected.end.col;
+    const filterRange = this._filter?.range;
+    if (
+      single &&
+      filterRange &&
+      active.row >= filterRange.start.row &&
+      active.row <= filterRange.end.row &&
+      active.col >= filterRange.start.col &&
+      active.col <= filterRange.end.col
+    ) {
+      // Inside a filter: sort its table, below its header row
+      return this._sortRange({ range: filterRange, keys: [{ col: active.col, direction }], hasHeader: true }, 'user');
+    }
     let range = single ? this._currentRegion(active.row, active.col) : this._clipToData(selected, active);
     // Sorting one column of a wider table would split its records apart, so
     // sort the whole table instead (Excel's default when it asks)
@@ -801,6 +869,161 @@ export class Y11nSpreadsheet extends LitElement {
     this._setFrozen(0, 0, 'programmatic');
   }
 
+  // ─── Filter API ──────────────────────────────────────
+
+  /**
+   * Filter `range`: its first row is the header row (never hidden), and each
+   * row below it stays visible only if, in every column of `columns`, it
+   * displays one of that column's `values` (`''` matches blank cells).
+   * Values are compared as displayed, number formats included. Replaces any
+   * existing filter; with no `columns`, adds filter buttons without hiding
+   * rows. Rows don't re-filter as cells are edited: call `reapplyFilter()`.
+   *
+   * One undoable step; fires `filter-change` (not `before-filter`). Throws a
+   * RangeError for a range outside the grid or a column outside the range.
+   *
+   * @param range - The table to filter, header row first
+   * @param columns - Criteria per column
+   */
+  setFilter(range: SelectionRange, columns: FilterColumn[] = []): void {
+    const normalized = this._normalizeRange(range, 'setFilter');
+    const criteria = new Map<number, Set<string>>();
+    for (const column of columns) {
+      if (!column || !Number.isInteger(column.col) || column.col < normalized.start.col || column.col > normalized.end.col) {
+        throw new RangeError(`setFilter: column ${column?.col} is outside the range`);
+      }
+      criteria.set(column.col, new Set(Array.from(column.values ?? [], String)));
+    }
+    this._syncPendingData();
+    this._commitFilter(this._evaluateFilter(normalized, criteria), 'programmatic');
+  }
+
+  /**
+   * Set (or, with `null`, clear) one column's criteria in the current filter
+   * and re-filter the rows. See `setFilter()`. Throws if there is no filter
+   * or `col` is outside its range.
+   *
+   * @param col - 0-based column inside the filter range
+   * @param values - Displayed values to keep (`''` keeps blanks), or null for all
+   */
+  setColumnFilter(col: number, values: string[] | null): void {
+    const filter = this._filter;
+    if (!filter) throw new RangeError('setColumnFilter: there is no filter; call setFilter() first');
+    if (!Number.isInteger(col) || col < filter.range.start.col || col > filter.range.end.col) {
+      throw new RangeError(`setColumnFilter: column ${col} is outside the filter range`);
+    }
+    const criteria = new Map(filter.criteria);
+    if (values === null) criteria.delete(col);
+    else criteria.set(col, new Set(Array.from(values, String)));
+    this._syncPendingData();
+    this._commitFilter(this._evaluateFilter(filter.range, criteria), 'programmatic');
+  }
+
+  /** Re-filter the rows with the current criteria (after cells were edited). Undoable. */
+  reapplyFilter(): void {
+    const filter = this._filter;
+    if (!filter) return;
+    this._syncPendingData();
+    this._commitFilter(this._evaluateFilter(filter.range, filter.criteria), 'programmatic');
+  }
+
+  /** Remove the filter, showing every row. Undoable; fires `filter-change`. */
+  removeFilter(): void {
+    this._commitFilter(null, 'programmatic');
+  }
+
+  /** The current filter, or null. */
+  getFilter(): FilterInfo | null {
+    return this._filter ? this._filterInfo(this._filter) : null;
+  }
+
+  /**
+   * Whether the filter hides a row.
+   *
+   * @param row - 0-based row index
+   */
+  isRowHidden(row: number): boolean {
+    return this._isRowHidden(row);
+  }
+
+  /**
+   * Add or remove a filter as the user would with Ctrl+Shift+L: removes the
+   * filter if there is one, otherwise filters the selection, or the block of
+   * data around the active cell when a single cell is selected, using its
+   * first row as the header. Allowed in read-only mode, fires the cancelable
+   * `before-filter`, and announces the outcome. Use this to back a "Filter" button.
+   *
+   * @returns Whether the filter was added or removed
+   */
+  toggleFilter(): boolean {
+    if (this._pasteInProgress) return false;
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    if (this._filter) {
+      return this._announceFilterCommit(this._commitFilter(null, 'user'), 'Filter removed');
+    }
+    const active = this._selection.activeCell;
+    const selected = this._selection.range;
+    const single = selected.start.row === selected.end.row && selected.start.col === selected.end.col;
+    const range = single ? this._currentRegion(active.row, active.col) : this._clipToData(selected, active);
+    if (!range) {
+      this._modeAnnouncement = 'Nothing to filter: select a table whose first row has its headers';
+      return false;
+    }
+    const ref = `${coordToRef(range.start)}:${coordToRef(range.end)}`;
+    return this._announceFilterCommit(
+      this._commitFilter(this._evaluateFilter(range, new Map()), 'user'),
+      `Filter added to ${ref}. Press Alt+Down on a header cell for filter options`
+    );
+  }
+
+  /**
+   * Open the filter menu of a column (default: the active cell's), as
+   * Alt+Down on a filter header cell does, moving the active cell to that
+   * header and focusing the menu's search box.
+   *
+   * @param col - 0-based column inside the filter range
+   * @returns Whether the menu opened (false without a filter or outside its columns)
+   */
+  async openFilterMenu(col?: number): Promise<boolean> {
+    const filter = this._filter;
+    if (!filter) return false;
+    const c = col ?? this._selection.activeCell.col;
+    if (c < filter.range.start.col || c > filter.range.end.col) return false;
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    const headerRow = filter.range.start.row;
+    const active = this._selection.activeCell;
+    if (active.row !== headerRow || active.col !== c || this._selection.range.end.row !== headerRow) {
+      this._selection.moveTo(headerRow, c);
+      this._dispatchSelectionChange();
+    }
+    this._ensureCellVisible(headerRow, c);
+    const values = this._filterMenuValues(c);
+    this._filterMenu = {
+      col: c,
+      values,
+      checked: this._checkedForCriteria(values, filter.criteria.get(c)),
+      search: '',
+      focus: 0,
+    };
+    if (!this._filterMenuCleanup) {
+      // Clicking anywhere outside the menu closes it, like a native dropdown.
+      // Bubble phase, so the menu's own filter button can toggle it closed.
+      const onPointerDown = (e: PointerEvent) => {
+        const menuEl = this.renderRoot.querySelector('.ls-filter-menu');
+        if (menuEl && e.composedPath().includes(menuEl)) return;
+        this._closeFilterMenu(false);
+      };
+      document.addEventListener('pointerdown', onPointerDown);
+      this._filterMenuCleanup = () => document.removeEventListener('pointerdown', onPointerDown);
+    }
+    this._modeAnnouncement = '';
+    await this.updateComplete;
+    this.renderRoot.querySelector<HTMLInputElement>('#filter-search')?.focus();
+    return true;
+  }
+
   // ─── Find API ────────────────────────────────────────
 
   /**
@@ -920,7 +1143,8 @@ export class Y11nSpreadsheet extends LitElement {
     let allHaveProp = true;
     let locked = 0;
 
-    for (let r = range.start.row; r <= range.end.row; r++) {
+    // Rows hidden by the filter are left alone, as by every user edit
+    for (const r of this._visibleRowsBetween(range.start.row, range.end.row)) {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const id = cellKey(r, c);
         if (this._isCellLocked(id)) {
@@ -1262,6 +1486,12 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _restoreSelection(snapshot: SelectionSnapshot): void {
     this._selection.setSelection(snapshot.anchor, snapshot.head, snapshot.active);
+    const active = this._selection.activeCell;
+    if (this._isRowHidden(active.row)) {
+      // The active cell must be on a visible row (it holds the focus)
+      const cell = { row: this._nearestVisibleRow(active.row), col: active.col };
+      this._selection.setSelection(cell, cell, null);
+    }
     this._dispatchSelectionChange();
     this.updateComplete.then(() => this._focusActiveCell());
   }
@@ -1377,9 +1607,14 @@ export class Y11nSpreadsheet extends LitElement {
     this.requestUpdate();
   }
 
+  /** Whether a batch only changes the view (column widths, the filter), not the data. */
+  private _isViewBatch(batch: CommandBatch): boolean {
+    return !!batch.widths || (!!batch.filter && !batch.structure);
+  }
+
   private _applyBatch(batch: CommandBatch, source: ChangeSource): void {
-    // Column widths are layout, not data: they must not make pending writes look stale
-    if (!batch.widths) this._mutationCount++;
+    // Column widths and filters are views, not data: they must not make pending writes look stale
+    if (!this._isViewBatch(batch)) this._mutationCount++;
     if (batch.structure) {
       this._applyStructureBatch(batch, 'after', source);
       return;
@@ -1390,6 +1625,10 @@ export class Y11nSpreadsheet extends LitElement {
     }
     if (batch.widths) {
       this._applyWidthBatch(batch, 'after', source);
+      return;
+    }
+    if (batch.filter) {
+      this._applyFilterBatch(batch, 'after', source);
       return;
     }
     for (const delta of batch.deltas) {
@@ -1404,7 +1643,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _revertBatch(batch: CommandBatch): void {
-    if (!batch.widths) this._mutationCount++;
+    if (!this._isViewBatch(batch)) this._mutationCount++;
     if (batch.structure) {
       this._applyStructureBatch(batch, 'before', 'undo');
       return;
@@ -1415,6 +1654,10 @@ export class Y11nSpreadsheet extends LitElement {
     }
     if (batch.widths) {
       this._applyWidthBatch(batch, 'before', 'undo');
+      return;
+    }
+    if (batch.filter) {
+      this._applyFilterBatch(batch, 'before', 'undo');
       return;
     }
     for (const delta of batch.deltas) {
@@ -1638,6 +1881,11 @@ export class Y11nSpreadsheet extends LitElement {
         this._modeAnnouncement = `Cannot delete: the ${noun}s contain read-only cells`;
         return false;
       }
+      if (kind === 'delete' && axis === 'row' && this._visibleRowsBetween(index, index + count - 1).length < count) {
+        // Deleting would also delete rows the user can't see
+        this._modeAnnouncement = 'Cannot delete: some of the rows are hidden by the filter';
+        return false;
+      }
       const detail: StructureChangeDetail = { ...change, source };
       const event = new CustomEvent<StructureChangeDetail>('before-structure-change', {
         detail,
@@ -1673,6 +1921,7 @@ export class Y11nSpreadsheet extends LitElement {
         colWidths: this._computeStructureWidths(change),
       },
     };
+    if (this._filter) batch.filter = { before: this._filter, after: this._filterAfterStructureChange(change) };
     this._commitBatch(batch, source);
 
     if (source === 'user') {
@@ -1817,6 +2066,13 @@ export class Y11nSpreadsheet extends LitElement {
       this._frozenRowCount !== frozenBefore.rows || this._frozenColCount !== frozenBefore.cols
         ? { rows: this._frozenRowCount, cols: this._frozenColCount }
         : null;
+    let filterMoved = false;
+    if (batch.filter) {
+      this._filter = side === 'after' ? batch.filter.after : batch.filter.before;
+      this._filterRevision++;
+      filterMoved = !this._filtersEqual(batch.filter.before, batch.filter.after);
+      if (this._filterMenu) this._closeFilterMenu(false);
+    }
     this._selection.setBounds(this.rows, this.cols);
     this._lastSyncedDataRef = this.data;
 
@@ -1835,6 +2091,7 @@ export class Y11nSpreadsheet extends LitElement {
     });
     this._dispatchStructureChange({ ...change, kind: applied.kind, source });
     if (frozen) this._dispatchFreezeChange({ ...frozen, source });
+    if (filterMoved) this._dispatchFilterChange(this._filterDetail(this._filter, source));
     if (movedWidths.length > 0) {
       // So hosts that save widths on column-resize see them move
       this.dispatchEvent(
@@ -1858,8 +2115,11 @@ export class Y11nSpreadsheet extends LitElement {
 
     const { range, hasHeader } = spec;
     const first = range.start.row + (hasHeader ? 1 : 0);
-    const order = this._computeSortOrder(first, range.end.row, spec.keys);
-    const moved = order.filter((src, i) => src !== first + i);
+    // Rows hidden by the filter stay where they are: only the visible rows are sorted
+    const targets = this._visibleRowsBetween(first, range.end.row);
+    const skipped = range.end.row - first + 1 - targets.length;
+    const order = this._computeSortOrder(targets, spec.keys);
+    const moved = order.filter((src, i) => src !== targets[i]);
     if (moved.length === 0) {
       if (source === 'user') this._modeAnnouncement = 'Already sorted';
       return false;
@@ -1900,7 +2160,7 @@ export class Y11nSpreadsheet extends LitElement {
       }
     }
 
-    const cells = this._computeSortCells(order, first, range.start.col, range.end.col);
+    const cells = this._computeSortCells(order, targets, range.start.col, range.end.col);
     const selection = this._snapshotSelection();
     const batch: CommandBatch = {
       deltas: [],
@@ -1922,15 +2182,17 @@ export class Y11nSpreadsheet extends LitElement {
       const sortedRef = `${coordToRef({ row: first, col: range.start.col })}:${coordToRef(range.end)}`;
       const by = spec.keys.map((k) => `column ${colToLetter(k.col)}, ${k.direction}`).join(', then ');
       this._modeAnnouncement =
-        `Sorted ${sortedRef} by ${by}` + (hasHeader ? `. Row ${range.start.row + 1} kept as the header` : '');
+        `Sorted ${sortedRef} by ${by}` +
+        (hasHeader ? `. Row ${range.start.row + 1} kept as the header` : '') +
+        (skipped > 0 ? `. ${skipped} hidden row${skipped === 1 ? ' was' : 's were'} not moved` : '');
     }
     return true;
   }
 
-  /** Source row for each target row `first..last`, in sorted order (stable). */
-  private _computeSortOrder(first: number, last: number, keys: SortDetail['keys']): number[] {
+  /** Source row for each of the `targets` rows, in sorted order (stable). */
+  private _computeSortOrder(targets: number[], keys: SortDetail['keys']): number[] {
     const rows: Array<{ row: number; values: SortValue[] }> = [];
-    for (let row = first; row <= last; row++) {
+    for (const row of targets) {
       rows.push({
         row,
         values: keys.map((k) => {
@@ -1957,10 +2219,10 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   /** Before/after state of every cell in columns `c0..c1` that the sort changes. */
-  private _computeSortCells(order: number[], first: number, c0: number, c1: number): StructureCellDelta[] {
+  private _computeSortCells(order: number[], targets: number[], c0: number, c1: number): StructureCellDelta[] {
     const cells: StructureCellDelta[] = [];
     order.forEach((src, i) => {
-      const target = first + i;
+      const target = targets[i];
       if (src === target) return;
       for (let c = c0; c <= c1; c++) {
         const id = cellKey(target, c);
@@ -2106,6 +2368,521 @@ export class Y11nSpreadsheet extends LitElement {
     return bold(start.row) && !bold(start.row + 1);
   }
 
+  // ─── Filtering ──────────────────────────────────────
+
+  /** Normalize a range given to an API method; throws if it isn't inside the grid. */
+  private _normalizeRange(range: SelectionRange, method: string): SelectionRange {
+    const start = range?.start;
+    const end = range?.end;
+    const isIndex = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 0;
+    if (!start || !end || ![start.row, start.col, end.row, end.col].every(isIndex)) {
+      throw new RangeError(`${method}: range must have non-negative integer start and end coordinates`);
+    }
+    const normalized: SelectionRange = {
+      start: { row: Math.min(start.row, end.row), col: Math.min(start.col, end.col) },
+      end: { row: Math.max(start.row, end.row), col: Math.max(start.col, end.col) },
+    };
+    if (normalized.end.row >= this.rows || normalized.end.col >= this.cols) {
+      throw new RangeError(`${method}: the range is outside the grid (${this.rows} rows, ${this.cols} columns)`);
+    }
+    return normalized;
+  }
+
+  /** The displayed value a filter compares for a cell. */
+  private _filterValue(row: number, col: number): string {
+    return this._internalData.get(cellKey(row, col))?.displayValue ?? '';
+  }
+
+  /** Whether a row meets every column's criteria, optionally leaving one column out. */
+  private _rowMatches(row: number, criteria: Map<number, Set<string>>, ignoreCol = -1): boolean {
+    for (const [col, values] of criteria) {
+      if (col !== ignoreCol && !values.has(this._filterValue(row, col))) return false;
+    }
+    return true;
+  }
+
+  /** A filter with the rows it hides worked out from the current data. */
+  private _evaluateFilter(range: SelectionRange, criteria: Map<number, Set<string>>): FilterState {
+    const hidden = new Set<number>();
+    if (criteria.size > 0) {
+      for (let r = range.start.row + 1; r <= Math.min(range.end.row, this.rows - 1); r++) {
+        if (!this._rowMatches(r, criteria)) hidden.add(r);
+      }
+    }
+    return { range: { start: { ...range.start }, end: { ...range.end } }, criteria, hidden };
+  }
+
+  /**
+   * A filter range grown down over rows of data added right below it, as
+   * Excel does when the user changes or reapplies a filter.
+   */
+  private _extendFilterRange(range: SelectionRange): SelectionRange {
+    const filled = (r: number) => {
+      for (let c = range.start.col; c <= range.end.col; c++) if (this._isCellFilled(r, c)) return true;
+      return false;
+    };
+    let end = range.end.row;
+    while (end + 1 < this.rows && filled(end + 1)) end++;
+    return { start: { ...range.start }, end: { row: end, col: range.end.col } };
+  }
+
+  private _filterInfo(filter: FilterState): FilterInfo {
+    return {
+      range: { start: { ...filter.range.start }, end: { ...filter.range.end } },
+      columns: [...filter.criteria.keys()]
+        .sort((a, b) => a - b)
+        .map((col) => ({ col, values: [...filter.criteria.get(col)!] })),
+      hiddenRows: [...filter.hidden].sort((a, b) => a - b),
+    };
+  }
+
+  private _filterDetail(filter: FilterState | null, source: FilterChangeDetail['source']): FilterChangeDetail {
+    if (!filter) return { range: null, columns: [], hiddenRows: [], source };
+    return { ...this._filterInfo(filter), source };
+  }
+
+  private _filtersEqual(a: FilterState | null, b: FilterState | null): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    const sameSet = (x: Set<unknown>, y: Set<unknown>) => x.size === y.size && [...x].every((v) => y.has(v));
+    const ra = a.range;
+    const rb = b.range;
+    return (
+      ra.start.row === rb.start.row &&
+      ra.start.col === rb.start.col &&
+      ra.end.row === rb.end.row &&
+      ra.end.col === rb.end.col &&
+      a.criteria.size === b.criteria.size &&
+      [...a.criteria].every(([col, values]) => b.criteria.has(col) && sameSet(values, b.criteria.get(col)!)) &&
+      sameSet(a.hidden, b.hidden)
+    );
+  }
+
+  /**
+   * Change the filter as one undoable step. User changes can be vetoed via
+   * `before-filter`. Allowed in read-only mode: filtering changes the view,
+   * not the data.
+   */
+  private _commitFilter(next: FilterState | null, source: 'user' | 'programmatic'): 'applied' | 'unchanged' | 'cancelled' {
+    if (this._pasteInProgress) return 'unchanged';
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    const before = this._filter;
+    if (this._filtersEqual(before, next)) return 'unchanged';
+
+    if (source === 'user') {
+      const event = new CustomEvent<FilterChangeDetail>('before-filter', {
+        detail: this._filterDetail(next, source),
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      const mutations = this._mutationCount;
+      const revision = this._filterRevision;
+      if (!this.dispatchEvent(event)) return 'cancelled';
+      // A listener changed the grid or the filter: `next` was worked out from stale state
+      if (this._changedSince(mutations) || revision !== this._filterRevision) return 'cancelled';
+    }
+
+    const selectionBefore = this._snapshotSelection();
+    let selectionAfter = selectionBefore;
+    const active = this._selection.activeCell;
+    if (next?.hidden.has(active.row)) {
+      // The active cell's row is about to hide: move to the nearest visible row
+      const cell = { row: this._nearestVisibleRow(active.row, next.hidden), col: active.col };
+      selectionAfter = { anchor: { ...cell }, head: { ...cell }, active: null };
+    }
+    this._commitBatch(
+      // `operation` is never reported for filter batches: they fire filter-change, not data-change
+      { deltas: [], selectionBefore, selectionAfter, operation: 'format', filter: { before, after: next } },
+      source
+    );
+    return 'applied';
+  }
+
+  /** Announce a user filter change; returns whether it was applied. */
+  private _announceFilterCommit(result: ReturnType<Y11nSpreadsheet['_commitFilter']>, applied?: string): boolean {
+    if (result === 'cancelled') {
+      this._modeAnnouncement = 'Filter change cancelled';
+    } else if (result === 'unchanged') {
+      this._modeAnnouncement = 'Filter unchanged';
+    } else {
+      this._modeAnnouncement = applied ?? this._filterSummary();
+    }
+    return result === 'applied';
+  }
+
+  /** "Showing 12 of 40 rows", for the current filter's data rows. */
+  private _filterSummary(): string {
+    const filter = this._filter;
+    if (!filter) return 'Filter removed';
+    const total = Math.max(0, Math.min(filter.range.end.row, this.rows - 1) - filter.range.start.row);
+    const shown = total - filter.hidden.size;
+    return filter.criteria.size === 0 ? `Showing all ${total} rows` : `Showing ${shown} of ${total} rows`;
+  }
+
+  private _applyFilterBatch(batch: CommandBatch, side: 'before' | 'after', source: ChangeSource): void {
+    const hadFocus = this._gridHasFocus();
+    this._filter = side === 'after' ? batch.filter!.after : batch.filter!.before;
+    this._filterRevision++;
+    if (this._filterMenu) this._closeFilterMenu(false);
+    const selection = side === 'after' ? batch.selectionAfter : batch.selectionBefore;
+    if (source === 'undo' || source === 'redo') {
+      this._restoreSelection(selection);
+    } else if (this._isRowHidden(this._selection.activeCell.row)) {
+      // Don't move the selection (or focus) unless the active cell was hidden
+      this._selection.setSelection(selection.anchor, selection.head, selection.active);
+      this._dispatchSelectionChange();
+      if (hadFocus) this.updateComplete.then(() => this._focusActiveCell());
+    }
+    this.requestUpdate();
+    this.updateComplete.then(() => {
+      // Fewer rows can shrink the scroll range under the current position
+      const gridEl = this._grid;
+      if (gridEl && gridEl.scrollTop !== this._scrollTop) this._scrollTop = gridEl.scrollTop;
+      if (source === 'user') {
+        const { row, col } = this._selection.activeCell;
+        this._ensureCellVisible(row, col);
+      }
+    });
+    this._dispatchFilterChange(this._filterDetail(this._filter, source));
+  }
+
+  private _dispatchFilterChange(detail: FilterChangeDetail): void {
+    this.dispatchEvent(new CustomEvent<FilterChangeDetail>('filter-change', { detail, bubbles: true, composed: true }));
+  }
+
+  /** Whether focus is on something inside the grid (a cell). */
+  private _gridHasFocus(): boolean {
+    const active = this.shadowRoot?.activeElement as HTMLElement | null | undefined;
+    return !!active && !!this._grid?.contains(active);
+  }
+
+  /**
+   * The filter after a row/column insertion or deletion: it moves with its
+   * cells like a range reference. Rows inserted inside it are visible;
+   * deleting its header row (or all its columns) removes it.
+   */
+  private _filterAfterStructureChange(change: StructureChange): FilterState | null {
+    const filter = this._filter;
+    if (!filter) return null;
+    const { axis, kind, index, count } = change;
+    // A position after the change, or null if it was deleted
+    const move = (p: number): number | null => {
+      if (kind === 'insert') return p >= index ? p + count : p;
+      if (p >= index + count) return p - count;
+      return p >= index ? null : p;
+    };
+    // The last surviving position at or before `p`, for a range end
+    const moveEnd = (p: number): number => {
+      if (kind === 'insert') return p >= index ? p + count : p;
+      return p >= index + count ? p - count : Math.min(p, index - 1);
+    };
+    const { start, end } = filter.range;
+    if (axis === 'row') {
+      const header = move(start.row);
+      if (header === null) return null;
+      const hidden = new Set<number>();
+      for (const r of filter.hidden) {
+        const moved = move(r);
+        if (moved !== null) hidden.add(moved);
+      }
+      return {
+        range: { start: { row: header, col: start.col }, end: { row: moveEnd(end.row), col: end.col } },
+        criteria: filter.criteria,
+        hidden,
+      };
+    }
+    // Columns: the first surviving column, the last surviving one
+    let first = start.col;
+    while (first <= end.col && move(first) === null) first++;
+    if (first > end.col) return null;
+    const criteria = new Map<number, Set<string>>();
+    for (const [col, values] of filter.criteria) {
+      const moved = move(col);
+      if (moved !== null) criteria.set(moved, values);
+    }
+    return {
+      range: { start: { row: start.row, col: move(first)! }, end: { row: end.row, col: moveEnd(end.col) } },
+      criteria,
+      hidden: filter.hidden,
+    };
+  }
+
+  // ─── Filter Menu ────────────────────────────────────
+
+  /**
+   * The distinct displayed values the menu lists for a column: from the data
+   * rows that pass the other columns' criteria, in ascending sort order with
+   * blanks last.
+   */
+  private _filterMenuValues(col: number): string[] {
+    const filter = this._filter!;
+    const range = this._extendFilterRange(filter.range);
+    // One cell per distinct value, to sort the values by
+    const cells = new Map<string, { key: string; cell: CellData | undefined }>();
+    for (let r = range.start.row + 1; r <= range.end.row; r++) {
+      if (!this._rowMatches(r, filter.criteria, col)) continue;
+      const key = cellKey(r, col);
+      const cell = this._internalData.get(key);
+      const value = cell?.displayValue ?? '';
+      if (!cells.has(value)) cells.set(value, { key, cell });
+    }
+    const entries = [...cells].map(([value, { key, cell }]) => ({
+      value,
+      sort: sortValueOf(value === '' ? undefined : cell, (c) => this._sortNumber(key, c)),
+    }));
+    entries.sort((a, b) => compareSortValues(a.sort, b.sort, 'ascending') || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
+    return entries.map((e) => e.value);
+  }
+
+  /** The values checked when the menu opens: those the criteria keep, or all. */
+  private _checkedForCriteria(values: string[], criteria: Set<string> | undefined): Set<string> {
+    return new Set(criteria ? values.filter((v) => criteria.has(v)) : values);
+  }
+
+  /** The menu's values that match its search text (case-insensitive). */
+  private _filterMenuMatches(menu: FilterMenuState): string[] {
+    const needle = menu.search.trim().toLowerCase();
+    if (!needle) return menu.values;
+    return menu.values.filter((v) => this._filterValueLabel(v).toLowerCase().includes(needle));
+  }
+
+  private _filterValueLabel(value: string): string {
+    return value === '' ? '(Blanks)' : value;
+  }
+
+  private _closeFilterMenu(focusCell: boolean): void {
+    this._filterMenuCleanup?.();
+    this._filterMenuCleanup = null;
+    if (!this._filterMenu) return;
+    this._filterMenu = null;
+    if (focusCell) this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  /** OK: filter the column to the checked values (with a search, only the checked matches). */
+  private _applyFilterMenu(): void {
+    const menu = this._filterMenu;
+    const filter = this._filter;
+    if (!menu || !filter) return;
+    const matches = this._filterMenuMatches(menu);
+    const keep = matches.filter((v) => menu.checked.has(v));
+    if (keep.length === 0) return;
+    const criteria = new Map(filter.criteria);
+    if (!menu.search.trim() && keep.length === menu.values.length) criteria.delete(menu.col);
+    else criteria.set(menu.col, new Set(keep));
+    this._closeFilterMenu(true);
+    const next = this._evaluateFilter(this._extendFilterRange(filter.range), criteria);
+    this._announceFilterCommit(this._commitFilter(next, 'user'));
+  }
+
+  private _clearColumnFromFilterMenu(): void {
+    const menu = this._filterMenu;
+    const filter = this._filter;
+    if (!menu || !filter) return;
+    const criteria = new Map(filter.criteria);
+    criteria.delete(menu.col);
+    this._closeFilterMenu(true);
+    const next = this._evaluateFilter(this._extendFilterRange(filter.range), criteria);
+    this._announceFilterCommit(this._commitFilter(next, 'user'));
+  }
+
+  private _sortFromFilterMenu(direction: SortDirection): void {
+    const menu = this._filterMenu;
+    const filter = this._filter;
+    if (!menu || !filter || this.readOnly) return;
+    this._closeFilterMenu(true);
+    this._sortRange({ range: filter.range, keys: [{ col: menu.col, direction }], hasHeader: true }, 'user');
+  }
+
+  /** Ctrl+Alt+L: re-filter the rows with the current criteria. */
+  private _reapplyUserFilter(): void {
+    const filter = this._filter;
+    if (!filter) {
+      this._modeAnnouncement = 'There is no filter to reapply';
+      return;
+    }
+    const next = this._evaluateFilter(this._extendFilterRange(filter.range), filter.criteria);
+    this._announceFilterCommit(this._commitFilter(next, 'user'));
+  }
+
+  private _updateFilterMenu(changes: Partial<FilterMenuState>): void {
+    if (this._filterMenu) this._filterMenu = { ...this._filterMenu, ...changes };
+  }
+
+  private _handleFilterSearchInput(e: Event): void {
+    const menu = this._filterMenu;
+    if (!menu) return;
+    const search = (e.target as HTMLInputElement).value;
+    const next = { ...menu, search, focus: 0 };
+    // As in Excel: searching checks every match; clearing the search goes back to the criteria
+    next.checked = search.trim()
+      ? new Set(this._filterMenuMatches(next))
+      : this._checkedForCriteria(menu.values, this._filter?.criteria.get(menu.col));
+    this._filterMenu = next;
+  }
+
+  private _toggleFilterValue(value: string): void {
+    const menu = this._filterMenu;
+    if (!menu) return;
+    const checked = new Set(menu.checked);
+    if (checked.has(value)) checked.delete(value);
+    else checked.add(value);
+    this._updateFilterMenu({ checked });
+  }
+
+  private _toggleAllFilterValues(): void {
+    const menu = this._filterMenu;
+    if (!menu) return;
+    const matches = this._filterMenuMatches(menu);
+    const all = matches.every((v) => menu.checked.has(v));
+    const checked = new Set(menu.checked);
+    for (const v of matches) {
+      if (all) checked.delete(v);
+      else checked.add(v);
+    }
+    this._updateFilterMenu({ checked });
+  }
+
+  private _handleFilterMenuKeydown(e: KeyboardEvent): void {
+    const menu = this._filterMenu;
+    if (!menu) return;
+    // Keep keys from reaching the page while the menu has focus
+    e.stopPropagation();
+    const target = e.target as HTMLElement;
+    const menuEl = e.currentTarget as HTMLElement;
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this._closeFilterMenu(true);
+      this._modeAnnouncement = 'Filter menu closed';
+      return;
+    }
+    if (e.key === 'Tab') {
+      // Keep focus inside the menu (it is modal)
+      const focusables = [...menuEl.querySelectorAll<HTMLElement>('button, input')].filter(
+        (el) => !(el as HTMLButtonElement).disabled && el.tabIndex >= 0
+      );
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const current = this.shadowRoot?.activeElement;
+      if (e.shiftKey && current === first) {
+        e.preventDefault();
+        last?.focus();
+      } else if (!e.shiftKey && current === last) {
+        e.preventDefault();
+        first?.focus();
+      }
+      return;
+    }
+
+    const shown = Math.min(this._filterMenuMatches(menu).length, Y11nSpreadsheet.FILTER_MENU_MAX_VALUES);
+    const inList = target.dataset.filterItem !== undefined;
+    const fromSearch = target.id === 'filter-search' && e.key === 'ArrowDown';
+    if (fromSearch || (inList && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key))) {
+      e.preventDefault();
+      let focus = menu.focus;
+      if (!fromSearch) {
+        if (e.key === 'ArrowDown') focus = Math.min(shown, focus + 1);
+        else if (e.key === 'ArrowUp') focus = Math.max(0, focus - 1);
+        else if (e.key === 'Home') focus = 0;
+        else focus = shown;
+      }
+      this._updateFilterMenu({ focus });
+      this.updateComplete.then(() => {
+        this.renderRoot.querySelector<HTMLElement>(`[data-filter-item="${focus}"]`)?.focus();
+      });
+      return;
+    }
+    // Enter anywhere but on a button means OK, as in Excel
+    if (e.key === 'Enter' && target.tagName !== 'BUTTON') {
+      e.preventDefault();
+      this._applyFilterMenu();
+    }
+  }
+
+  private _handleFilterButtonPointerDown(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    // Keep the cell underneath from starting a selection, and the
+    // outside-click listener from closing the menu this button toggles
+    e.preventDefault();
+    e.stopPropagation();
+    const col = parseInt((e.currentTarget as HTMLElement).dataset.filterCol!, 10);
+    if (this._filterMenu?.col === col) {
+      this._closeFilterMenu(true);
+      return;
+    }
+    void this.openFilterMenu(col);
+  }
+
+  /** Whether cell (row, col) is a header cell of the filter, with a filter button. */
+  private _isFilterHeader(row: number, col: number): boolean {
+    const range = this._filter?.range;
+    return !!range && row === range.start.row && col >= range.start.col && col <= range.end.col;
+  }
+
+  // ─── Row Geometry (hidden rows) ─────────────────────
+
+  /** Whether the filter hides a row. */
+  private _isRowHidden(row: number): boolean {
+    return this._filter !== null && this._filter.hidden.has(row);
+  }
+
+  /** The rows not hidden by the filter, ascending, or null when no row is hidden. */
+  private _visibleRowList(): Int32Array | null {
+    const hidden = this._filter?.hidden;
+    if (!hidden || hidden.size === 0) return null;
+    const key = `${this.rows}|${this._filterRevision}`;
+    if (this._rowLayout?.key !== key) {
+      const visible: number[] = [];
+      for (let r = 0; r < this.rows; r++) if (!hidden.has(r)) visible.push(r);
+      this._rowLayout = { key, visible: Int32Array.from(visible) };
+    }
+    return this._rowLayout.visible;
+  }
+
+  /** Number of visible rows before `row`: its position in the laid-out grid. */
+  private _visibleIndex(row: number): number {
+    const visible = this._visibleRowList();
+    const r = Math.max(0, Math.min(row, this.rows));
+    return visible ? lowerBound(visible, r) : r;
+  }
+
+  /** Top offset in px of a row within the data area; hidden rows take no height. */
+  private _rowTop(row: number): number {
+    return this._visibleIndex(row) * this._cellSize.height;
+  }
+
+  /** The visible rows from `from` to `to` (inclusive), ascending. */
+  private _visibleRowsBetween(from: number, to: number): number[] {
+    const rows: number[] = [];
+    for (let r = Math.max(0, from); r <= Math.min(to, this.rows - 1); r++) {
+      if (!this._isRowHidden(r)) rows.push(r);
+    }
+    return rows;
+  }
+
+  /** The visible rows of a range, or undefined when none of them is hidden. */
+  private _visibleRowsIn(range: SelectionRange): number[] | undefined {
+    if (!this._filter || this._filter.hidden.size === 0) return undefined;
+    const rows = this._visibleRowsBetween(range.start.row, range.end.row);
+    return rows.length === range.end.row - range.start.row + 1 ? undefined : rows;
+  }
+
+  /** `row` if it is visible, else the nearest visible row below it, else above it. */
+  private _nearestVisibleRow(row: number, hidden: Set<number> | undefined = this._filter?.hidden): number {
+    if (!hidden?.has(row)) return row;
+    for (let r = row + 1; r < this.rows; r++) if (!hidden.has(r)) return r;
+    for (let r = row - 1; r >= 0; r--) if (!hidden.has(r)) return r;
+    return row;
+  }
+
+  /** `row` if it is visible, else the nearest visible row in direction `dir` (falling back to the other way). */
+  private _visibleRowToward(row: number, dir: 1 | -1): number {
+    for (let r = row; r >= 0 && r < this.rows; r += dir) if (!this._isRowHidden(r)) return r;
+    return this._nearestVisibleRow(row);
+  }
+
   // ─── Frozen Panes ───────────────────────────────────
 
   /** Frozen rows in effect: the property clamped so at least one row scrolls. */
@@ -2119,9 +2896,9 @@ export class Y11nSpreadsheet extends LitElement {
     return Number.isFinite(n) ? Math.max(0, Math.min(n, this.cols - 1)) : 0;
   }
 
-  /** Height in px of the frozen rows, below the column header. */
+  /** Height in px of the frozen rows (those not hidden by a filter), below the column header. */
   private get _frozenHeight(): number {
-    return this._frozenRowCount * this._cellSize.height;
+    return this._rowTop(this._frozenRowCount);
   }
 
   /** Width in px of the frozen columns, right of the row header. */
@@ -2172,7 +2949,7 @@ export class Y11nSpreadsheet extends LitElement {
     // Leave at least two rows (one column) of scrolling area, when the grid has a size
     if (
       gridEl?.clientHeight &&
-      (row * h > gridEl.clientHeight - 3 * h ||
+      (this._rowTop(row) > gridEl.clientHeight - 3 * h ||
         this._colLeft(col) > gridEl.clientWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH - this._colWidth(col))
     ) {
       this._modeAnnouncement = 'Cannot freeze: the frozen area would not fit on screen';
@@ -2207,14 +2984,14 @@ export class Y11nSpreadsheet extends LitElement {
    */
   private _scrollPadding(): string {
     return (
-      `scroll-padding-top: calc(var(--_cell-height) * ${1 + this._frozenRowCount}); ` +
+      `scroll-padding-top: calc(var(--_cell-height) * ${1 + this._visibleIndex(this._frozenRowCount)}); ` +
       `scroll-padding-left: ${this._stickyLeft(this._frozenColCount)};`
     );
   }
 
-  /** CSS for a frozen row's sticky top offset: below the header and the frozen rows above it. */
+  /** CSS for a frozen row's sticky top offset: below the header and the (visible) frozen rows above it. */
   private _stickyTop(row: number): string {
-    return `calc(var(--_cell-height) * ${row + 1})`;
+    return `calc(var(--_cell-height) * ${this._visibleIndex(row) + 1})`;
   }
 
   /** Classes marking a cell or header as frozen (pass -1 for a header's other axis). */
@@ -2224,7 +3001,8 @@ export class Y11nSpreadsheet extends LitElement {
     const classes: string[] = [];
     // Headers pass -1 for the other axis, which must never match an edge
     if (row >= 0 && row < fr) classes.push('frozen-row');
-    if (row >= 0 && row === fr - 1) classes.push('frozen-row-edge');
+    // The freeze line goes under the last frozen row a filter leaves visible
+    if (row >= 0 && row < fr && row === this._visibleRowToward(fr - 1, -1)) classes.push('frozen-row-edge');
     if (col >= 0 && col < fc) classes.push('frozen-col');
     if (col >= 0 && col === fc - 1) classes.push('frozen-col-edge');
     return classes.join(' ');
@@ -2388,7 +3166,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (!gridEl) return false;
     const left = this._colLeft(col);
     const right = left + this._colWidth(col);
-    const top = row * this._cellSize.height;
+    const top = this._rowTop(row);
     const viewWidth = gridEl.clientWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH;
     const viewHeight = gridEl.clientHeight - this._cellSize.height;
     // Frozen cells are always in view; the others scroll beside the frozen area
@@ -2689,7 +3467,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (!this._refMode) {
       // Enter reference mode - start from the editing cell and move
       const { row, col } = this._selection.activeCell;
-      const clamped = this._selection.clamp({ row: row + dRow, col: col + dCol });
+      const clamped = this._selection.clamp({ row: this._selection.stepRows(row, dRow), col: col + dCol });
       this._refCursorRow = clamped.row;
       this._refCursorCol = clamped.col;
       this._refMode = true;
@@ -2705,7 +3483,10 @@ export class Y11nSpreadsheet extends LitElement {
       this._refInsertEnd = cursorPos + ref.length;
     } else {
       // Already in reference mode - move the reference cursor
-      const moved = this._selection.clamp({ row: this._refCursorRow + dRow, col: this._refCursorCol + dCol });
+      const moved = this._selection.clamp({
+        row: this._selection.stepRows(this._refCursorRow, dRow),
+        col: this._refCursorCol + dCol,
+      });
       this._refCursorRow = moved.row;
       this._refCursorCol = moved.col;
 
@@ -2845,6 +3626,27 @@ export class Y11nSpreadsheet extends LitElement {
       return;
     }
 
+    // Ctrl+Shift+L: add or remove a filter. Ctrl+Alt+L: reapply it. Views,
+    // so allowed in read-only mode. Matched by e.code (Option changes e.key on macOS).
+    if (ctrl && e.code === 'KeyL' && (shift !== e.altKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (shift) this.toggleFilter();
+      else this._reapplyUserFilter();
+      return;
+    }
+
+    // Alt+Down on a filter header cell: open its filter menu
+    if (e.altKey && !shift && !ctrl && e.key === 'ArrowDown') {
+      const { row, col } = this._selection.activeCell;
+      if (this._isFilterHeader(row, col)) {
+        e.preventDefault();
+        e.stopPropagation();
+        void this.openFilterMenu(col);
+        return;
+      }
+    }
+
     // Alt+Shift+F: freeze the rows above and columns left of the active cell,
     // or unfreeze. A view setting, so allowed in read-only mode.
     if (e.altKey && shift && !ctrl && e.code === 'KeyF') {
@@ -2894,8 +3696,14 @@ export class Y11nSpreadsheet extends LitElement {
           // Jump to the edge of the data region (Ctrl/Cmd+Arrow); with Shift,
           // extend the selection from its head to that edge.
           const from = shift ? this._selection.head : this._selection.activeCell;
-          const target = findDataEdge(from, dRow, dCol, this.rows, this.cols, (r, c) =>
-            this._isCellFilled(r, c)
+          const target = findDataEdge(
+            from,
+            dRow,
+            dCol,
+            this.rows,
+            this.cols,
+            (r, c) => this._isCellFilled(r, c),
+            (r) => this._isRowHidden(r)
           );
           this._selection.moveTo(target.row, target.col, shift);
         } else {
@@ -2938,7 +3746,7 @@ export class Y11nSpreadsheet extends LitElement {
         e.preventDefault();
         if (ctrl) {
           // With frozen panes, the top-left of the scrolling area (as in Excel)
-          this._selection.moveTo(this._frozenRowCount, this._frozenColCount, shift);
+          this._selection.moveTo(this._visibleRowToward(this._frozenRowCount, 1), this._frozenColCount, shift);
         } else {
           this._selection.moveTo(this._selection.activeCell.row, 0, shift);
         }
@@ -2949,7 +3757,7 @@ export class Y11nSpreadsheet extends LitElement {
       case 'End':
         e.preventDefault();
         if (ctrl) {
-          this._selection.moveTo(this.rows - 1, this.cols - 1, shift);
+          this._selection.moveTo(this._visibleRowToward(this.rows - 1, -1), this.cols - 1, shift);
         } else {
           this._selection.moveTo(this._selection.activeCell.row, this.cols - 1, shift);
         }
@@ -3377,17 +4185,17 @@ export class Y11nSpreadsheet extends LitElement {
   // ─── Clipboard ──────────────────────────────────────
 
   private async _handleCopy(): Promise<void> {
-    await this._clipboardManager.copy(this._internalData, this._selection.range);
+    // Rows hidden by the filter are not copied
+    const range = this._selection.range;
+    await this._clipboardManager.copy(this._internalData, range, this._visibleRowsIn(range));
   }
 
   private async _handleCut(): Promise<void> {
     if (this.readOnly || this._pasteInProgress) return;
 
     const mutations = this._mutationCount;
-    const keysToDelete = await this._clipboardManager.cut(
-      this._internalData,
-      this._selection.range
-    );
+    const range = this._selection.range;
+    const keysToDelete = await this._clipboardManager.cut(this._internalData, range, this._visibleRowsIn(range));
     // The grid changed while the clipboard was being written (rows moved, data
     // replaced, cells edited): clearing the saved coordinates could erase
     // something other than what was copied, so leave the data alone.
@@ -3423,16 +4231,22 @@ export class Y11nSpreadsheet extends LitElement {
     const { row, col } = this._selection.range.start;
     const revision = this._structureRevision;
     const generation = this._dataGeneration;
+    const filterRevision = this._filterRevision;
     const dataRef = this._lastSyncedDataRef;
-    const updates = await this._clipboardManager.paste(row, col, this.rows, this.cols);
+    // Pasted rows go to the visible rows from the anchor down, skipping
+    // rows hidden by the filter (worked out when the paste is read)
+    const targets = this._filter ? this._visibleRowsBetween(row, this.rows - 1) : null;
+    const rowFor = targets ? (i: number) => targets[i] ?? -1 : undefined;
+    const updates = await this._clipboardManager.paste(row, col, this.rows, this.cols, rowFor);
 
     if (!updates || updates.length === 0) return;
     if (
       revision !== this._structureRevision ||
       generation !== this._dataGeneration ||
+      filterRevision !== this._filterRevision ||
       dataRef !== this.data
     ) {
-      this._modeAnnouncement = 'Paste not applied because rows, columns or data changed';
+      this._modeAnnouncement = 'Paste not applied because rows, columns, the filter or data changed';
       return;
     }
     if (this._pasteInProgress) {
@@ -3505,7 +4319,7 @@ export class Y11nSpreadsheet extends LitElement {
     const updates: Array<{ id: string; value: string }> = [];
     const selection = this._snapshotSelection();
 
-    for (let r = range.start.row; r <= range.end.row; r++) {
+    for (const r of this._visibleRowsBetween(range.start.row, range.end.row)) {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const key = cellKey(r, c);
         if (this._internalData.has(key)) {
@@ -3534,18 +4348,24 @@ export class Y11nSpreadsheet extends LitElement {
     const { start, end } = this._selection.range;
     const down = direction === 'down';
 
-    let source = down ? start.row : start.col;
-    const last = down ? end.row : end.col;
-    if (last === source) {
-      if (source === 0) return;
-      source -= 1;
+    // Rows hidden by the filter are neither source nor target
+    const rows = this._visibleRowsBetween(start.row, end.row);
+    const cols = Array.from({ length: end.col - start.col + 1 }, (_, i) => start.col + i);
+    const along = down ? rows : cols;
+    if (along.length === 0) return;
+    let source = along[0];
+    let targets = along.slice(1);
+    if (targets.length === 0) {
+      // A single row (column): copy from the one above (to the left)
+      const before = down ? this._selection.stepRows(source, -1) : source - 1;
+      if (before < 0 || before === source) return;
+      targets = [source];
+      source = before;
     }
 
     const updates: CellUpdate[] = [];
-    const crossStart = down ? start.col : start.row;
-    const crossEnd = down ? end.col : end.row;
-    for (let target = source + 1; target <= last; target++) {
-      for (let cross = crossStart; cross <= crossEnd; cross++) {
+    for (const target of targets) {
+      for (const cross of down ? cols : rows) {
         const srcKey = down ? cellKey(source, cross) : cellKey(cross, source);
         const dstKey = down ? cellKey(target, cross) : cellKey(cross, target);
         const src = this._internalData.get(srcKey);
@@ -3573,21 +4393,21 @@ export class Y11nSpreadsheet extends LitElement {
     if (this.readOnly || this._pasteInProgress) return;
     const range = this._selection.range;
     const down = direction === 'down';
-    const first = down ? range.start.row : range.start.col;
-    const last = down ? range.end.row : range.end.col;
-    const crossStart = down ? range.start.col : range.start.row;
-    const crossEnd = down ? range.end.col : range.end.row;
+    const rows = this._visibleRowsBetween(range.start.row, range.end.row);
+    const cols = Array.from({ length: range.end.col - range.start.col + 1 }, (_, i) => range.start.col + i);
+    const along = down ? rows : cols;
+    const cross = down ? cols : rows;
 
-    let seedEnd = first - 1;
-    for (let p = first; p <= last; p++) {
-      let filled = false;
-      for (let x = crossStart; x <= crossEnd && !filled; x++) {
-        filled = down ? this._isCellFilled(p, x) : this._isCellFilled(x, p);
-      }
-      if (!filled) break;
-      seedEnd = p;
+    // The leading lines with data are the seed (hidden rows don't count)
+    let seeds = 0;
+    while (
+      seeds < along.length &&
+      cross.some((x) => (down ? this._isCellFilled(along[seeds], x) : this._isCellFilled(x, along[seeds])))
+    ) {
+      seeds++;
     }
-    if (seedEnd < first || seedEnd >= last) {
+    const seedEnd = along[seeds - 1];
+    if (seeds === 0 || seeds === along.length) {
       this._modeAnnouncement = `Select the cells to continue and the empty cells ${down ? 'below' : 'to the right of'} them`;
       return;
     }
@@ -3686,30 +4506,35 @@ export class Y11nSpreadsheet extends LitElement {
     const vertical = target.start.row < source.start.row || target.end.row > source.end.row;
     const along = vertical ? 'row' : 'col';
     const cross = vertical ? 'col' : 'row';
-    const lineStart = source.start[along];
-    const lineLength = source.end[along] - lineStart + 1;
+    // Positions along and across the fill, without rows hidden by the filter:
+    // a series continues on the visible rows as if the hidden ones weren't there
+    const positions = (axis: 'row' | 'col', from: number, to: number) =>
+      axis === 'row' ? this._visibleRowsBetween(from, to) : Array.from({ length: to - from + 1 }, (_, i) => from + i);
+    const span = positions(along, target.start[along], target.end[along]);
+    const linePositions = positions(along, source.start[along], source.end[along]);
+    const lineLength = linePositions.length;
+    const lineStart = span.indexOf(linePositions[0]);
 
     const updates: CellUpdate[] = [];
-    for (let x = source.start[cross]; x <= source.end[cross]; x++) {
+    for (const x of lineLength > 0 ? positions(cross, source.start[cross], source.end[cross]) : []) {
       const keyAt = (p: number) => (vertical ? cellKey(p, x) : cellKey(x, p));
-      const line = Array.from({ length: lineLength }, (_, i) =>
-        this._internalData.get(keyAt(lineStart + i))
-      );
+      const line = linePositions.map((p) => this._internalData.get(keyAt(p)));
       const trend = linearTrend(line.map((cell) => this._literalNumber(cell)));
-      for (let p = target.start[along]; p <= target.end[along]; p++) {
-        if (p >= lineStart && p < lineStart + lineLength) continue;
-        const offset = p - lineStart;
+      span.forEach((p, i) => {
+        const offset = i - lineStart;
+        if (offset >= 0 && offset < lineLength) return;
         const srcIndex = ((offset % lineLength) + lineLength) % lineLength;
         const src = line[srcIndex];
         let value: string;
         if (trend) {
           value = formatSeriesNumber(trend.intercept + trend.slope * offset);
         } else {
-          const shift = offset - srcIndex;
+          // Shift references by how far the cell actually moves
+          const shift = p - linePositions[srcIndex];
           value = this._shiftFormula(src?.rawValue ?? '', vertical ? shift : 0, vertical ? 0 : shift);
         }
         updates.push({ id: keyAt(p), value, format: src?.format ?? null });
-      }
+      });
     }
 
     const selectionAfter: SelectionSnapshot = {
@@ -3767,7 +4592,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._validationMessage = '';
 
     const updates: CellUpdate[] = [];
-    for (let r = start.row; r <= end.row; r++) {
+    for (const r of this._visibleRowsBetween(start.row, end.row)) {
       for (let c = start.col; c <= end.col; c++) {
         updates.push({
           id: cellKey(r, c),
@@ -3827,7 +4652,8 @@ export class Y11nSpreadsheet extends LitElement {
       this._findStatus = '';
       return;
     }
-    const matches = this.findCells(this._findQuery);
+    // Cells in rows hidden by the filter can't be selected, so they don't count
+    const matches = this.findCells(this._findQuery).filter((key) => !this._isRowHidden(parseKey(key).row));
     if (matches.length === 0) {
       this._findStatus = 'No matches';
       return;
@@ -3980,8 +4806,11 @@ export class Y11nSpreadsheet extends LitElement {
 
     const buffer = 5;
 
+    // Rows are laid out by visible index: hidden (filtered-out) rows take no space
+    const visible = this._visibleRowList();
+    const rowCount = visible ? visible.length : this.rows;
     const startRow = Math.max(0, Math.floor(this._scrollTop / cellHeight) - buffer);
-    const endRow = Math.min(this.rows, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
+    const endRow = Math.min(rowCount, Math.ceil((this._scrollTop + viewHeight) / cellHeight) + buffer);
     const startCol = Math.max(0, this._colAt(this._scrollLeft) - buffer);
     const endCol = Math.min(this.cols, this._colAt(this._scrollLeft + viewWidth) + 1 + buffer);
 
@@ -4000,6 +4829,12 @@ export class Y11nSpreadsheet extends LitElement {
       extraCols.push(this._refCursorCol);
     }
 
+    if (visible) {
+      const rows = new Set<number>();
+      for (let i = startRow; i < endRow; i++) rows.add(visible[i]);
+      for (const r of extraRows) if (!this._isRowHidden(r)) rows.add(r);
+      return { rows: [...rows].sort((a, b) => a - b), cols: windowWithExtras(startCol, endCol, extraCols) };
+    }
     return {
       rows: windowWithExtras(startRow, endRow, extraRows),
       cols: windowWithExtras(startCol, endCol, extraCols),
@@ -4024,7 +4859,7 @@ export class Y11nSpreadsheet extends LitElement {
     // behind it (mirrors how dataViewportWidth subtracts the row header).
     const dataViewportHeight = Math.max(cellHeight, viewHeight - cellHeight);
 
-    const cellTop = row * cellHeight;
+    const cellTop = this._rowTop(row);
     const cellBottom = cellTop + cellHeight;
     const cellLeft = this._colLeft(col);
     const cellRight = cellLeft + this._colWidth(col);
@@ -4108,8 +4943,8 @@ export class Y11nSpreadsheet extends LitElement {
     const cellWidth = this._colWidth(col);
     const headerWidth = Y11nSpreadsheet.ROW_HEADER_WIDTH;
 
-    // +1 for the header row; frozen cells don't move with the scroll position
-    const top = (row + 1) * cellHeight - (row < this._frozenRowCount ? 0 : this._scrollTop);
+    // Below the header row; frozen cells don't move with the scroll position
+    const top = cellHeight + this._rowTop(row) - (row < this._frozenRowCount ? 0 : this._scrollTop);
     const left = headerWidth + this._colLeft(col) - (col < this._frozenColCount ? 0 : this._scrollLeft);
 
     const styles: Record<string, string> = {
@@ -4498,6 +5333,149 @@ export class Y11nSpreadsheet extends LitElement {
       border-color: var(--_border-color);
     }
 
+    /* Filters: a dropdown button in each header cell of the filtered table */
+    .ls-cell.filter-header {
+      padding-right: 26px;
+    }
+
+    .ls-filter-button {
+      position: absolute;
+      top: 50%;
+      /* Clear of the fill handle in the corner */
+      right: 7px;
+      transform: translateY(-50%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      color: var(--ls-filter-button-color, #555);
+      background: var(--ls-filter-button-bg, #fff);
+      border: 1px solid var(--_border-color);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .ls-filter-button:hover {
+      border-color: var(--ls-filter-active-color, #1a73e8);
+    }
+
+    .ls-filter-button.filtered {
+      color: #fff;
+      background: var(--ls-filter-active-color, #1a73e8);
+      border-color: var(--ls-filter-active-color, #1a73e8);
+    }
+
+    /* Row numbers of a filtered table, which skip the hidden rows */
+    .ls-row-header.filtered-row {
+      color: var(--ls-filtered-row-header-color, #1a73e8);
+    }
+
+    .ls-filter-menu {
+      position: absolute;
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px;
+      overflow: auto;
+      background: var(--ls-filter-menu-bg, #fff);
+      border: 1px solid var(--_border-color);
+      border-radius: 4px;
+      box-shadow: var(--_editor-shadow);
+      font-size: 13px;
+    }
+
+    .ls-filter-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .ls-filter-row > button {
+      flex: 1 1 0;
+    }
+
+    .ls-filter-buttons {
+      justify-content: flex-end;
+    }
+
+    .ls-filter-action,
+    .ls-filter-ok {
+      min-height: 26px;
+      padding: 2px 8px;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      background: transparent;
+      border: 1px solid var(--_border-color);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .ls-filter-row > button,
+    .ls-filter-ok {
+      text-align: center;
+    }
+
+    .ls-filter-action:hover:not(:disabled) {
+      background: var(--_header-bg);
+    }
+
+    .ls-filter-ok {
+      color: #fff;
+      background: var(--ls-filter-active-color, #1a73e8);
+      border-color: var(--ls-filter-active-color, #1a73e8);
+    }
+
+    .ls-filter-action:disabled,
+    .ls-filter-ok:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    .ls-filter-search {
+      padding: 3px 6px;
+      font: inherit;
+      border: 1px solid var(--_border-color);
+      border-radius: 3px;
+    }
+
+    .ls-filter-list {
+      display: flex;
+      flex-direction: column;
+      min-height: 60px;
+      max-height: 220px;
+      overflow: auto;
+      padding: 2px 0;
+      border: 1px solid var(--_border-color);
+      border-radius: 3px;
+    }
+
+    .ls-filter-option {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .ls-filter-option > span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ls-filter-note {
+      font-size: 12px;
+      color: var(--ls-find-status-color, #555);
+    }
+
+    .ls-filter-menu button:focus-visible,
+    .ls-filter-menu input:focus-visible {
+      outline: var(--_focus-ring);
+      outline-offset: 1px;
+    }
+
     /* Visually hidden live region for screen reader announcements */
     .sr-only {
       position: absolute;
@@ -4553,6 +5531,7 @@ export class Y11nSpreadsheet extends LitElement {
               >${this._validationMessage}</div>`
             : nothing}
           ${this._findOpen ? this._renderFindBar() : nothing}
+          ${this._filterMenu && this._filter ? this._renderFilterMenu(this._filterMenu, this._filter) : nothing}
 
           <div
             class="ls-grid"
@@ -4624,6 +5603,130 @@ export class Y11nSpreadsheet extends LitElement {
     `;
   }
 
+  /** Place the filter menu under its header cell, inside the grid area. */
+  private _getFilterMenuStyle(col: number, headerRow: number): Record<string, string> {
+    const h = this._cellSize.height;
+    const width = 260;
+    const gridEl = this._grid;
+    const shellWidth = gridEl?.clientWidth ?? 0;
+    const shellHeight = gridEl?.clientHeight ?? 0;
+    // The bottom of the header cell; frozen cells don't move with the scroll position
+    let top = h + this._rowTop(headerRow) + h - (headerRow < this._frozenRowCount ? 0 : this._scrollTop);
+    let left =
+      Y11nSpreadsheet.ROW_HEADER_WIDTH + this._colLeft(col) - (col < this._frozenColCount ? 0 : this._scrollLeft);
+    if (shellWidth) left = Math.max(0, Math.min(left, shellWidth - width - 4));
+    const minHeight = 200;
+    if (shellHeight && top + minHeight > shellHeight) top = Math.max(0, shellHeight - minHeight - 4);
+    const styles: Record<string, string> = { top: `${Math.max(0, top)}px`, left: `${Math.max(0, left)}px`, width: `${width}px` };
+    if (shellHeight) styles['max-height'] = `${Math.max(minHeight, shellHeight - top - 4)}px`;
+    return styles;
+  }
+
+  private _renderFilterMenu(menu: FilterMenuState, filter: FilterState) {
+    const col = menu.col;
+    const letter = colToLetter(col);
+    const header = this._getCellDisplay(filter.range.start.row, col);
+    const name = header ? `column ${letter}, ${header}` : `column ${letter}`;
+    const matches = this._filterMenuMatches(menu);
+    const shown = matches.slice(0, Y11nSpreadsheet.FILTER_MENU_MAX_VALUES);
+    const checkedCount = matches.reduce((n, v) => n + (menu.checked.has(v) ? 1 : 0), 0);
+    const allChecked = matches.length > 0 && checkedCount === matches.length;
+    const searching = menu.search.trim() !== '';
+    const item = (index: number) => ({
+      'data-filter-item': String(index),
+      tabindex: menu.focus === index ? 0 : -1,
+    });
+    return html`
+      <div
+        class="ls-filter-menu"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Filter ${name}"
+        style=${styleMap(this._getFilterMenuStyle(col, filter.range.start.row))}
+        @keydown="${this._handleFilterMenuKeydown}"
+      >
+        <div class="ls-filter-row">
+          <button
+            type="button"
+            class="ls-filter-action"
+            ?disabled=${this.readOnly}
+            @click="${() => this._sortFromFilterMenu('ascending')}"
+          >Sort A to Z</button>
+          <button
+            type="button"
+            class="ls-filter-action"
+            ?disabled=${this.readOnly}
+            @click="${() => this._sortFromFilterMenu('descending')}"
+          >Sort Z to A</button>
+        </div>
+        <button
+          type="button"
+          class="ls-filter-action"
+          ?disabled=${!filter.criteria.has(col)}
+          @click="${this._clearColumnFromFilterMenu}"
+        >Clear filter from column ${letter}</button>
+        <input
+          id="filter-search"
+          class="ls-filter-search"
+          type="search"
+          aria-label="Search values"
+          aria-describedby="filter-status"
+          placeholder="Search"
+          autocomplete="off"
+          spellcheck="false"
+          .value="${menu.search}"
+          @input="${this._handleFilterSearchInput}"
+        />
+        <div class="ls-filter-list" role="group" aria-label="Values to show">
+          <label class="ls-filter-option">
+            <input
+              type="checkbox"
+              data-filter-item="0"
+              tabindex="${item(0).tabindex}"
+              .checked=${allChecked}
+              .indeterminate=${checkedCount > 0 && !allChecked}
+              ?disabled=${matches.length === 0}
+              @change="${this._toggleAllFilterValues}"
+            />
+            <span>${searching ? '(Select all search results)' : '(Select all)'}</span>
+          </label>
+          ${repeat(
+            shown,
+            (value) => value,
+            (value, i) => html`
+              <label class="ls-filter-option">
+                <input
+                  type="checkbox"
+                  data-filter-item="${i + 1}"
+                  tabindex="${item(i + 1).tabindex}"
+                  .checked=${menu.checked.has(value)}
+                  @change="${() => this._toggleFilterValue(value)}"
+                />
+                <span>${this._filterValueLabel(value)}</span>
+              </label>
+            `
+          )}
+        </div>
+        <div id="filter-status" class="ls-filter-note" role="status">${
+          matches.length === 0
+            ? 'No matching values'
+            : matches.length > shown.length
+              ? `Showing ${shown.length} of ${matches.length} values. Search to narrow the list.`
+              : `${checkedCount} of ${matches.length} values selected`
+        }</div>
+        <div class="ls-filter-row ls-filter-buttons">
+          <button
+            type="button"
+            class="ls-filter-ok"
+            ?disabled=${checkedCount === 0}
+            @click="${this._applyFilterMenu}"
+          >OK</button>
+          <button type="button" class="ls-filter-action" @click="${() => this._closeFilterMenu(true)}">Cancel</button>
+        </div>
+      </div>
+    `;
+  }
+
   private _renderColumnSpacer(size: number) {
     return html`<div style="grid-column: span ${size};"></div>`;
   }
@@ -4674,14 +5777,14 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _renderRows(rows: number[], cols: number[]) {
-    const cellHeight = this._cellSize.height;
     type Segment = { key: string; row: number; gap: number };
     const segments = layoutWithGaps<Segment>(
       rows,
       this.rows,
       (row) => ({ key: `r${row}`, row, gap: 0 }),
-      (start, size) => ({ key: `g${start}`, row: start, gap: size })
-    );
+      // A gap is as tall as the visible rows in it: hidden rows take no space
+      (start, size) => ({ key: `g${start}`, row: start, gap: this._rowTop(start + size) - this._rowTop(start) })
+    ).filter((seg) => seg.key.startsWith('r') || seg.gap > 0);
 
     return html`
       ${repeat(
@@ -4689,7 +5792,7 @@ export class Y11nSpreadsheet extends LitElement {
         (seg) => seg.key,
         (seg) =>
           seg.gap > 0
-            ? html`<div style="grid-column: 1 / -1; height: ${seg.gap * cellHeight}px;"></div>`
+            ? html`<div style="grid-column: 1 / -1; height: ${seg.gap}px;"></div>`
             : this._renderRow(seg.row, cols)
       )}
     `;
@@ -4717,15 +5820,19 @@ export class Y11nSpreadsheet extends LitElement {
     const cellStyles = this._getCellStyles(row, c);
     if (row < this._frozenRowCount) cellStyles.top = this._stickyTop(row);
     if (c < this._frozenColCount) cellStyles.left = this._stickyLeft(c);
+    const filterHeader = this._isFilterHeader(row, c);
+    const filtered = filterHeader && this._filter!.criteria.has(c);
 
     return html`
       <div
-        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''} ${this._frozenClasses(row, c)}"
+        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''} ${filterHeader ? 'filter-header' : ''} ${this._frozenClasses(row, c)}"
         role="gridcell"
         aria-colindex="${c + 2}"
         aria-selected="${isSelected}"
         aria-readonly="${this.readOnly || locked}"
         aria-current="${isActive ? 'true' : nothing}"
+        aria-haspopup="${filterHeader ? 'dialog' : nothing}"
+        aria-expanded="${filterHeader ? String(this._filterMenu?.col === c) : nothing}"
         data-row="${row}"
         data-col="${c}"
         data-key="${key}"
@@ -4735,6 +5842,16 @@ export class Y11nSpreadsheet extends LitElement {
         @dblclick="${this._handleCellDblClick}"
       >
         <span class="cell-text">${display}</span>
+        ${filterHeader
+          ? html`<span
+              class="ls-filter-button ${filtered ? 'filtered' : ''}"
+              aria-hidden="true"
+              title="${filtered ? 'Filtered. ' : ''}Filter options (Alt+Down)"
+              data-filter-col="${c}"
+              @pointerdown="${this._handleFilterButtonPointerDown}"
+              @dblclick="${(e: Event) => e.stopPropagation()}"
+            >${filtered ? FUNNEL_ICON : CHEVRON_ICON}</span>`
+          : nothing}
         ${showFillHandle
           ? html`<div
               class="ls-fill-handle"
@@ -4750,10 +5867,14 @@ export class Y11nSpreadsheet extends LitElement {
     const range = this._selection.range;
     const inSelection = row >= range.start.row && row <= range.end.row;
     const fullRow = inSelection && range.start.col === 0 && range.end.col === this.cols - 1;
+    // Row numbers of a filtered table are coloured, as in Excel, since they skip hidden rows
+    const filter = this._filter;
+    const filteredRow =
+      filter !== null && filter.criteria.size > 0 && row > filter.range.start.row && row <= filter.range.end.row;
     return html`
       <div class="ls-row" role="row" aria-rowindex="${row + 2}">
         <div
-          class="ls-row-header ${inSelection ? 'in-selection' : ''} ${this._frozenClasses(row, -1)}"
+          class="ls-row-header ${inSelection ? 'in-selection' : ''} ${filteredRow ? 'filtered-row' : ''} ${this._frozenClasses(row, -1)}"
           style=${row < this._frozenRowCount ? `top: ${this._stickyTop(row)}` : nothing}
           role="rowheader"
           aria-colindex="1"
@@ -4780,7 +5901,12 @@ export class Y11nSpreadsheet extends LitElement {
   private _getAnnouncement(activeCell: CellCoord): string {
     const ref = `${colToLetter(activeCell.col)}${activeCell.row + 1}`;
     const display = this._getCellDisplay(activeCell.row, activeCell.col);
-    const base = display ? `${ref}: ${display}` : ref;
+    let base = display ? `${ref}: ${display}` : ref;
+    if (this._isFilterHeader(activeCell.row, activeCell.col)) {
+      base += this._filter!.criteria.has(activeCell.col)
+        ? ', filtered. Alt+Down for filter options'
+        : ', Alt+Down for filter options';
+    }
 
     const range = this._selection.range;
     const selRows = range.end.row - range.start.row + 1;

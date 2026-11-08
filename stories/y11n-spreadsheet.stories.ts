@@ -1255,3 +1255,40 @@ export const FrozenPanes: StoryObj = {
     },
   },
 };
+
+export const Filter: StoryObj = {
+  name: 'Filter',
+  render: () => {
+    const teams = ['Ops', 'Sales', 'Support'];
+    const cities = ['Berlin', 'Lisbon', 'Oslo', ''];
+    const rows: string[][] = [['Name', 'Team', 'City', 'Score']];
+    for (let r = 1; r <= 60; r++) {
+      rows.push([`Person ${r}`, teams[(r * 7) % 3], cities[(r * 5) % 4], String((r * 37) % 100)]);
+    }
+    const apply = (element?: Element) => {
+      const el = element as Y11nSpreadsheet | undefined;
+      if (el && !el.dataset.filtered) {
+        el.dataset.filtered = 'true';
+        el.updateComplete.then(() =>
+          el.setFilter({ start: { row: 0, col: 0 }, end: { row: 60, col: 3 } }, [{ col: 1, values: ['Sales', 'Support'] }])
+        );
+      }
+    };
+    return html`
+      <y11n-spreadsheet
+        .rows=${80}
+        .cols=${6}
+        .data=${gridFromRows(rows)}
+        frozen-rows="1"
+        ${ref(apply)}
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `The table is filtered to the Sales and Support teams: the row numbers skip the hidden Ops rows and turn blue. On a header cell, press Alt+Down (or click its button) to open the filter menu: search, check the values to show, then Enter or OK. The menu also sorts the table and clears the column's filter. Arrow keys, Ctrl+Arrow, copy, paste, fill and Delete skip the hidden rows. Ctrl+Shift+L removes the filter (and adds one to the table around the active cell); Ctrl+Alt+L reapplies it after edits. Ctrl+Z undoes filter changes.`,
+      },
+    },
+  },
+};
