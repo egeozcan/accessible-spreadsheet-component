@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-08
+
 ### Added
 
 - Filters: Ctrl+Shift+L adds a filter to a table (its first row is the header row) and Alt+Down on a header cell, or its button, opens an accessible filter menu: a dialog with sort, clear, a search box and a value checklist. API: `setFilter()`, `setColumnFilter()`, `reapplyFilter()` (also Ctrl+Alt+L), `removeFilter()`, `getFilter()`, `isRowHidden()`, `toggleFilter()`, `openFilterMenu()`. Values are compared as displayed. Rows re-filter only when the filter changes or is reapplied, not on every edit. Hidden rows take no space and keep their `aria-rowindex`. Navigation, copy, cut, paste, clear, fill, Ctrl+Enter, formatting shortcuts and sorting skip them, and deleting rows that include hidden ones is refused. Works in read-only mode and survives `setData()`. Undoable; fires `filter-change` and, for user changes, the cancelable `before-filter`. The filter moves with inserted and deleted rows/columns. New CSS custom properties `--ls-filter-button-color`, `--ls-filter-button-bg`, `--ls-filter-active-color`, `--ls-filtered-row-header-color` and `--ls-filter-menu-bg`.
