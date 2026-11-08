@@ -11,6 +11,7 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 - Frozen panes: keep header rows and columns in view while scrolling (`frozen-rows` / `frozen-cols`, Alt+Shift+F)
 - Resizable columns: drag a header border, double-click it to fit the content, or use Alt+Shift+Left / Right and Alt+Shift+0
 - Sort a range or the table around the active cell (Alt+Shift+Up / Down), by one or more columns, with header detection
+- Filter a table by the values in its columns, from an accessible header menu (Alt+Down) or the API; edits, fills and pastes skip the hidden rows
 - Find (Ctrl+F) with match count and next/previous navigation
 - Per-cell read-only flag, value validation, and cancelable `cell-edit-start` / `before-change` events
 - CSV/TSV import and export
@@ -125,6 +126,19 @@ sheet.freezePanes(1)      // freeze row 1 only
 sheet.freezePanes()       // freeze the rows above and columns left of the active cell (at A1: unfreeze)
 sheet.unfreezePanes()
 
+// Filters (undoable; work in read-only mode)
+const people = { start: { row: 0, col: 0 }, end: { row: 60, col: 3 } }; // row 1 holds the headers
+sheet.setFilter(people)                                     // filter buttons, nothing hidden yet
+sheet.setFilter(people, [{ col: 1, values: ['Sales', 'Support'] }]) // keep rows whose B shows Sales or Support
+sheet.setColumnFilter(2, ['Oslo', ''])                      // and whose C is Oslo or blank
+sheet.setColumnFilter(2, null)                              // clear column C's criteria
+sheet.reapplyFilter()                                       // re-filter after edits
+sheet.getFilter()        // { range, columns: [{ col, values }], hiddenRows: [...] } or null
+sheet.isRowHidden(5)
+sheet.removeFilter()
+sheet.toggleFilter()     // what Ctrl+Shift+L does: remove the filter, or add one to the table around the active cell
+sheet.openFilterMenu(1)  // open column B's filter menu (Alt+Down on its header)
+
 // Find
 sheet.findCells('total')                      // ['5:0', ...] in reading order
 sheet.findCells('SUM', { formulas: true, matchCase: true })
@@ -147,6 +161,18 @@ Column widths are presentation, not data: they can be changed in read-only mode,
 `freeze-change` (`{ rows, cols, source }`) fires when the frozen area changes through `freezePanes()`, `unfreezePanes()`, Alt+Shift+F or an insert/delete, not when you set the properties yourself. Frozen cells need an opaque background: set `--ls-cell-bg` to your grid's background color if it isn't white. Keep the frozen area smaller than the visible grid: cells below or right of a frozen area that fills the view can't be scrolled into sight (Alt+Shift+F refuses to freeze that much; the API and attributes don't check).
 
 `fromCSV` drops values outside `rows` × `cols` (and throws a `RangeError` for a negative or non-integer `start`); use the exported `parseDelimited(text)` to size the grid first if needed.
+
+### Filters
+
+A filter hides the rows of a table whose cells don't match. The table's first row is its header row: it is never hidden, and each of its cells gets a filter button. For each filtered column, a row stays visible only if the column displays one of the column's values, compared as shown on screen (number formats included; `''` matches blank cells). Filtered columns show a funnel icon and the table's row numbers turn blue.
+
+On a header cell, Alt+Down (or a click on its button) opens the filter menu, a dialog with Sort A to Z / Z to A, Clear filter, a search box and a checklist of the column's values. The list holds the values of the rows that pass the other columns' filters, sorted like `sort()` with (Blanks) last. Arrow keys move through it, Space checks a value, and Enter applies (OK). Searching checks every match, and OK then keeps only the checked matches, as in Excel. Escape or a click outside closes the menu without changes. Ctrl+Shift+L adds a filter to the selection, or to the table around the active cell (removing it if there is one), and Ctrl+Alt+L reapplies it.
+
+Filters are a view, like column widths: they work in read-only mode, survive `setData()`, and aren't part of `getData()`. Every change is undoable, though. Rows don't hide or reappear as cells are edited (that would move rows out from under the cursor): the filter is evaluated when it is set, changed or reapplied. When the user changes or reapplies a filter, it first grows over rows of data added right below the table. The filter moves with inserted and deleted rows and columns; deleting its header row removes it.
+
+While rows are hidden, the user's actions skip them: arrow keys, Ctrl+Arrow, Page Up/Down and Ctrl+End step over them, and copy, cut, paste, Delete, fill (Ctrl+D, Ctrl+Alt+D, the fill handle), Ctrl+Enter and Ctrl+B/I/U only touch the visible rows. A paste goes to the visible rows from the anchor down, and formulas shift by how far each row actually moved. Sorting (from the menu, Alt+Shift+Up/Down or `sort()`) reorders only the visible rows; the hidden ones stay where they are. Deleting selected rows is refused while some of them are hidden. The find bar skips hidden cells, while `findCells()`, `toCSV()` and the other API methods see every row. Screen readers hear the real row numbers, since hidden rows keep their place in `aria-rowindex`.
+
+`filter-change` fires after every change (`{ range, columns, hiddenRows, source }`, with `range: null` once the filter is removed), including undo/redo and inserts or deletes that move the filter. User changes fire the cancelable `before-filter` first, with the same detail describing the result.
 
 ### Cell formats
 
@@ -189,6 +215,11 @@ sheet.addEventListener('structure-change', (e) => {
 sheet.addEventListener('column-resize', (e) => {
   const { columns, source } = e.detail; // columns: [{ col, width }]
   localStorage.setItem('widths', JSON.stringify(sheet.getColumnWidths()));
+});
+
+// The filter changed (also on undo/redo; range is null once it was removed)
+sheet.addEventListener('filter-change', (e) => {
+  const { range, columns, hiddenRows, source } = e.detail; // columns: [{ col, values }]
 });
 
 // A range was sorted (also on undo/redo; on undo the detail describes the sort that was undone)
@@ -325,6 +356,10 @@ y11n-spreadsheet {
 | `--ls-fill-preview-bg` | `rgba(26, 115, 232, 0.08)` | Cells a fill-handle drag will fill |
 | `--ls-fill-preview-border` | `#1a73e8` | Dashed outline of those cells |
 | `--ls-validation-bg` / `--ls-validation-color` / `--ls-validation-border` | `#fdecea` / `#8a1c12` / `#d93025` | Validation message |
+| `--ls-filter-button-color` / `--ls-filter-button-bg` | `#555` / `#fff` | Filter button in a header cell |
+| `--ls-filter-active-color` | `#1a73e8` | Filter button of a filtered column, and the menu's OK button |
+| `--ls-filtered-row-header-color` | `#1a73e8` | Row numbers of a filtered table |
+| `--ls-filter-menu-bg` | `#fff` | Filter menu background |
 | `--ls-find-bg` | `#fff` | Find bar background |
 | `--ls-find-status-color` | `#555` | Find bar match count |
 
@@ -365,6 +400,9 @@ y11n-spreadsheet::part(editor) {
 | Alt + Shift + Left / Right | Narrow / widen the selected columns by 8px; the new width is announced (on macOS use Option) |
 | Alt + Shift + 0 | Fit the selected columns to their content |
 | Alt + Shift + Up / Down | Sort ascending / descending by the active cell's column: the selection, or the table around the active cell (on macOS use Option) |
+| Ctrl/Cmd + Shift + L | Add a filter to the selection or the table around the active cell; remove the filter |
+| Alt + Down | On a filter header cell: open its filter menu (on macOS use Option) |
+| Ctrl + Alt + L | Reapply the filter, after edits (on macOS use Ctrl+Option) |
 | Ctrl/Cmd + F | Find. In the find bar: Enter / Shift+Enter (or F3 / Shift+F3) next / previous match, Escape closes |
 | Ctrl+C / X / V | Copy / Cut / Paste |
 | Ctrl+Z | Undo |
@@ -402,6 +440,9 @@ import type {
   SortDirection,         // 'ascending' | 'descending'
   ColumnResizeDetail,    // { columns: [{ col, width }], source }
   FreezeChangeDetail,    // { rows, cols, source }
+  FilterColumn,          // { col, values }
+  FilterInfo,            // { range, columns, hiddenRows }
+  FilterChangeDetail,    // { range | null, columns, hiddenRows, source }
   CellValidator,
 } from 'y11n-spreadsheet';
 ```

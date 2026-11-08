@@ -32,10 +32,19 @@ export class SelectionManager implements ReactiveController {
   private _maxRows: number;
   private _maxCols: number;
 
-  constructor(host: ReactiveControllerHost, maxRows: number, maxCols: number) {
+  /** Whether a row is hidden (filtered out); keyboard moves step over hidden rows */
+  private _isRowHidden: (row: number) => boolean;
+
+  constructor(
+    host: ReactiveControllerHost,
+    maxRows: number,
+    maxCols: number,
+    isRowHidden: (row: number) => boolean = () => false
+  ) {
     this.host = host;
     this._maxRows = maxRows;
     this._maxCols = maxCols;
+    this._isRowHidden = isRowHidden;
     host.addController(this);
   }
 
@@ -150,7 +159,7 @@ export class SelectionManager implements ReactiveController {
     // active cell, which can differ from the head after a row/column select.
     const base = extend ? this.head : this.activeCell;
     const newHead = this.clamp({
-      row: base.row + dRow,
+      row: this.stepRows(base.row, dRow),
       col: base.col + dCol,
     });
 
@@ -248,6 +257,25 @@ export class SelectionManager implements ReactiveController {
   // ─── Helpers ────────────────────────────────────────
 
   /**
+   * The row `delta` visible rows away from `from`, skipping hidden rows.
+   * Stops at the last visible row before the grid edge.
+   *
+   * @param from - Starting row
+   * @param delta - Number of visible rows to move (negative moves up)
+   */
+  stepRows(from: number, delta: number): number {
+    const dir = Math.sign(delta);
+    let row = Math.max(0, Math.min(from, this._maxRows - 1));
+    for (let remaining = Math.abs(delta); remaining > 0; remaining--) {
+      let next = row + dir;
+      while (next >= 0 && next < this._maxRows && this._isRowHidden(next)) next += dir;
+      if (next < 0 || next >= this._maxRows) break;
+      row = next;
+    }
+    return row;
+  }
+
+  /**
    * Keep the active-cell override only while extending and only while it is
    * still inside the range; otherwise the head is the active cell again.
    */
@@ -286,6 +314,7 @@ export class SelectionManager implements ReactiveController {
  * @param rows - Grid row count
  * @param cols - Grid column count
  * @param isFilled - Whether the cell at (row, col) has content
+ * @param isSkipped - Cells to step over as if absent (e.g. rows hidden by a filter)
  * @returns The cell to jump to (equal to `from` when already at the edge)
  */
 export function findDataEdge(
@@ -294,25 +323,37 @@ export function findDataEdge(
   dCol: number,
   rows: number,
   cols: number,
-  isFilled: (row: number, col: number) => boolean
+  isFilled: (row: number, col: number) => boolean,
+  isSkipped: (row: number, col: number) => boolean = () => false
 ): CellCoord {
   const inBounds = (r: number, c: number) => r >= 0 && r < rows && c >= 0 && c < cols;
-  let { row, col } = from;
-  if (!inBounds(row + dRow, col + dCol)) return { row, col };
-
-  if (isFilled(row, col) && isFilled(row + dRow, col + dCol)) {
-    while (inBounds(row + dRow, col + dCol) && isFilled(row + dRow, col + dCol)) {
-      row += dRow;
-      col += dCol;
+  // The next cell in the direction that isn't skipped, or null past the edge
+  const step = (p: CellCoord): CellCoord | null => {
+    let r = p.row + dRow;
+    let c = p.col + dCol;
+    while (inBounds(r, c) && isSkipped(r, c)) {
+      r += dRow;
+      c += dCol;
     }
-    return { row, col };
+    return inBounds(r, c) ? { row: r, col: c } : null;
+  };
+  let cur: CellCoord = { row: from.row, col: from.col };
+  let next = step(cur);
+  if (!next) return cur;
+
+  if (isFilled(cur.row, cur.col) && isFilled(next.row, next.col)) {
+    while (next && isFilled(next.row, next.col)) {
+      cur = next;
+      next = step(cur);
+    }
+    return cur;
   }
 
-  row += dRow;
-  col += dCol;
-  while (!isFilled(row, col) && inBounds(row + dRow, col + dCol)) {
-    row += dRow;
-    col += dCol;
+  cur = next;
+  next = step(cur);
+  while (!isFilled(cur.row, cur.col) && next) {
+    cur = next;
+    next = step(cur);
   }
-  return { row, col };
+  return cur;
 }
