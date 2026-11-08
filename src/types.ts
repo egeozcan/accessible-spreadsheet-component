@@ -284,6 +284,20 @@ export interface ColumnResizeDetail {
 }
 
 /**
+ * Detail for the `freeze-change` event, fired when the frozen rows/columns
+ * change through `freezePanes()`, Alt+Shift+F, or rows/columns inserted or
+ * deleted inside the frozen area (not when the properties are set directly).
+ */
+export interface FreezeChangeDetail {
+  /** Number of frozen rows at the top */
+  rows: number;
+  /** Number of frozen columns at the left */
+  cols: number;
+  /** What triggered the change */
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
+}
+
+/**
  * Detail for the `format-change` event, fired when cell formatting is modified.
  */
 export interface FormatChangeDetail {

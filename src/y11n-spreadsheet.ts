@@ -25,6 +25,7 @@ import {
   type SortOptions,
   type SortDetail,
   type ColumnResizeDetail,
+  type FreezeChangeDetail,
   cellKey,
   colToLetter,
   coordToRef,
@@ -244,6 +245,7 @@ function formatSeriesNumber(value: number): string {
  * @fires sort-change - After a range is sorted (also on undo/redo)
  * @fires before-column-resize - Before a user resizes columns (cancelable)
  * @fires column-resize - After column widths change (also on undo/redo)
+ * @fires freeze-change - After the frozen rows/columns change (not when the properties are set directly)
  *
  * @csspart editor - The inline cell editor input element
  * @csspart validation-message - The message shown under the editor when a value is rejected
@@ -270,6 +272,16 @@ export class Y11nSpreadsheet extends LitElement {
    * to accept it. Clearing a cell is never validated.
    */
   @property({ attribute: false }) validateCell?: CellValidator;
+  /**
+   * Number of rows at the top that stay in view while scrolling. At least
+   * one row always scrolls. Default: 0
+   */
+  @property({ type: Number, attribute: 'frozen-rows', reflect: true }) frozenRows = 0;
+  /**
+   * Number of columns at the left that stay in view while scrolling. At
+   * least one column always scrolls. Default: 0
+   */
+  @property({ type: Number, attribute: 'frozen-cols', reflect: true }) frozenCols = 0;
 
   // ─── Internal State ─────────────────────────────────
 
@@ -758,6 +770,35 @@ export class Y11nSpreadsheet extends LitElement {
       }
     }
     this._resizeColumns(cols.map((col) => ({ col, width: this._fitWidth(col) })), 'programmatic');
+  }
+
+  // ─── Frozen Panes API ────────────────────────────────
+
+  /**
+   * Freeze the top `rows` rows and left `cols` columns (default 0) so they
+   * stay in view while the rest scrolls. Without arguments, freezes the rows
+   * above and the columns left of the active cell, as Alt+Shift+F does (at
+   * A1 that unfreezes). Values are
+   * clamped so at least one row and column scroll. Not undoable (a view
+   * setting); fires `freeze-change`.
+   *
+   * @param rows - Number of rows to freeze
+   * @param cols - Number of columns to freeze
+   */
+  freezePanes(rows?: number, cols?: number): void {
+    const active = this._selection.activeCell;
+    const r = rows ?? active.row;
+    // freezePanes(1) freezes one row, not also the columns left of the active cell
+    const c = cols ?? (rows === undefined ? active.col : 0);
+    if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0) {
+      throw new RangeError('freezePanes: rows and cols must be non-negative integers');
+    }
+    this._setFrozen(r, c, 'programmatic');
+  }
+
+  /** Unfreeze all rows and columns. Fires `freeze-change`. */
+  unfreezePanes(): void {
+    this._setFrozen(0, 0, 'programmatic');
   }
 
   // ─── Find API ────────────────────────────────────────
@@ -1759,8 +1800,23 @@ export class Y11nSpreadsheet extends LitElement {
         .filter((c) => from.get(c) !== to.get(c))
         .map((c) => ({ col: c, width: to.get(c) ?? this._cellSize.width }));
     }
+    // The change as applied now: undo applies the inverse
+    const { change } = structure;
+    const applied: StructureChange =
+      side === 'after' ? change : { ...change, kind: change.kind === 'insert' ? 'delete' : 'insert' };
+    const frozenBefore = { rows: this._frozenRowCount, cols: this._frozenColCount };
+    const frozenNext = this._frozenAfterStructureChange(applied);
     this.rows = side === 'after' ? structure.rowsAfter : structure.rowsBefore;
     this.cols = side === 'after' ? structure.colsAfter : structure.colsBefore;
+    // Store the effective counts, so a clamped value can't come back later
+    if (applied.axis === 'row') this.frozenRows = Math.min(frozenNext, this.rows - 1);
+    else this.frozenCols = Math.min(frozenNext, this.cols - 1);
+    if (applied.axis !== 'row') this.frozenRows = this._frozenRowCount;
+    else this.frozenCols = this._frozenColCount;
+    const frozen =
+      this._frozenRowCount !== frozenBefore.rows || this._frozenColCount !== frozenBefore.cols
+        ? { rows: this._frozenRowCount, cols: this._frozenColCount }
+        : null;
     this._selection.setBounds(this.rows, this.cols);
     this._lastSyncedDataRef = this.data;
 
@@ -1777,9 +1833,8 @@ export class Y11nSpreadsheet extends LitElement {
       source,
       operation: batch.operation,
     });
-    const { change } = structure;
-    const kind = side === 'after' ? change.kind : change.kind === 'insert' ? 'delete' : 'insert';
-    this._dispatchStructureChange({ ...change, kind, source });
+    this._dispatchStructureChange({ ...change, kind: applied.kind, source });
+    if (frozen) this._dispatchFreezeChange({ ...frozen, source });
     if (movedWidths.length > 0) {
       // So hosts that save widths on column-resize see them move
       this.dispatchEvent(
@@ -2051,6 +2106,146 @@ export class Y11nSpreadsheet extends LitElement {
     return bold(start.row) && !bold(start.row + 1);
   }
 
+  // ─── Frozen Panes ───────────────────────────────────
+
+  /** Frozen rows in effect: the property clamped so at least one row scrolls. */
+  private get _frozenRowCount(): number {
+    const n = Math.floor(Number(this.frozenRows));
+    return Number.isFinite(n) ? Math.max(0, Math.min(n, this.rows - 1)) : 0;
+  }
+
+  private get _frozenColCount(): number {
+    const n = Math.floor(Number(this.frozenCols));
+    return Number.isFinite(n) ? Math.max(0, Math.min(n, this.cols - 1)) : 0;
+  }
+
+  /** Height in px of the frozen rows, below the column header. */
+  private get _frozenHeight(): number {
+    return this._frozenRowCount * this._cellSize.height;
+  }
+
+  /** Width in px of the frozen columns, right of the row header. */
+  private get _frozenWidth(): number {
+    return this._colLeft(this._frozenColCount);
+  }
+
+  private _setFrozen(rows: number, cols: number, source: FreezeChangeDetail['source']): boolean {
+    const r = Math.max(0, Math.min(rows, this.rows - 1));
+    const c = Math.max(0, Math.min(cols, this.cols - 1));
+    if (r === this._frozenRowCount && c === this._frozenColCount) {
+      // Normalize an out-of-range property value without an event
+      this.frozenRows = r;
+      this.frozenCols = c;
+      return false;
+    }
+    this.frozenRows = r;
+    this.frozenCols = c;
+    // The frozen rows/columns now cover the start of the viewport, which may
+    // hide the active cell: scroll it clear (without moving focus), after the
+    // render applies the new scroll padding its snap position depends on
+    this.updateComplete.then(() => {
+      const { row, col } = this._selection.activeCell;
+      this._ensureCellVisible(row, col);
+    });
+    this._dispatchFreezeChange({ rows: r, cols: c, source });
+    return true;
+  }
+
+  private _dispatchFreezeChange(detail: FreezeChangeDetail): void {
+    this.dispatchEvent(new CustomEvent<FreezeChangeDetail>('freeze-change', { detail, bubbles: true, composed: true }));
+  }
+
+  /** Alt+Shift+F: unfreeze, or freeze the rows above and columns left of the active cell. */
+  private _toggleFreeze(): void {
+    if (this._frozenRowCount > 0 || this._frozenColCount > 0) {
+      this._setFrozen(0, 0, 'user');
+      this._modeAnnouncement = 'Panes unfrozen';
+      return;
+    }
+    const { row, col } = this._selection.activeCell;
+    if (row === 0 && col === 0) {
+      this._modeAnnouncement = 'Nothing to freeze: move below or right of the rows and columns to keep in view';
+      return;
+    }
+    const gridEl = this._grid;
+    const h = this._cellSize.height;
+    // Leave at least two rows (one column) of scrolling area, when the grid has a size
+    if (
+      gridEl?.clientHeight &&
+      (row * h > gridEl.clientHeight - 3 * h ||
+        this._colLeft(col) > gridEl.clientWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH - this._colWidth(col))
+    ) {
+      this._modeAnnouncement = 'Cannot freeze: the frozen area would not fit on screen';
+      return;
+    }
+    this._setFrozen(row, col, 'user');
+    const parts: string[] = [];
+    if (row > 0) parts.push(row === 1 ? 'row 1' : `rows 1 to ${row}`);
+    if (col > 0) parts.push(col === 1 ? 'column A' : `columns A to ${colToLetter(col - 1)}`);
+    this._modeAnnouncement = `Froze ${parts.join(' and ')}`;
+  }
+
+  /**
+   * Frozen count on `change.axis` after a row/column insertion or deletion
+   * (the freeze line follows the content, as in Excel), from the current
+   * effective count. Undo/redo pass the inverse change, so a freeze made
+   * after the original change is respected.
+   */
+  private _frozenAfterStructureChange(change: StructureChange): number {
+    const frozen = change.axis === 'row' ? this._frozenRowCount : this._frozenColCount;
+    if (change.kind === 'insert') return change.index < frozen ? frozen + change.count : frozen;
+    const overlap = Math.max(0, Math.min(frozen, change.index + change.count) - change.index);
+    return frozen - overlap;
+  }
+
+  /**
+   * The grid's scroll padding: the sticky header row and frozen rows at the
+   * top, the row header and frozen columns at the left. Scroll snapping then
+   * aligns a row just below the frozen area (its snap position is exactly
+   * where `_ensureCellVisible` scrolls a row to), and the browser's own
+   * focus scrolling keeps cells out from under the sticky parts.
+   */
+  private _scrollPadding(): string {
+    return (
+      `scroll-padding-top: calc(var(--_cell-height) * ${1 + this._frozenRowCount}); ` +
+      `scroll-padding-left: ${this._stickyLeft(this._frozenColCount)};`
+    );
+  }
+
+  /** CSS for a frozen row's sticky top offset: below the header and the frozen rows above it. */
+  private _stickyTop(row: number): string {
+    return `calc(var(--_cell-height) * ${row + 1})`;
+  }
+
+  /** Classes marking a cell or header as frozen (pass -1 for a header's other axis). */
+  private _frozenClasses(row: number, col: number): string {
+    const fr = this._frozenRowCount;
+    const fc = this._frozenColCount;
+    const classes: string[] = [];
+    // Headers pass -1 for the other axis, which must never match an edge
+    if (row >= 0 && row < fr) classes.push('frozen-row');
+    if (row >= 0 && row === fr - 1) classes.push('frozen-row-edge');
+    if (col >= 0 && col < fc) classes.push('frozen-col');
+    if (col >= 0 && col === fc - 1) classes.push('frozen-col-edge');
+    return classes.join(' ');
+  }
+
+  /**
+   * CSS for a frozen column's sticky left offset: the row header plus the
+   * widths of the columns before it, with default-width columns kept as
+   * `var(--_cell-width)` so the offset follows the CSS variable exactly.
+   */
+  private _stickyLeft(col: number): string {
+    let px = 0;
+    let defaults = 0;
+    for (let c = 0; c < col; c++) {
+      const custom = this._resizePreview?.cols.includes(c) ? this._resizePreview.width : this._colWidths.get(c);
+      if (custom === undefined) defaults++;
+      else px += custom;
+    }
+    return `calc(var(--_row-header-width) + ${px}px + ${defaults} * var(--_cell-width))`;
+  }
+
   // ─── Column Widths ──────────────────────────────────
 
   private _colWidth(col: number): number {
@@ -2196,12 +2391,14 @@ export class Y11nSpreadsheet extends LitElement {
     const top = row * this._cellSize.height;
     const viewWidth = gridEl.clientWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH;
     const viewHeight = gridEl.clientHeight - this._cellSize.height;
-    return (
-      right > this._scrollLeft &&
-      left < this._scrollLeft + viewWidth &&
-      top + this._cellSize.height > this._scrollTop &&
-      top < this._scrollTop + viewHeight
-    );
+    // Frozen cells are always in view; the others scroll beside the frozen area
+    const inX =
+      col < this._frozenColCount ||
+      (right > this._scrollLeft + this._frozenWidth && left < this._scrollLeft + viewWidth);
+    const inY =
+      row < this._frozenRowCount ||
+      (top + this._cellSize.height > this._scrollTop + this._frozenHeight && top < this._scrollTop + viewHeight);
+    return inX && inY;
   }
 
   /** The columns a resize of `col` applies to: all selected whole columns, if `col` is one of them. */
@@ -2648,6 +2845,15 @@ export class Y11nSpreadsheet extends LitElement {
       return;
     }
 
+    // Alt+Shift+F: freeze the rows above and columns left of the active cell,
+    // or unfreeze. A view setting, so allowed in read-only mode.
+    if (e.altKey && shift && !ctrl && e.code === 'KeyF') {
+      e.preventDefault();
+      e.stopPropagation();
+      this._toggleFreeze();
+      return;
+    }
+
     // Alt+Shift+Left / Alt+Shift+Right: narrow / widen the selected columns.
     // Alt+Shift+0: fit them to their content. Allowed in read-only mode.
     if (e.altKey && shift && !ctrl && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.code === 'Digit0')) {
@@ -2731,7 +2937,8 @@ export class Y11nSpreadsheet extends LitElement {
       case 'Home':
         e.preventDefault();
         if (ctrl) {
-          this._selection.moveTo(0, 0, shift);
+          // With frozen panes, the top-left of the scrolling area (as in Excel)
+          this._selection.moveTo(this._frozenRowCount, this._frozenColCount, shift);
         } else {
           this._selection.moveTo(this._selection.activeCell.row, 0, shift);
         }
@@ -2755,7 +2962,7 @@ export class Y11nSpreadsheet extends LitElement {
         const cellHeight = this._cellSize.height;
         const gridEl = this._grid;
         const viewHeight = gridEl?.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
-        const pageRows = Math.max(1, Math.floor(viewHeight / cellHeight) - 1);
+        const pageRows = Math.max(1, Math.floor((viewHeight - this._frozenHeight) / cellHeight) - 1);
         this._selection.move(pageRows, 0, shift);
         this._dispatchSelectionChange();
         this.updateComplete.then(() => this._focusActiveCell());
@@ -2767,7 +2974,7 @@ export class Y11nSpreadsheet extends LitElement {
         const cellHeight = this._cellSize.height;
         const gridEl = this._grid;
         const viewHeight = gridEl?.clientHeight || cellHeight * Y11nSpreadsheet.INITIAL_VIEW_ROWS;
-        const pageRows = Math.max(1, Math.floor(viewHeight / cellHeight) - 1);
+        const pageRows = Math.max(1, Math.floor((viewHeight - this._frozenHeight) / cellHeight) - 1);
         this._selection.move(-pageRows, 0, shift);
         this._dispatchSelectionChange();
         this.updateComplete.then(() => this._focusActiveCell());
@@ -3785,6 +3992,9 @@ export class Y11nSpreadsheet extends LitElement {
     const { row: activeRow, col: activeCol } = this._selection.activeCell;
     const extraRows = [activeRow];
     const extraCols = [activeCol];
+    // Frozen rows and columns are always on screen
+    for (let r = 0; r < this._frozenRowCount; r++) extraRows.push(r);
+    for (let c = 0; c < this._frozenColCount; c++) extraCols.push(c);
     if (this._refMode) {
       extraRows.push(this._refCursorRow);
       extraCols.push(this._refCursorCol);
@@ -3819,16 +4029,24 @@ export class Y11nSpreadsheet extends LitElement {
     const cellLeft = this._colLeft(col);
     const cellRight = cellLeft + this._colWidth(col);
 
+    // Frozen rows/columns never need scrolling; the others must clear the
+    // frozen area, which covers the start of the viewport
+    const frozenHeight = this._frozenHeight;
+    const frozenWidth = this._frozenWidth;
     let nextScrollTop = this._scrollTop;
-    if (cellTop < nextScrollTop) {
-      nextScrollTop = cellTop;
+    if (row < this._frozenRowCount) {
+      // stays put
+    } else if (cellTop - frozenHeight < nextScrollTop) {
+      nextScrollTop = Math.max(0, cellTop - frozenHeight);
     } else if (cellBottom > nextScrollTop + dataViewportHeight) {
       nextScrollTop = cellBottom - dataViewportHeight;
     }
 
     let nextScrollLeft = this._scrollLeft;
-    if (cellLeft < nextScrollLeft) {
-      nextScrollLeft = cellLeft;
+    if (col < this._frozenColCount) {
+      // stays put
+    } else if (cellLeft - frozenWidth < nextScrollLeft) {
+      nextScrollLeft = Math.max(0, cellLeft - frozenWidth);
     } else if (cellRight > nextScrollLeft + dataViewportWidth) {
       nextScrollLeft = cellRight - dataViewportWidth;
     }
@@ -3890,8 +4108,9 @@ export class Y11nSpreadsheet extends LitElement {
     const cellWidth = this._colWidth(col);
     const headerWidth = Y11nSpreadsheet.ROW_HEADER_WIDTH;
 
-    const top = (row + 1) * cellHeight - this._scrollTop; // +1 for header, offset by scroll
-    const left = headerWidth + this._colLeft(col) - this._scrollLeft;
+    // +1 for the header row; frozen cells don't move with the scroll position
+    const top = (row + 1) * cellHeight - (row < this._frozenRowCount ? 0 : this._scrollTop);
+    const left = headerWidth + this._colLeft(col) - (col < this._frozenColCount ? 0 : this._scrollLeft);
 
     const styles: Record<string, string> = {
       display: 'block',
@@ -3902,6 +4121,11 @@ export class Y11nSpreadsheet extends LitElement {
       height: `${cellHeight}px`,
       'z-index': '10',
     };
+    // A scrolling cell can slide under the headers and frozen panes: clip the
+    // editor to what's left of the cell, so it never covers them
+    const clipTop = row < this._frozenRowCount ? 0 : Math.max(0, cellHeight + this._frozenHeight - top);
+    const clipLeft = col < this._frozenColCount ? 0 : Math.max(0, headerWidth + this._frozenWidth - left);
+    if (clipTop > 0 || clipLeft > 0) styles['clip-path'] = `inset(${clipTop}px 0 0 ${clipLeft}px)`;
 
     // Inherit cell formatting into the editor (via styleMap for safety)
     const fmtStyles = this._getCellStyles(row, col);
@@ -3942,6 +4166,9 @@ export class Y11nSpreadsheet extends LitElement {
       --_selection-bg: var(--ls-selection-bg, rgba(26, 115, 232, 0.2));
       --_focus-ring: var(--ls-focus-ring, 2px solid #1a73e8);
       --_editor-bg: var(--ls-editor-bg, #fff);
+      /* Background of frozen cells, which must be opaque over scrolled cells */
+      --_cell-bg: var(--ls-cell-bg, #fff);
+      --_frozen-line: var(--ls-frozen-line-color, #9aa0a6);
       --_editor-shadow: var(--ls-editor-shadow, 0 2px 6px rgba(0,0,0,0.2));
       --_row-header-width: 50px;
     }
@@ -3999,11 +4226,16 @@ export class Y11nSpreadsheet extends LitElement {
       display: contents;
     }
 
+    /*
+     * Stacking, bottom to top: cells (focused/active: 1), frozen cells (2),
+     * cells frozen on both axes (3), row headers (4), frozen row headers (5),
+     * column headers (6), frozen column headers (7), the corner (8).
+     */
     .ls-corner-header,
     .ls-col-header {
       position: sticky;
       top: 0;
-      z-index: 3;
+      z-index: 6;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -4018,7 +4250,7 @@ export class Y11nSpreadsheet extends LitElement {
     .ls-corner-header {
       position: sticky;
       left: 0;
-      z-index: 4;
+      z-index: 8;
       scroll-snap-align: start;
     }
 
@@ -4051,7 +4283,7 @@ export class Y11nSpreadsheet extends LitElement {
     .ls-row-header {
       position: sticky;
       left: 0;
-      z-index: 2;
+      z-index: 4;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -4078,6 +4310,8 @@ export class Y11nSpreadsheet extends LitElement {
       outline: none;
       user-select: none;
       position: relative;
+      /* Contain the fill handle's z-index, so it can't rise above frozen cells */
+      isolation: isolate;
     }
 
     .ls-cell.read-only-cell:not([aria-selected='true']) {
@@ -4129,6 +4363,59 @@ export class Y11nSpreadsheet extends LitElement {
     .ls-cell .cell-text {
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    /* Frozen panes: sticky (top/left set inline), opaque, above scrolled cells */
+    .ls-cell.frozen-row,
+    .ls-cell.frozen-col {
+      position: sticky;
+      z-index: 2;
+      background-color: var(--_cell-bg);
+    }
+
+    .ls-cell.frozen-row.frozen-col {
+      z-index: 3;
+    }
+
+    /* Translucent states are layered over the opaque background */
+    .ls-cell.frozen-row[aria-selected='true'],
+    .ls-cell.frozen-col[aria-selected='true'] {
+      background: linear-gradient(var(--_selection-bg), var(--_selection-bg)), var(--_cell-bg);
+    }
+
+    .ls-cell.frozen-row.read-only-cell:not([aria-selected='true']),
+    .ls-cell.frozen-col.read-only-cell:not([aria-selected='true']) {
+      background: linear-gradient(var(--ls-readonly-cell-bg, transparent), var(--ls-readonly-cell-bg, transparent)), var(--_cell-bg);
+    }
+
+    .ls-cell.frozen-row.fill-preview,
+    .ls-cell.frozen-col.fill-preview {
+      background: linear-gradient(var(--ls-fill-preview-bg, rgba(26, 115, 232, 0.08)), var(--ls-fill-preview-bg, rgba(26, 115, 232, 0.08))), var(--_cell-bg);
+    }
+
+    .ls-cell.frozen-row.ref-highlight,
+    .ls-cell.frozen-col.ref-highlight {
+      background: linear-gradient(var(--ls-ref-highlight-bg, rgba(26, 115, 232, 0.15)), var(--ls-ref-highlight-bg, rgba(26, 115, 232, 0.15))), var(--_cell-bg);
+    }
+
+    .ls-row-header.frozen-row {
+      z-index: 5;
+      /* Sticky snap areas would fight the scrolling rows' snap points */
+      scroll-snap-align: none;
+    }
+
+    .ls-col-header.frozen-col {
+      z-index: 7;
+    }
+
+    /* The freeze lines */
+    .frozen-row-edge {
+      border-bottom: 2px solid var(--_frozen-line);
+    }
+
+    .ls-cell.frozen-col-edge,
+    .ls-col-header.frozen-col-edge {
+      border-right: 2px solid var(--_frozen-line);
     }
 
     #editor {
@@ -4275,7 +4562,7 @@ export class Y11nSpreadsheet extends LitElement {
             aria-colcount="${this.cols + 1}"
             aria-readonly="${this.readOnly}"
             aria-multiselectable="true"
-            style="--cols: ${this.cols}; grid-template-columns: ${this._gridTemplateColumns()};"
+            style="--cols: ${this.cols}; grid-template-columns: ${this._gridTemplateColumns()}; ${this._scrollPadding()}"
             tabindex="-1"
             @keydown="${this._handleGridKeydown}"
             @scroll="${this._handleScroll}"
@@ -4360,7 +4647,8 @@ export class Y11nSpreadsheet extends LitElement {
           this.cols,
           (c) => html`
             <div
-              class="ls-col-header ${c >= range.start.col && c <= range.end.col ? 'in-selection' : ''}"
+              class="ls-col-header ${c >= range.start.col && c <= range.end.col ? 'in-selection' : ''} ${this._frozenClasses(-1, c)}"
+              style=${c < this._frozenColCount ? `left: ${this._stickyLeft(c)}` : nothing}
               role="columnheader"
               aria-colindex="${c + 2}"
               aria-label="Column ${colToLetter(c)}"
@@ -4427,10 +4715,12 @@ export class Y11nSpreadsheet extends LitElement {
       c <= preview.end.col;
 
     const cellStyles = this._getCellStyles(row, c);
+    if (row < this._frozenRowCount) cellStyles.top = this._stickyTop(row);
+    if (c < this._frozenColCount) cellStyles.left = this._stickyLeft(c);
 
     return html`
       <div
-        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''}"
+        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''} ${this._frozenClasses(row, c)}"
         role="gridcell"
         aria-colindex="${c + 2}"
         aria-selected="${isSelected}"
@@ -4463,7 +4753,8 @@ export class Y11nSpreadsheet extends LitElement {
     return html`
       <div class="ls-row" role="row" aria-rowindex="${row + 2}">
         <div
-          class="ls-row-header ${inSelection ? 'in-selection' : ''}"
+          class="ls-row-header ${inSelection ? 'in-selection' : ''} ${this._frozenClasses(row, -1)}"
+          style=${row < this._frozenRowCount ? `top: ${this._stickyTop(row)}` : nothing}
           role="rowheader"
           aria-colindex="1"
           aria-label="Row ${row + 1}"

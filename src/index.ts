@@ -32,6 +32,7 @@ export type {
   SortOptions,
   SortDetail,
   ColumnResizeDetail,
+  FreezeChangeDetail,
 } from './types.js';
 export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual, formatNumber, dateToSerial, dateSerialToDate } from './types.js';
 export { parseDelimited, serializeDelimited, quoteDelimitedField } from './utils/delimited.js';

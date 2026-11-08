@@ -449,6 +449,7 @@ export const DarkTheme: StoryObj = {
           --ls-selection-bg: rgba(187, 134, 252, 0.15);
           --ls-focus-ring: 2px solid #bb86fc;
           --ls-editor-bg: #1e1e1e;
+          --ls-cell-bg: #1e1e1e;
           --ls-editor-shadow: 0 2px 8px rgba(0,0,0,0.5);
           --ls-cell-height: 32px;
           --ls-cell-width: 160px;
@@ -1222,6 +1223,34 @@ export const ColumnWidths: StoryObj = {
     docs: {
       description: {
         story: `Drag the right border of a column header to resize it, or double-click the border to fit the column to its content. From the keyboard, Alt+Shift+Left / Alt+Shift+Right narrow or widen the selected columns by 8px (the new width is announced), and Alt+Shift+0 fits them. Resizing works in read-only mode and is undoable with Ctrl+Z. Column B is too narrow for its values here: try fitting it.`,
+      },
+    },
+  },
+};
+
+export const FrozenPanes: StoryObj = {
+  name: 'Frozen Panes',
+  render: () => {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const rows: string[][] = [['Region', ...months, 'Total']];
+    for (let r = 1; r <= 80; r++) {
+      const values = months.map((_, m) => String(((r * 37 + m * 53) % 900) + 100));
+      rows.push([`Region ${r}`, ...values, `=SUM(B${r + 1}:M${r + 1})`]);
+    }
+    return html`
+      <y11n-spreadsheet
+        .rows=${100}
+        .cols=${16}
+        .data=${gridFromRows(rows)}
+        frozen-rows="1"
+        frozen-cols="1"
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `The header row and the Region column are frozen (\`frozen-rows="1" frozen-cols="1"\`): scroll down or right and they stay in view. Alt+Shift+F unfreezes, and pressed again freezes the rows above and the columns left of the active cell. Ctrl+Home goes to the first unfrozen cell (B2). Inserting rows inside the frozen area grows it.`,
       },
     },
   },
