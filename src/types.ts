@@ -272,6 +272,18 @@ export interface SortDetail {
 }
 
 /**
+ * Detail for `column-resize` (after column widths changed, also on undo/redo)
+ * and the cancelable `before-column-resize` (before a user resize: a drag
+ * of a header border, Alt+Shift+Left/Right, or auto-fit).
+ */
+export interface ColumnResizeDetail {
+  /** The columns whose width changes, with their new width in px */
+  columns: Array<{ col: number; width: number }>;
+  /** What triggered the resize */
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
+}
+
+/**
  * Detail for the `format-change` event, fired when cell formatting is modified.
  */
 export interface FormatChangeDetail {

@@ -1,4 +1,5 @@
 import { html } from 'lit';
+import { ref } from 'lit/directives/ref.js';
 import type { Meta, StoryObj } from '@storybook/web-components-vite';
 import '../src/y11n-spreadsheet.js';
 import type { Y11nSpreadsheet } from '../src/y11n-spreadsheet.js';
@@ -1186,6 +1187,41 @@ export const Sorting: StoryObj = {
     docs: {
       description: {
         story: `Click a cell in the table and press Alt+Shift+Up (ascending) or Alt+Shift+Down (descending), or use the buttons: the table around the active cell is sorted by its column, and row 1 is kept as the header. The bonus formulas move with their rows; "Top score" below the blank row is not part of the table and stays put. Blank scores sort last either way. Ctrl+Z undoes a sort.`,
+      },
+    },
+  },
+};
+
+export const ColumnWidths: StoryObj = {
+  name: 'Column Widths',
+  render: () => {
+    const data = gridFromRows([
+      ['Customer', 'Country', 'Orders', 'Notes'],
+      ['Northwind Traders', 'United Kingdom', '42', 'Prefers delivery before noon'],
+      ['Contoso', 'NL', '7', ''],
+      ['Fabrikam Incorporated', 'United States of America', '128', 'Key account'],
+    ]);
+    const restore = (element?: Element) => {
+      // Restore a saved layout once, e.g. from localStorage
+      const el = element as Y11nSpreadsheet | undefined;
+      if (el && !el.dataset.restored) {
+        el.dataset.restored = 'true';
+        el.updateComplete.then(() => el.setColumnWidths({ 0: 190, 1: 70, 2: 60, 3: 220 }));
+      }
+    };
+    return html`
+      <y11n-spreadsheet
+        .rows=${20}
+        .cols=${8}
+        .data=${data}
+        ${ref(restore)}
+      ></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Drag the right border of a column header to resize it, or double-click the border to fit the column to its content. From the keyboard, Alt+Shift+Left / Alt+Shift+Right narrow or widen the selected columns by 8px (the new width is announced), and Alt+Shift+0 fits them. Resizing works in read-only mode and is undoable with Ctrl+Z. Column B is too narrow for its values here: try fitting it.`,
       },
     },
   },

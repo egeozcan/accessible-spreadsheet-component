@@ -8,6 +8,7 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 - Row/column selection via headers (click, Shift+click, drag) or Ctrl+Space / Shift+Space
 - Fill down/right (Ctrl+D / Ctrl+R), a draggable fill handle that continues numeric series, and multi-cell entry (Ctrl+Enter)
 - Insert and delete rows/columns, with formula references rewritten to follow their cells
+- Resizable columns: drag a header border, double-click it to fit the content, or use Alt+Shift+Left / Right and Alt+Shift+0
 - Sort a range or the table around the active cell (Alt+Shift+Up / Down), by one or more columns, with header detection
 - Find (Ctrl+F) with match count and next/previous navigation
 - Per-cell read-only flag, value validation, and cancelable `cell-edit-start` / `before-change` events
@@ -108,6 +109,13 @@ sheet.sort(table, { col: 1 }, { hasHeader: true })              // by column B, 
 sheet.sort(table, [{ col: 2, direction: 'descending' }, { col: 0 }]) // C high to low, then A
 sheet.sortSelection('descending')  // what Alt+Shift+Down does: the selection, or the table around the active cell
 
+// Column widths (undoable; px, clamped to 20–2000)
+sheet.setColumnWidth(0, 180)          // column A
+sheet.setColumnWidths({ 1: 60, 2: null }) // B to 60px, C back to the default (--ls-cell-width)
+sheet.getColumnWidth(1)               // 60
+sheet.getColumnWidths()               // { 0: 180, 1: 60 }: custom widths only, to save and restore
+sheet.autoFitColumns([0, 1])          // fit to the widest value, as a border double-click does
+
 // Find
 sheet.findCells('total')                      // ['5:0', ...] in reading order
 sheet.findCells('SUM', { formulas: true, matchCase: true })
@@ -120,6 +128,8 @@ Inserting or deleting rows/columns moves cells with their formats and read-only 
 Sorting reorders the rows of a range; cells outside it don't move. Ascending order is numbers (smallest first), text (A to Z, ignoring case), `FALSE`, `TRUE`, then errors; descending reverses that, and blank cells go last either way. The sort is stable, and later keys break ties. Cells move with their formats and read-only flags. Formulas in moved cells shift their relative references by the rows they moved, as if copied (`=B2*C2` moved to row 5 becomes `=B5*C5`); references from outside the range, such as `=SUM(A2:A10)`, are left alone, as in Excel. `sort()` throws a `RangeError` for a range outside the grid or a key column outside the range, and returns whether anything moved.
 
 `sortSelection()` sorts the selection, trimmed to its last filled row and column, by the active cell's column. When a single cell is selected, or a single column of a wider table (which would split its records apart), it sorts the block of data around the active cell instead, like Excel's current region. It keeps the first row in place when it looks like a header: all text, above columns with numbers or other non-text values, or bold above a row that isn't. It refuses to move read-only cells, fires `before-sort`, and announces the result.
+
+Column widths are presentation, not data: they can be changed in read-only mode, `setData()` keeps them, and they aren't part of `getData()`. Save them with `getColumnWidths()` (for example on `column-resize`) and restore them with `setColumnWidths()`. Widths move with their columns when columns are inserted or deleted, and `column-resize` reports the columns whose width changed, so saving on `column-resize` keeps the layout in step. Auto-fit measures the displayed values of every row, including rows that aren't rendered; an empty column goes back to the default width.
 
 `fromCSV` drops values outside `rows` × `cols` (and throws a `RangeError` for a negative or non-integer `start`); use the exported `parseDelimited(text)` to size the grid first if needed.
 
@@ -160,6 +170,12 @@ sheet.addEventListener('structure-change', (e) => {
   const { axis, kind, index, count, source } = e.detail; // e.g. 'row', 'insert', 2, 1, 'user'
 });
 
+// Column widths changed (also on undo/redo, and when widths move with inserted/deleted columns)
+sheet.addEventListener('column-resize', (e) => {
+  const { columns, source } = e.detail; // columns: [{ col, width }]
+  localStorage.setItem('widths', JSON.stringify(sheet.getColumnWidths()));
+});
+
 // A range was sorted (also on undo/redo; on undo the detail describes the sort that was undone)
 sheet.addEventListener('sort-change', (e) => {
   const { range, keys, hasHeader, source } = e.detail; // keys: [{ col, direction }]
@@ -196,6 +212,11 @@ sheet.addEventListener('before-change', (e) => {
 // Veto keyboard row/column insertion or deletion
 sheet.addEventListener('before-structure-change', (e) => {
   if (e.detail.kind === 'delete') e.preventDefault();
+});
+
+// Veto a user resize (border drag, Alt+Shift+Left/Right, auto-fit); same detail as column-resize
+sheet.addEventListener('before-column-resize', (e) => {
+  if (e.detail.columns.some(({ width }) => width < 40)) e.preventDefault();
 });
 
 // Veto a user sort (Alt+Shift+Up/Down or sortSelection()); same detail as sort-change
@@ -322,6 +343,8 @@ y11n-spreadsheet::part(editor) {
 | Ctrl + Alt + D / Ctrl + Alt + R | Fill series down / right: continue the filled leading rows/columns of the selection into its empty cells, like dragging the fill handle (on macOS use Ctrl+Option) |
 | Ctrl/Cmd + Shift + = (or Ctrl+Alt+=, Ctrl+Numpad +) | Insert as many rows/columns as are selected, before the selection. Needs whole rows (Shift+Space) or columns (Ctrl+Space) selected |
 | Ctrl/Cmd + - (or Ctrl+Alt+-, Ctrl+Numpad -) | Delete the selected whole rows/columns |
+| Alt + Shift + Left / Right | Narrow / widen the selected columns by 8px; the new width is announced (on macOS use Option) |
+| Alt + Shift + 0 | Fit the selected columns to their content |
 | Alt + Shift + Up / Down | Sort ascending / descending by the active cell's column: the selection, or the table around the active cell (on macOS use Option) |
 | Ctrl/Cmd + F | Find. In the find bar: Enter / Shift+Enter (or F3 / Shift+F3) next / previous match, Escape closes |
 | Ctrl+C / X / V | Copy / Cut / Paste |
@@ -330,6 +353,8 @@ y11n-spreadsheet::part(editor) {
 | Any printable character | Start editing with that character |
 
 During formula editing, arrow keys insert cell references instead of navigating.
+
+Drag the right border of a column header to resize the column (Escape during the drag cancels it); with whole columns selected, all of them get the new width. Double-click the border to fit the column to its content.
 
 With the mouse, drag the square at the bottom-right corner of the selection (the fill handle) to fill adjacent cells. A run of two or more numbers continues its linear trend (`1, 2` → `3, 4, 5`; `10, 20` → `30, 40`); text, formulas and single numbers repeat, with relative references shifted. From the keyboard, select the cells to continue plus the empty cells after them and press Ctrl+Alt+D (down) or Ctrl+Alt+R (right); Ctrl+D / Ctrl+R copy instead of continuing a series.
 
@@ -356,6 +381,7 @@ import type {
   SortKey,               // { col, direction? }
   SortOptions,           // { hasHeader? }
   SortDirection,         // 'ascending' | 'descending'
+  ColumnResizeDetail,    // { columns: [{ col, width }], source }
   CellValidator,
 } from 'y11n-spreadsheet';
 ```
