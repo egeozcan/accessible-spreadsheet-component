@@ -262,6 +262,27 @@ describe('sorting', () => {
       expect(raw(el, '5:0')).toBe('z');
     });
 
+    it('sorts 2,000 rows of chained, number-formatted formulas quickly and correctly', async () => {
+      const n = 2000;
+      const currency = { numberFormat: { type: 'currency' as const, decimals: 2 } };
+      const entries: Record<string, Partial<CellData>> = {};
+      for (let r = 0; r < n; r++) {
+        entries[`${r}:0`] = { rawValue: String((r * 7919) % 1000), format: currency };
+        // Running total: C(r) = C(r-1) + A(r)
+        entries[`${r}:1`] = { rawValue: r === 0 ? '=A1' : `=B${r}+A${r + 1}`, format: currency };
+      }
+      const el = await createSpreadsheet(entries, n + 5, 4);
+      const totalBefore = display(el, `${n - 1}:1`);
+
+      const start = performance.now();
+      el.sort(range(0, 0, n - 1, 1), { col: 0 });
+      internals(el)._undo();
+      // Formatting each formula used to re-walk its whole chain: seconds here
+      expect(performance.now() - start).toBeLessThan(1500);
+      expect(display(el, `${n - 1}:1`)).toBe(totalBefore);
+      expect(totalBefore).toMatch(/^\$[\d,]+\.\d\d$/);
+    });
+
     it('does nothing, and records no history, when the range is already sorted', async () => {
       const el = await createSpreadsheet({ '0:0': '1', '1:0': '2' });
       const sorts = listen<SortDetail>(el, 'sort-change');

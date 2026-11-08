@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Number formatting no longer re-evaluates formulas from scratch after a recalculation; it reuses the engine's cached results (new `FormulaEngine.resultFor()`). Formatting long formula chains was quadratic: sorting or undoing 2,000 rows of chained currency formulas took about 4 s and now takes about 20 ms.
+- Recalculating after very large changes (hundreds of thousands of cells) no longer slows down quadratically.
 - Undo no longer reverts changes in the wrong order, scrambling data, when an event listener makes a change while another is applied (for example re-sorting on every `data-change`). Each change is now recorded for undo before its events fire; a change made during undo clears the redo stack.
 - Pasting an HTML table with merged cells (`colspan`/`rowspan`), as Excel and Google Sheets put on the clipboard, no longer shifts the following values into the wrong columns. The value lands in the merge's top-left cell and the cells it covered are pasted as empty.
 - `--ls-cell-width` and `--ls-cell-height` now accept any CSS length (`7rem`, `2em`, `calc(...)`). Non-px values were read as px (`7rem` as 7px), which broke scrolling, virtual rendering and editor placement. Changing either variable at runtime now re-renders the grid.

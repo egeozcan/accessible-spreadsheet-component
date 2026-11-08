@@ -1035,10 +1035,10 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   /** Apply number formatting to a single cell using rawValue for robustness */
-  private _applyNumberFormatToCell(_key: string, cell: CellData): void {
+  private _applyNumberFormatToCell(key: string, cell: CellData): void {
     if (cell.type === 'number' && cell.format?.numberFormat) {
       const numericValue = cell.rawValue.startsWith('=')
-        ? Number(this._formulaEngine.evaluate(cell.rawValue).displayValue)
+        ? Number(this._formulaEngine.resultFor(key, cell.rawValue).displayValue)
         : Number(cell.rawValue);
       cell.displayValue = formatNumber(numericValue, cell.format.numberFormat);
     }
@@ -1294,17 +1294,17 @@ export class Y11nSpreadsheet extends LitElement {
     }
     // Re-apply number format to display value
     if (cell.type === 'number' && cell.format?.numberFormat) {
-      // For formula cells, re-evaluate to get the raw numeric value
+      // For formula cells, get the unformatted result from the engine
       // (displayValue may already be formatted, e.g., "$1,234.50")
       if (cell.rawValue.startsWith('=')) {
-        const evaluated = this._formulaEngine.evaluate(cell.rawValue);
+        const evaluated = this._formulaEngine.resultFor(cellId, cell.rawValue);
         cell.displayValue = formatNumber(Number(evaluated.displayValue), cell.format.numberFormat);
       } else {
         cell.displayValue = formatNumber(Number(cell.rawValue), cell.format.numberFormat);
       }
     } else if (cell.type === 'number' && !cell.format?.numberFormat) {
-      // Remove number formatting — re-evaluate to get plain display
-      const evaluated = this._formulaEngine.evaluate(cell.rawValue);
+      // Remove number formatting — show the plain result
+      const evaluated = this._formulaEngine.resultFor(cellId, cell.rawValue);
       cell.displayValue = evaluated.displayValue;
     }
   }
@@ -1729,9 +1729,10 @@ export class Y11nSpreadsheet extends LitElement {
     for (let row = first; row <= last; row++) {
       rows.push({
         row,
-        values: keys.map((k) =>
-          sortValueOf(this._internalData.get(cellKey(row, k.col)), (cell) => this._sortNumber(cell))
-        ),
+        values: keys.map((k) => {
+          const key = cellKey(row, k.col);
+          return sortValueOf(this._internalData.get(key), (cell) => this._sortNumber(key, cell));
+        }),
       });
     }
     // Array.prototype.sort is stable (ES2019)
@@ -1746,9 +1747,9 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   /** The number behind a number cell, whose display may be formatted. */
-  private _sortNumber(cell: CellData): number {
+  private _sortNumber(key: string, cell: CellData): number {
     if (!cell.format?.numberFormat) return Number(cell.displayValue);
-    return Number(this._formulaEngine.evaluate(cell.rawValue).displayValue);
+    return Number(this._formulaEngine.resultFor(key, cell.rawValue).displayValue);
   }
 
   /** Before/after state of every cell in columns `c0..c1` that the sort changes. */
