@@ -1,8 +1,12 @@
 /**
- * Rewriting of cell references inside formula text, used when rows or
- * columns are inserted or deleted.
+ * Rewriting of cell references inside formula text, used when formulas are
+ * copied or filled and when rows or columns are inserted or deleted. Built
+ * on the formula tokenizer, so it sees exactly the references the engine does:
+ * `A1`, `$A$1:B2`, whole columns and rows (`A:C`, `1:3`) and sheet-qualified
+ * references (`Sheet2!A1`, `'My sheet'!A:A`).
  */
-import { colToLetter, letterToCol } from '../types.js';
+import { colToLetter } from '../types.js';
+import { type Node, type RefEnd, type RefInfo, MAX_COLS, MAX_ROWS, parseFormula, tokenizeFormula } from '../engine/parser.js';
 
 /** A row/column insertion or deletion. */
 export interface StructureChange {
@@ -16,83 +20,178 @@ export interface StructureChange {
   count: number;
 }
 
-interface RefParts {
-  colAbs: string;
-  col: number;
-  rowAbs: string;
-  row: number;
+/** Which sheet a rewrite applies to, for formulas in a workbook with several sheets. */
+export interface ReferenceScope {
+  /** Name of the sheet the formula is on (what its unqualified references point to) */
+  formulaSheet?: string;
+  /**
+   * Name of the sheet whose rows/columns change. References to other sheets
+   * are left alone. Default: the formula's own sheet.
+   */
+  changedSheet?: string;
 }
 
-const REF = String.raw`(\$?)([A-Za-z]+)(\$?)(\d+)`;
-// Lookarounds keep identifiers that merely contain a ref-like substring (e.g.
-// a LOG10() call or a name like ABC_1) from being treated as references.
-const REF_PATTERN = new RegExp(
-  String.raw`(?<![A-Za-z0-9_.$])${REF}(?::${REF})?(?![A-Za-z0-9_.]|\s*\()`,
-  'g'
-);
-
 /**
- * Replace every cell reference and range in a formula, skipping string
- * literals. `replace` receives the parsed reference (and the range end, for
- * `A1:B2`) and returns the replacement text, or `null` to keep the original.
+ * Replace every reference in a formula, leaving everything else (including
+ * string literals) exactly as written. `replace` receives the parsed
+ * reference and its source text split into the sheet prefix (`"Sheet2!"`,
+ * or `""`) and the reference itself, and returns the replacement for the
+ * whole reference including the prefix, or `null` to keep the original.
+ * A formula that doesn't tokenize is returned unchanged.
+ *
+ * @param formula - The raw cell value, starting with `=`
  */
-function mapReferences(
+export function mapFormulaReferences(
   formula: string,
-  replace: (start: RefParts, end: RefParts | null) => string | null
+  replace: (ref: RefInfo, text: { sheet: string; ref: string }) => string | null
 ): string {
-  let out = '';
-  let segment = '';
-  const flush = () => {
-    out += segment.replace(REF_PATTERN, (match, ...g: string[]) => {
-      const start: RefParts = {
-        colAbs: g[0],
-        col: letterToCol(g[1].toUpperCase()),
-        rowAbs: g[2],
-        row: parseInt(g[3], 10) - 1,
-      };
-      const end: RefParts | null =
-        g[5] === undefined
-          ? null
-          : {
-              colAbs: g[4],
-              col: letterToCol(g[5].toUpperCase()),
-              rowAbs: g[6],
-              row: parseInt(g[7], 10) - 1,
-            };
-      return replace(start, end) ?? match;
-    });
-    segment = '';
-  };
-
-  let i = 0;
-  while (i < formula.length) {
-    if (formula[i] === '"') {
-      flush();
-      // Copy the string literal verbatim; "" is an escaped quote inside it
-      let j = i + 1;
-      while (j < formula.length) {
-        if (formula[j] === '"') {
-          if (formula[j + 1] === '"') {
-            j += 2;
-            continue;
-          }
-          break;
-        }
-        j++;
-      }
-      out += formula.slice(i, j + 1);
-      i = j + 1;
-    } else {
-      segment += formula[i];
-      i++;
-    }
+  if (!formula.startsWith('=')) return formula;
+  const body = formula.slice(1);
+  let tokens;
+  try {
+    tokens = tokenizeFormula(body);
+  } catch {
+    return formula;
   }
-  flush();
+  let out = '=';
+  let last = 0;
+  for (const token of tokens) {
+    if (token.type !== 'REF' || !token.ref) continue;
+    const refStart = token.refStart ?? token.start;
+    const replacement = replace(token.ref, {
+      sheet: body.slice(token.start, refStart),
+      ref: body.slice(refStart, token.end),
+    });
+    if (replacement === null) continue;
+    out += body.slice(last, token.start) + replacement;
+    last = token.end;
+  }
+  return last === 0 ? formula : out + body.slice(last);
+}
+
+/** The names a formula binds itself, with LET and LAMBDA (lower case). */
+function localNames(node: Node, out: Set<string> = new Set()): Set<string> {
+  switch (node.t) {
+    case 'call': {
+      const bound =
+        node.name === 'LET'
+          ? node.args.slice(0, -1).filter((_, i) => i % 2 === 0)
+          : node.name === 'LAMBDA'
+            ? node.args.slice(0, -1)
+            : [];
+      for (const arg of bound) if (arg?.t === 'name') out.add(arg.name.toLowerCase());
+      for (const arg of node.args) if (arg) localNames(arg, out);
+      break;
+    }
+    case 'invoke':
+      localNames(node.callee, out);
+      for (const arg of node.args) if (arg) localNames(arg, out);
+      break;
+    case 'unary':
+      localNames(node.x, out);
+      break;
+    case 'bin':
+      localNames(node.l, out);
+      localNames(node.r, out);
+      break;
+    case 'array':
+      for (const row of node.rows) for (const n of row) localNames(n, out);
+      break;
+  }
   return out;
 }
 
-function formatRef(ref: RefParts): string {
-  return `${ref.colAbs}${colToLetter(ref.col)}${ref.rowAbs}${ref.row + 1}`;
+/**
+ * Whether renaming a defined name can't be carried through a formula
+ * without changing what it means:
+ *
+ * - the formula mentions the name and binds the old or the new name itself
+ *   with LET or LAMBDA, so some of those mentions are (or would become) the
+ *   formula's own variable; or
+ * - the formula calls the name (`=double(4)`) and the new name is a
+ *   function, which the rewritten call would run instead (`=SUM(4)`).
+ *
+ * @param isFunction - Whether a (upper-case) name is a function, built-in or custom
+ */
+export function renameIsCaptured(
+  formula: string,
+  oldName: string,
+  newName: string,
+  isFunction: (name: string) => boolean = () => false
+): boolean {
+  if (!formula.startsWith('=')) return false;
+  const body = formula.slice(1);
+  const lower = oldName.toLowerCase();
+  if (!body.toLowerCase().includes(lower)) return false;
+  try {
+    const uses = tokenizeFormula(body).filter(
+      (t) => (t.type === 'NAME' || t.type === 'FUNC') && body.slice(t.start, t.end).toLowerCase() === lower
+    );
+    if (uses.length === 0) return false;
+    // A call of the name would become a call of the function of the new name
+    if (!isFunction(oldName.toUpperCase()) && isFunction(newName.toUpperCase()) && uses.some((t) => t.type === 'FUNC')) {
+      return true;
+    }
+    const locals = localNames(parseFormula(body));
+    return locals.has(newName.toLowerCase()) || locals.has(lower);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rewrite the uses of a defined name in a formula, whether it is read
+ * (`=SUM(sales)`) or called (`=double(4)`). String literals are left alone.
+ *
+ * A formula is left unchanged when the rewrite could change what it means:
+ * when it binds the old or the new name itself (`=LET(sales, ...)`), since
+ * those uses are the formula's own variable. A call is only rewritten when
+ * `isFunction` says no function of that name exists (`SUM(` stays `SUM(`
+ * even when a name `Sum` is renamed).
+ *
+ * @param formula - The raw cell value; non-formulas are returned unchanged
+ * @param isFunction - Whether a (upper-case) name is a function, built-in or custom
+ */
+export function renameNameInFormula(
+  formula: string,
+  oldName: string,
+  newName: string,
+  isFunction: (name: string) => boolean = () => false
+): string {
+  if (!formula.startsWith('=')) return formula;
+  const body = formula.slice(1);
+  const lower = oldName.toLowerCase();
+  if (!body.toLowerCase().includes(lower)) return formula;
+  let tokens;
+  let locals: Set<string>;
+  try {
+    tokens = tokenizeFormula(body);
+    locals = localNames(parseFormula(body));
+  } catch {
+    return formula;
+  }
+  if (locals.has(lower) || locals.has(newName.toLowerCase())) return formula;
+  const callable = !isFunction(oldName.toUpperCase());
+  let out = '=';
+  let last = 0;
+  for (const token of tokens) {
+    if (token.type !== 'NAME' && !(token.type === 'FUNC' && callable)) continue;
+    if (body.slice(token.start, token.end).toLowerCase() !== lower) continue;
+    out += body.slice(last, token.start) + newName;
+    last = token.end;
+  }
+  return last === 0 ? formula : out + body.slice(last);
+}
+
+function formatEnd(end: RefEnd): string {
+  const col = end.col >= 0 ? `${end.colAbs ? '$' : ''}${colToLetter(end.col)}` : '';
+  const row = end.row >= 0 ? `${end.rowAbs ? '$' : ''}${end.row + 1}` : '';
+  return col + row;
+}
+
+/** The text of a reference (without any sheet prefix). */
+export function formatReference(ref: RefInfo): string {
+  return ref.kind === 'cell' ? formatEnd(ref.start) : `${formatEnd(ref.start)}:${formatEnd(ref.end)}`;
 }
 
 /**
@@ -109,17 +208,20 @@ function formatRef(ref: RefParts): string {
  */
 export function shiftFormulaReferences(formula: string, rowOffset: number, colOffset: number): string {
   if (!formula.startsWith('=')) return formula;
-  const shift = (ref: RefParts): RefParts => ({
-    ...ref,
-    row: ref.rowAbs ? ref.row : ref.row + rowOffset,
-    col: ref.colAbs ? ref.col : ref.col + colOffset,
+  const shift = (end: RefEnd): RefEnd => ({
+    ...end,
+    row: end.row < 0 || end.rowAbs ? end.row : end.row + rowOffset,
+    col: end.col < 0 || end.colAbs ? end.col : end.col + colOffset,
   });
-  const valid = (ref: RefParts) => ref.row >= 0 && ref.col >= 0;
-  return mapReferences(formula, (start, end) => {
-    const s = shift(start);
-    if (!end) return valid(s) ? formatRef(s) : '#REF!';
-    const e = shift(end);
-    return valid(s) && valid(e) ? `${formatRef(s)}:${formatRef(e)}` : '#REF!';
+  // A missing part (-1) stays -1; a present part must stay on the sheet
+  const valid = (before: RefEnd, after: RefEnd) =>
+    (before.row < 0 || (after.row >= 0 && after.row < MAX_ROWS)) &&
+    (before.col < 0 || (after.col >= 0 && after.col < MAX_COLS));
+  return mapFormulaReferences(formula, (ref, text) => {
+    const start = shift(ref.start);
+    const end = shift(ref.end);
+    if (!valid(ref.start, start) || !valid(ref.end, end)) return '#REF!';
+    return text.sheet + formatReference({ ...ref, start, end });
   });
 }
 
@@ -149,26 +251,42 @@ function shiftIndex(p: number, change: StructureChange): number | null {
  * against the cells they point to moving. Text inside string literals is
  * left alone. Non-formulas (not starting with `=`) are returned unchanged.
  *
+ * With several sheets, pass `scope`: only references to the sheet that
+ * changed are rewritten (unqualified ones count as the formula's own sheet).
+ *
  * @param formula - The raw cell value
  * @param change - The insertion or deletion
+ * @param scope - The formula's sheet and the sheet that changed
  * @returns The rewritten formula
  */
-export function adjustFormulaForStructureChange(formula: string, change: StructureChange): string {
+export function adjustFormulaForStructureChange(
+  formula: string,
+  change: StructureChange,
+  scope: ReferenceScope = {}
+): string {
   if (!formula.startsWith('=')) return formula;
   const key = change.axis === 'row' ? 'row' : 'col';
+  const own = scope.formulaSheet?.toLowerCase();
+  const target = (scope.changedSheet ?? scope.formulaSheet)?.toLowerCase();
 
-  return mapReferences(formula, (start, end) => {
-    if (!end) {
-      const moved = shiftIndex(start[key], change);
+  return mapFormulaReferences(formula, (ref, text) => {
+    const refSheet = ref.sheet !== undefined ? ref.sheet.toLowerCase() : own;
+    if (refSheet !== target) return null;
+    // A whole-column reference has no rows to move (and vice versa)
+    if (ref.start[key] < 0) return null;
+
+    if (ref.kind === 'cell') {
+      const moved = shiftIndex(ref.start[key], change);
       if (moved === null) return '#REF!';
-      if (moved === start[key]) return null;
-      return formatRef({ ...start, [key]: moved });
+      if (moved === ref.start[key]) return null;
+      const start = { ...ref.start, [key]: moved };
+      return text.sheet + formatReference({ ...ref, start, end: start });
     }
 
     // Ranges: move each edge, clipping edges that fall inside a deletion.
-    const loIsStart = start[key] <= end[key];
-    const lo = loIsStart ? start[key] : end[key];
-    const hi = loIsStart ? end[key] : start[key];
+    const loIsStart = ref.start[key] <= ref.end[key];
+    const lo = loIsStart ? ref.start[key] : ref.end[key];
+    const hi = loIsStart ? ref.end[key] : ref.start[key];
     let newLo: number;
     let newHi: number;
     if (change.kind === 'insert') {
@@ -181,8 +299,8 @@ export function adjustFormulaForStructureChange(formula: string, change: Structu
       newHi = hi < change.index ? hi : hi > last ? hi - change.count : change.index - 1;
     }
     if (newLo === lo && newHi === hi) return null;
-    const newStart = { ...start, [key]: loIsStart ? newLo : newHi };
-    const newEnd = { ...end, [key]: loIsStart ? newHi : newLo };
-    return `${formatRef(newStart)}:${formatRef(newEnd)}`;
+    const start = { ...ref.start, [key]: loIsStart ? newLo : newHi };
+    const end = { ...ref.end, [key]: loIsStart ? newHi : newLo };
+    return text.sheet + formatReference({ ...ref, start, end });
   });
 }

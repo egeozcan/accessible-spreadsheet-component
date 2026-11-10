@@ -17,7 +17,7 @@ function getEditor(page: Page) {
 
 // Helper: get the formula bar input inside shadow DOM
 function getFormulaBarInput(page: Page) {
-  return page.locator('y11n-spreadsheet').locator('y11n-formula-bar input');
+  return page.locator('y11n-spreadsheet').locator('y11n-formula-bar input.formula-input');
 }
 
 // Helper: get cell text content

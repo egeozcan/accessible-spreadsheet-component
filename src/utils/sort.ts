@@ -30,7 +30,8 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'accent' });
  * cell, since its `displayValue` may be formatted (`$1,234.50`).
  */
 export function sortValueOf(cell: CellData | undefined, numeric: (cell: CellData) => number): SortValue {
-  if (!cell || cell.rawValue === '') return { kind: 'blank' };
+  // A cell with no value of its own can still show one spilled into it by a formula
+  if (!cell || (cell.rawValue === '' && cell.spilledFrom === undefined)) return { kind: 'blank' };
   switch (cell.type) {
     case 'number': {
       const value = numeric(cell);

@@ -36,6 +36,15 @@ import {
   type ConditionalFormatRule,
   type ConditionalFormatRuleInput,
   type ConditionalFormatStyle,
+  type CellArray,
+  type CellArrayItem,
+  type ListConversionDetail,
+  type AddSheetOptions,
+  type SheetChangeDetail,
+  type SheetsChangeDetail,
+  type DefinedName,
+  type NamesChangeDetail,
+  type FormulaFunctionOptions,
   cellKey,
   colToLetter,
   coordToRef,
@@ -47,12 +56,20 @@ import {
 } from './types.js';
 import { SelectionManager, findDataEdge } from './controllers/selection-manager.js';
 import { parseDelimited, serializeDelimited } from './utils/delimited.js';
-import { adjustFormulaForStructureChange, type StructureChange } from './utils/references.js';
+import {
+  adjustFormulaForStructureChange,
+  renameIsCaptured,
+  renameNameInFormula,
+  type StructureChange,
+} from './utils/references.js';
 import { compareSortValues, sortValueOf, type SortValue } from './utils/sort.js';
 import { parseInput } from './utils/input-parse.js';
+import { arrayToFormula, listItemsOf, listToFormula, listToText, looksLikeList, parseListText } from './utils/list.js';
 import { formatSeriesNumber, seriesFor } from './utils/series.js';
-import { FormulaEngine } from './engine/formula-engine.js';
-import { ClipboardManager } from './controllers/clipboard-manager.js';
+import { FormulaEngine, isValidName, renameSheetInFormula } from './engine/formula-engine.js';
+import { sheetPrefix } from './engine/parser.js';
+import { nextSheetName, validateSheetName } from './utils/sheet-names.js';
+import { ClipboardManager, computedLiteral } from './controllers/clipboard-manager.js';
 import {
   ConditionalFormatEvaluator,
   adjustRulesForStructureChange,
@@ -65,7 +82,7 @@ import {
   rangeToA1,
 } from './utils/conditional-format.js';
 import './components/y11n-formula-bar.js';
-import type { FormulaBarMode, Y11nFormulaBar } from './components/y11n-formula-bar.js';
+import type { FormulaBarMode, NameBoxCommitDetail, Y11nFormulaBar } from './components/y11n-formula-bar.js';
 import './components/y11n-conditional-format-dialog.js';
 import type {
   ConditionalFormatMoveDetail,
@@ -73,6 +90,9 @@ import type {
   Y11nConditionalFormatDialog,
 } from './components/y11n-conditional-format-dialog.js';
 import { conditionalIcon, conditionalIconStyles } from './components/conditional-icons.js';
+import './components/y11n-sheet-tabs.js';
+import './components/y11n-name-manager.js';
+import type { NameGoDetail, NameRemoveDetail, NameSaveDetail, Y11nNameManager } from './components/y11n-name-manager.js';
 
 type ChangeSource = NonNullable<DataChangeDetail['source']>;
 
@@ -85,6 +105,26 @@ function cloneCell(cell: CellData): CellData {
     }
   }
   return copy;
+}
+
+/** Whether a cell shows something: a value of its own, or one spilled into it by another cell's formula. */
+function hasContent(cell: CellData | undefined): cell is CellData {
+  return cell !== undefined && (cell.rawValue !== '' || cell.spilledFrom !== undefined);
+}
+
+/**
+ * The part of a cell that is stored rather than computed. A cell that only
+ * shows a spilled value is nothing (or just its format): sorting, inserting
+ * rows and replacing the data must not carry spilled values around, since the
+ * formula that spills them recomputes them.
+ */
+function storedCell(cell: CellData | undefined): CellData | undefined {
+  if (!cell || cell.spilledFrom === undefined || cell.rawValue !== '') return cell;
+  if (!cell.format && !cell.readOnly) return undefined;
+  const stored: CellData = { rawValue: '', displayValue: '', type: 'text' };
+  if (cell.format) stored.format = cell.format;
+  if (cell.readOnly) stored.readOnly = true;
+  return stored;
 }
 
 /**
@@ -129,6 +169,46 @@ function windowWithExtras(start: number, end: number, extras: number[]): number[
   }
   return out.sort((a, b) => a - b);
 }
+
+/** The text of one value of a cell that holds several, as shown in the values popup and the filter menu. */
+function arrayItemText(item: CellArrayItem): string {
+  if (item === null) return '';
+  if (typeof item === 'object') return `{${arrayText(item)}}`;
+  return typeof item === 'boolean' ? (item ? 'TRUE' : 'FALSE') : String(item);
+}
+
+function arrayText(array: CellArray): string {
+  const rows: string[] = [];
+  for (let r = 0; r < array.rows; r++) {
+    rows.push(array.values.slice(r * array.cols, (r + 1) * array.cols).map(arrayItemText).join(', '));
+  }
+  return array.cols === 1 ? rows.join(', ') : rows.join('; ');
+}
+
+/** Every single value in an array, going into nested arrays. */
+function arrayScalars(
+  array: CellArray,
+  out: Array<string | number | boolean | null> = []
+): Array<string | number | boolean | null> {
+  for (const item of array.values) {
+    if (item !== null && typeof item === 'object') arrayScalars(item, out);
+    else out.push(item);
+  }
+  return out;
+}
+
+/** "list of 3 items" / "array of 2 rows and 3 columns", for announcements. */
+function describeArray(array: CellArray): string {
+  if (array.cols === 1 || array.rows === 1) {
+    const n = array.rows * array.cols;
+    return `list of ${n} item${n === 1 ? '' : 's'}`;
+  }
+  return `array of ${array.rows} rows and ${array.cols} columns`;
+}
+
+/** Icons of a cell that holds several values: a list, and a grid for a 2D array. */
+const LIST_ICON = svg`<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M1 2.5h1.5M4.5 2.5H11M1 6h1.5M4.5 6H11M1 9.5h1.5M4.5 9.5H11" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+const ARRAY_ICON = svg`<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M1.5 1.5h9v9h-9zM1.5 6h9M6 1.5v9" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
 
 /** Filter button icons: a dropdown chevron, and a funnel for a filtered column. */
 const CHEVRON_ICON = svg`<svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M1.5 3.5 5 7l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
@@ -228,6 +308,20 @@ interface StructureCellDelta {
 interface StructureBatch {
   change: StructureChange;
   cells: StructureCellDelta[];
+  /** Formulas on other sheets that refer to the changed sheet, rewritten with it */
+  others?: Array<{ sheetId: number; id: string; before: string; after: string }>;
+  /** Conditional-format rules of other sheets whose formulas refer to the changed sheet */
+  otherRules?: Array<{
+    sheetId: number;
+    before: readonly ConditionalFormatRule[];
+    after: readonly ConditionalFormatRule[];
+  }>;
+  /**
+   * Defined names whose formula the change rewrites, with the formula before
+   * and after and the sheet the name was based on. Undo and redo only touch a
+   * name that still has that formula and that sheet.
+   */
+  names?: Array<{ name: string; sheet: string; before: string; after: string }>;
   rowsBefore: number;
   colsBefore: number;
   rowsAfter: number;
@@ -278,7 +372,69 @@ interface FilterMenuState {
   focus: number;
 }
 
+/**
+ * One sheet of the workbook. For the sheet being shown only `id` and `name`
+ * are current: its data and view live in the component's own fields
+ * (`_internalData`, `rows`, `_filter`, ...) and are stored here when another
+ * sheet is shown.
+ */
+interface SheetState {
+  id: number;
+  name: string;
+  data: GridData;
+  rows: number;
+  cols: number;
+  frozenRows: number;
+  frozenCols: number;
+  colWidths: Map<number, number>;
+  filter: FilterState | null;
+  cfRules: readonly ConditionalFormatRule[];
+  selection: SelectionSnapshot;
+  scrollTop: number;
+  scrollLeft: number;
+}
+
+function newSheetState(id: number, name: string, data: GridData, rows: number, cols: number): SheetState {
+  const origin = { row: 0, col: 0 };
+  return {
+    id,
+    name,
+    data,
+    rows,
+    cols,
+    frozenRows: 0,
+    frozenCols: 0,
+    colWidths: new Map(),
+    filter: null,
+    cfRules: [],
+    selection: { anchor: origin, head: origin, active: null },
+    scrollTop: 0,
+    scrollLeft: 0,
+  };
+}
+
+/** Apply `fn` to every formula in conditional-format rules; returns the same array when nothing changes. */
+function mapRuleFormulas(
+  rules: readonly ConditionalFormatRule[],
+  fn: (formula: string) => string
+): readonly ConditionalFormatRule[] {
+  let changed = false;
+  const next = rules.map((rule) => {
+    const json = JSON.stringify(rule);
+    if (!json.includes('"=')) return rule;
+    const mapped = JSON.parse(json, (_key, value) =>
+      typeof value === 'string' && value.startsWith('=') ? fn(value) : value
+    ) as ConditionalFormatRule;
+    if (JSON.stringify(mapped) === json) return rule;
+    changed = true;
+    return mapped;
+  });
+  return changed ? next : rules;
+}
+
 interface CommandBatch {
+  /** The sheet the batch changes (set when it is recorded) */
+  sheetId?: number;
   deltas: CellDelta[];
   selectionBefore: SelectionSnapshot;
   selectionAfter: SelectionSnapshot;
@@ -397,6 +553,11 @@ export class Y11nSpreadsheet extends LitElement {
    * stored as a number and the cell gets the matching number format.
    */
   @property({ type: Boolean, attribute: 'raw-input' }) rawInput = false;
+  /**
+   * When true, the sheet tabs are shown even with a single sheet, so users
+   * can add sheets. With more than one sheet the tabs always show.
+   */
+  @property({ type: Boolean, attribute: 'sheet-tabs' }) sheetTabs = false;
   /** When true, the status bar under the grid (Sum, Average, Count of the selection) is hidden. */
   @property({ type: Boolean, attribute: 'hide-status-bar' }) hideStatusBar = false;
 
@@ -429,10 +590,33 @@ export class Y11nSpreadsheet extends LitElement {
   @state() private _filterMenu: FilterMenuState | null = null;
   /** The open Paste Special dialog's choices, or null when it is closed */
   @state() private _pasteSpecial: Required<PasteSpecialOptions> | null = null;
+  /** Whether the name manager is open */
+  @state() private _nameManagerOpen = false;
+  /** Outcome of the last change made in the name manager, announced inside it */
+  @state() private _nameManagerStatus = '';
+  private _nameManagerCleanup: (() => void) | null = null;
   /** Whether the conditional-format rule manager is open */
   @state() private _cfManagerOpen = false;
   /** Outcome of the last change made in the rule manager, announced inside it */
   @state() private _cfManagerStatus = '';
+
+  /** The open values popup of a cell that holds several values: its cell, and the path into nested arrays */
+  @state() private _arrayCard: { key: string; path: number[] } | null = null;
+  private _arrayCardCleanup: (() => void) | null = null;
+  /** Whether the text in the editor is a list's items (so committing it writes a list) */
+  private _editListMode = false;
+  /**
+   * The sheet of the cell being edited. While a formula is edited, another
+   * sheet can be shown to pick a reference on it; committing or cancelling
+   * shows this sheet again.
+   */
+  private _editSheetId = 1;
+  /** Set while a reference is being picked with the pointer, so the editor losing focus doesn't commit */
+  private _refPickPointer = false;
+  /** The ranges of the defined names that refer to cells, for the Name Box; null until needed */
+  private _nameRanges: Array<{ name: string; sheet: string; start: CellCoord; end: CellCoord }> | null = null;
+  /** The spill range the active cell is part of, outlined while it is active */
+  private _activeSpill: SelectionRange | null = null;
 
   /** Track scroll position for virtual rendering */
   @state() private _scrollTop = 0;
@@ -453,6 +637,11 @@ export class Y11nSpreadsheet extends LitElement {
   /** Internal data store - we keep a separate mutable copy */
   private _internalData: GridData = new Map();
   private _lastSyncedDataRef: GridData | null = null;
+
+  /** The sheets, in tab order (see `SheetState`) */
+  private _sheets: SheetState[] = [newSheetState(1, 'Sheet1', new Map(), 100, 26)];
+  private _activeSheetId = 1;
+  private _nextSheetId = 2;
 
   /** Track which cell started editing for commit logic */
   private _editingCellKey: string | null = null;
@@ -557,8 +746,9 @@ export class Y11nSpreadsheet extends LitElement {
         if (row >= range.start.row && row <= r1 && col >= range.start.col && col <= c1) visit(this._cfValue(key));
       }
     },
-    evaluate: (formula) => {
-      const result = this._formulaEngine.evaluate(formula);
+    evaluate: (formula, at) => {
+      // Against what the grid shows: precedents are read as computed, not computed again
+      const result = this._formulaEngine.evaluateCommitted(formula, undefined, at);
       switch (result.type) {
         case 'number':
           return { kind: 'number', value: Number(result.displayValue) };
@@ -572,6 +762,9 @@ export class Y11nSpreadsheet extends LitElement {
     },
     today: todaySerial,
   });
+  /** Most rows / columns the values popup shows of one array */
+  private static readonly ARRAY_CARD_MAX_ROWS = 200;
+  private static readonly ARRAY_CARD_MAX_COLS = 20;
   /** Most values the filter menu lists at once; the search box narrows the rest */
   private static readonly FILTER_MENU_MAX_VALUES = 500;
 
@@ -597,6 +790,8 @@ export class Y11nSpreadsheet extends LitElement {
     this._closeFilterMenu(false);
     this._closePasteSpecial(false);
     this.closeConditionalFormatManager(false);
+    this.closeCellValues(false);
+    this.closeNameManager(false);
   }
 
   protected firstUpdated(): void {
@@ -609,18 +804,24 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   willUpdate(changedProps: Map<string, unknown>): void {
+    let resized = false;
+    if (changedProps.has('rows') || changedProps.has('cols')) {
+      this.rows = Math.max(1, Math.round(this.rows));
+      this.cols = Math.max(1, Math.round(this.cols));
+      this._selection.setBounds(this.rows, this.cols);
+      resized = this._syncEngineSize();
+    }
     if (changedProps.has('data') && this.data !== this._lastSyncedDataRef) {
       this._syncData();
+    }
+    if (resized) {
+      // The size bounds spills and whole-column references, also for formulas on other sheets
+      this._recalcAll();
     }
     if (changedProps.has('readOnly') && this.readOnly && this._isEditing) {
       // The grid became read-only mid-edit: discard the edit
       this._exitRefMode();
       this._cancelEdit();
-    }
-    if (changedProps.has('rows') || changedProps.has('cols')) {
-      this.rows = Math.max(1, Math.round(this.rows));
-      this.cols = Math.max(1, Math.round(this.cols));
-      this._selection.setBounds(this.rows, this.cols);
     }
     if (changedProps.has('functions')) {
       // On first render the old value is undefined and this.functions is the
@@ -667,8 +868,8 @@ export class Y11nSpreadsheet extends LitElement {
    * @param name - Function name (will be uppercased for lookup)
    * @param fn - The function implementation
    */
-  registerFunction(name: string, fn: FormulaFunction): void {
-    this._formulaEngine.registerFunction(name, fn);
+  registerFunction(name: string, fn: FormulaFunction, options?: FormulaFunctionOptions): void {
+    this._formulaEngine.registerFunction(name, fn, options);
     this._recalcAll();
   }
 
@@ -687,7 +888,7 @@ export class Y11nSpreadsheet extends LitElement {
       let maxRow = -1;
       let maxCol = -1;
       for (const [key, cell] of this._internalData) {
-        if (cell.rawValue === '') continue;
+        if (!hasContent(cell)) continue;
         const { row, col } = parseKey(key);
         if (row > maxRow) maxRow = row;
         if (col > maxCol) maxCol = col;
@@ -1145,6 +1346,1016 @@ export class Y11nSpreadsheet extends LitElement {
     await this.updateComplete;
     this.renderRoot.querySelector<HTMLInputElement>('#filter-search')?.focus();
     return true;
+  }
+
+  // ─── Sheets API ──────────────────────────────────────
+
+  /** Names of the sheets, in tab order. */
+  get sheets(): string[] {
+    return this._sheets.map((s) => s.name);
+  }
+
+  /**
+   * Name of the sheet being shown. `data`, `rows`, `cols`, the selection,
+   * the filter and every method that takes cell keys work on this sheet.
+   * Assign a sheet's name to show it.
+   */
+  get activeSheet(): string {
+    return this._activeState.name;
+  }
+
+  set activeSheet(name: string) {
+    this.activateSheet(name);
+  }
+
+  /**
+   * Show another sheet. Each sheet keeps its own data, size, selection,
+   * scroll position, column widths, frozen panes, filter and conditional formats.
+   *
+   * @returns False when it couldn't be shown right now (a paste is in progress)
+   * @throws {RangeError} If there is no sheet of that name
+   */
+  activateSheet(name: string): boolean {
+    return this._activateSheet(this._requireSheet(name, 'activateSheet'), 'programmatic');
+  }
+
+  /**
+   * Add a sheet. Formulas refer to its cells as `Name!A1` (`'My sheet'!A1`
+   * when the name has spaces). Not undoable. With more than one sheet the
+   * sheet tabs appear under the grid.
+   *
+   * @param name - Default: the next free `Sheet2`, `Sheet3`, ...
+   * @param options - Data, size, position, and whether to show the sheet
+   * @returns The sheet's name
+   * @throws {RangeError} If the name is not a valid, unused sheet name
+   */
+  addSheet(name?: string, options: AddSheetOptions = {}): string {
+    this._syncPendingData();
+    const sheetName = name ?? nextSheetName(this.sheets);
+    const problem = validateSheetName(sheetName, this.sheets);
+    if (problem) throw new RangeError(`addSheet: ${problem}`);
+    return this._addSheet(sheetName, options, 'programmatic');
+  }
+
+  /**
+   * Remove a sheet and its data. Not undoable; changes made on that sheet
+   * leave the undo history. Formulas that refer to the sheet keep their text
+   * and show `#REF!` (until a sheet of that name exists again).
+   *
+   * @returns False when it couldn't be removed right now (a paste is in progress)
+   * @throws {RangeError} If there is no sheet of that name, or it is the only sheet
+   */
+  removeSheet(name: string): boolean {
+    const state = this._requireSheet(name, 'removeSheet');
+    if (this._sheets.length === 1) throw new RangeError('removeSheet: a workbook needs at least one sheet');
+    return this._removeSheet(state, 'programmatic');
+  }
+
+  /**
+   * Rename a sheet. Formulas, defined names and conditional formats that
+   * refer to it are rewritten, on every sheet. Not undoable.
+   *
+   * @throws {RangeError} If there is no sheet of that name, or the new name is invalid or taken
+   */
+  renameSheet(name: string, newName: string): void {
+    const state = this._requireSheet(name, 'renameSheet');
+    const problem = validateSheetName(newName, this.sheets.filter((n) => n !== state.name));
+    if (problem) throw new RangeError(`renameSheet: ${problem}`);
+    this._renameSheet(state, newName, 'programmatic');
+  }
+
+  /**
+   * Move a sheet to another position among the tabs (0 = first).
+   *
+   * @throws {RangeError} If there is no sheet of that name
+   */
+  moveSheet(name: string, index: number): void {
+    this._moveSheet(this._requireSheet(name, 'moveSheet'), index, 'programmatic');
+  }
+
+  /**
+   * A copy of a sheet's data, like `getData()` for the sheet being shown.
+   *
+   * @throws {RangeError} If there is no sheet of that name
+   */
+  getSheetData(name: string): GridData {
+    const state = this._requireSheet(name, 'getSheetData');
+    if (state.id === this._activeSheetId) return this.getData();
+    const copy: GridData = new Map();
+    for (const [key, cell] of state.data) copy.set(key, cloneCell(cell));
+    return copy;
+  }
+
+  /**
+   * Replace a sheet's data, like `setData()` for the sheet being shown.
+   * Changes made on that sheet leave the undo history.
+   *
+   * @throws {RangeError} If there is no sheet of that name
+   */
+  setSheetData(name: string, data: GridData): void {
+    const state = this._requireSheet(name, 'setSheetData');
+    if (state.id === this._activeSheetId) {
+      this.setData(data);
+      return;
+    }
+    this._syncPendingData();
+    state.data = this._prepareSheetData(data);
+    this._dropHistoryOf(state.id);
+    this._formulaEngine.setData(state.data, state.name);
+    this._recalcAll();
+    this.requestUpdate();
+  }
+
+  // ─── Names API ───────────────────────────────────────
+
+  /**
+   * Define a name that formulas can use: for a range (`=A1:A10`,
+   * `=Sheet2!B2`), a constant (`=0.19`) or a function (`=LAMBDA(x, x * 2)`,
+   * called as `Name(3)`). Names are workbook-wide and not case-sensitive;
+   * defining an existing name replaces it. The references a name holds move
+   * when rows or columns are inserted or deleted. Not undoable.
+   *
+   * @param name - Letters, digits, `_` and `.`, not starting with a digit, and not a cell reference like `A1`
+   * @param refersTo - A formula, with or without the leading `=`
+   * @param sheet - Sheet that references without a sheet name point to. Default: the sheet being shown
+   * @throws {RangeError} If the name is invalid or there is no such sheet
+   */
+  defineName(name: string, refersTo: string, sheet?: string): void {
+    this._syncPendingData();
+    if (!isValidName(name)) throw new RangeError(`defineName: "${name}" is not a valid name`);
+    const scope = sheet === undefined ? this._activeState : this._requireSheet(sheet, 'defineName');
+    this._formulaEngine.defineName(name, refersTo, scope.name);
+    this._namesChanged('programmatic');
+  }
+
+  /**
+   * Remove a defined name. Formulas that use it show `#NAME?`.
+   *
+   * @returns Whether the name existed
+   */
+  removeName(name: string): boolean {
+    this._syncPendingData();
+    if (!this._formulaEngine.removeName(name)) return false;
+    this._namesChanged('programmatic');
+    return true;
+  }
+
+  /** The defined names. */
+  getNames(): DefinedName[] {
+    return this._formulaEngine.getNames().map((n) => ({ name: n.name, refersTo: n.formula, sheet: n.sheet }));
+  }
+
+  /**
+   * Replace all defined names (e.g. when loading a saved workbook):
+   * `setNames(getNames())` changes nothing. A name without `sheet` is based
+   * on the sheet being shown. A name whose `sheet` is not a sheet of the
+   * workbook (`getNames()` gives `''` for a name whose sheet was removed)
+   * keeps having none: it still works as a constant or with sheet-qualified
+   * references, and its references without a sheet name are `#REF!`.
+   *
+   * @throws {RangeError} If a name is invalid
+   */
+  setNames(names: Array<{ name: string; refersTo: string; sheet?: string }>): void {
+    this._syncPendingData();
+    for (const n of names) {
+      if (!isValidName(n.name)) throw new RangeError(`setNames: "${n.name}" is not a valid name`);
+    }
+    // A name based on a sheet that doesn't exist (as getNames() reports one whose
+    // sheet was removed) stays that way; only a name without a sheet gets this one
+    this._formulaEngine.setNames(
+      names.map((n) => ({ name: n.name, formula: n.refersTo, sheet: n.sheet ?? this._activeState.name }))
+    );
+    this._namesChanged('programmatic');
+  }
+
+  /**
+   * Select the cells a reference or a defined name stands for, showing
+   * their sheet: `goTo('B5')`, `goTo('A1:C3')`, `goTo('Orders!A2')`,
+   * `goTo('sales')`. What typing into the Name Box and pressing Enter does.
+   *
+   * @returns False when the text is not a reference or a name for cells, or the cells are outside the grid
+   */
+  goTo(reference: string): boolean {
+    this._syncPendingData();
+    const target = this._formulaEngine.referenceOf(reference, this._activeState.name);
+    return !!target && this._goToRange(target, 'programmatic');
+  }
+
+  /**
+   * Open the name manager (what Ctrl+F3 does): a dialog that lists the
+   * defined names and lets users add, edit, delete and go to them. Users'
+   * changes fire the cancelable `before-names-change`; in read-only mode the
+   * names can only be looked at.
+   */
+  async openNameManager(): Promise<boolean> {
+    this._syncPendingData();
+    if (this._isEditing) {
+      this._exitRefMode();
+      this._commitEdit();
+    }
+    this._closeFilterMenu(false);
+    this._closePasteSpecial(false);
+    this.closeConditionalFormatManager(false);
+    this.closeCellValues(false);
+    this._nameManagerStatus = '';
+    this._nameManagerOpen = true;
+    if (!this._nameManagerCleanup) {
+      const onPointerDown = (e: PointerEvent) => {
+        const el = this.renderRoot.querySelector('y11n-name-manager');
+        if (el && e.composedPath().includes(el)) return;
+        this.closeNameManager(false);
+      };
+      document.addEventListener('pointerdown', onPointerDown);
+      this._nameManagerCleanup = () => document.removeEventListener('pointerdown', onPointerDown);
+    }
+    this._modeAnnouncement = '';
+    await this.updateComplete;
+    const dialog = this.renderRoot.querySelector<Y11nNameManager>('y11n-name-manager');
+    await dialog?.updateComplete;
+    dialog?.focusInitial();
+    return true;
+  }
+
+  /**
+   * Close the name manager.
+   *
+   * @param focusCell - Return focus to the active cell. Default: true
+   */
+  closeNameManager(focusCell = true): void {
+    this._nameManagerCleanup?.();
+    this._nameManagerCleanup = null;
+    if (!this._nameManagerOpen) return;
+    this._nameManagerOpen = false;
+    if (focusCell) this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  /** Move the keyboard focus to the Name Box (what Ctrl+G does). */
+  focusNameBox(): void {
+    this.shadowRoot?.querySelector<Y11nFormulaBar>('y11n-formula-bar')?.focusNameBox();
+  }
+
+  // ─── Name Internals ─────────────────────────────────
+
+  private _goToRange(
+    target: { sheet: string; start: CellCoord; end: CellCoord },
+    source: 'user' | 'programmatic'
+  ): boolean {
+    const state = this._findSheet(target.sheet);
+    if (!state) return false;
+    if (this._isEditing) {
+      this._exitRefMode();
+      this._commitEdit();
+    }
+    const rows = state.id === this._activeSheetId ? this.rows : state.rows;
+    const cols = state.id === this._activeSheetId ? this.cols : state.cols;
+    if (target.start.row >= rows || target.start.col >= cols) return false;
+    if (!this._activateSheet(state, source)) return false;
+    const clamp = (c: CellCoord): CellCoord => ({ row: Math.min(c.row, rows - 1), col: Math.min(c.col, cols - 1) });
+    const start = clamp(target.start);
+    // The first cell of the range becomes the active one
+    this._restoreSelection({ anchor: clamp(target.end), head: start, active: null });
+    this._ensureCellVisible(this._selection.activeCell.row, start.col);
+    this.requestUpdate();
+    return true;
+  }
+
+  /** The current selection as an absolute, sheet-qualified reference: `=Sheet1!$A$1:$B$3`. */
+  private _selectionReference(): string {
+    const { start, end } = this._selection.range;
+    const abs = (c: CellCoord) => `$${colToLetter(c.col)}$${c.row + 1}`;
+    const cells = start.row === end.row && start.col === end.col ? abs(start) : `${abs(start)}:${abs(end)}`;
+    return `=${sheetPrefix(this._activeState.name)}${cells}`;
+  }
+
+  /** The defined name whose cells are exactly the selection, for the Name Box. */
+  private _selectionName(): string {
+    if (!this._nameRanges) {
+      this._nameRanges = [];
+      for (const n of this._formulaEngine.getNames()) {
+        const range = this._formulaEngine.referenceOf(n.name);
+        if (range) this._nameRanges.push({ name: n.name, ...range });
+      }
+    }
+    if (this._nameRanges.length === 0) return '';
+    const { start, end } = this._selection.range;
+    const sheet = this._activeState.name;
+    const match = this._nameRanges.find(
+      (r) =>
+        r.sheet === sheet &&
+        r.start.row === start.row &&
+        r.start.col === start.col &&
+        r.end.row === end.row &&
+        r.end.col === end.col
+    );
+    return match?.name ?? '';
+  }
+
+  private _nameListCache: { key: string; list: string[] } | null = null;
+
+  /** The defined names in alphabetical order, for the Name Box's suggestions. */
+  private _nameList(): string[] {
+    const names = this._formulaEngine.getNames().map((n) => n.name);
+    const key = names.join('\n');
+    if (this._nameListCache?.key !== key) {
+      const list = names.sort((x, y) => x.localeCompare(y, undefined, { sensitivity: 'base' }));
+      this._nameListCache = { key, list };
+    }
+    return this._nameListCache.list;
+  }
+
+  /**
+   * Change the defined names for a user: refused in read-only mode, and
+   * `before-names-change` (describing the result) can veto it.
+   */
+  private _changeNamesByUser(next: DefinedName[], apply: () => void): boolean {
+    if (this.readOnly) {
+      this._modeAnnouncement = 'The spreadsheet is read-only: names cannot be changed';
+      return false;
+    }
+    const event = new CustomEvent<NamesChangeDetail>('before-names-change', {
+      detail: { names: next, source: 'user' },
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+    });
+    if (!this.dispatchEvent(event)) return false;
+    apply();
+    this._namesChanged('user');
+    return true;
+  }
+
+  /** Show an outcome in the name manager. The same text twice in a row is announced again. */
+  private _setNameStatus(text: string): void {
+    if (this._nameManagerStatus !== text) {
+      this._nameManagerStatus = text;
+      return;
+    }
+    this._nameManagerStatus = '';
+    this.updateComplete.then(() => {
+      this._nameManagerStatus = text;
+    });
+  }
+
+  private _handleNameSave(e: CustomEvent<NameSaveDetail>): void {
+    const { name, refersTo, previous } = e.detail;
+    const scope = this._findSheet(e.detail.sheet) ?? this._activeState;
+    const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+    const renamed = previous !== undefined && !same(previous, name);
+    if (renamed) {
+      const conflict = this._renameConflict(previous!, name);
+      if (conflict) {
+        this._setNameStatus(`${previous} was not renamed to ${name}: ${conflict} would no longer mean the same`);
+        return;
+      }
+    }
+    const next = this.getNames().filter((n) => !same(n.name, previous ?? name) && !same(n.name, name));
+    next.push({ name, refersTo, sheet: scope.name });
+    const applied = this._changeNamesByUser(next, () => {
+      if (previous !== undefined) this._formulaEngine.removeName(previous);
+      // Formulas that use the name keep working under its new one, its own definition included (a recursive LAMBDA)
+      const definition = renamed ? this._renameNameEverywhere(previous!, name, refersTo) : refersTo;
+      this._formulaEngine.defineName(name, definition, scope.name);
+    });
+    this._setNameStatus(
+      !applied ? 'The change was not applied' : previous === undefined ? `Name added: ${name}` : `Name changed: ${name}`
+    );
+  }
+
+  private _handleNameRemove(e: CustomEvent<NameRemoveDetail>): void {
+    const { name } = e.detail;
+    const next = this.getNames().filter((n) => n.name.toLowerCase() !== name.toLowerCase());
+    const applied = this._changeNamesByUser(next, () => this._formulaEngine.removeName(name));
+    this._setNameStatus(applied ? `Name deleted: ${name}` : 'The change was not applied');
+  }
+
+  private _handleNameGo(e: CustomEvent<NameGoDetail>): void {
+    const { name } = e.detail;
+    const target = this._formulaEngine.referenceOf(name, this._activeState.name);
+    if (!target) {
+      this._setNameStatus(`${name} does not refer to cells`);
+      return;
+    }
+    this.closeNameManager(false);
+    if (!this._goToRange(target, 'user')) this._modeAnnouncement = `${name} is outside the sheet`;
+  }
+
+  /**
+   * What stands in the way of renaming a name: a formula that uses it and
+   * has a LET or LAMBDA variable of the old or the new name, or that calls it
+   * when the new name is a function, so rewriting it would change what it means. Looks at every formula the rename would
+   * rewrite: cells of all sheets, other names, conditional formats, and what
+   * undo would write back. Undefined when the rename is safe.
+   */
+  private _renameConflict(oldName: string, newName: string): string | undefined {
+    const functions = new Set(this._formulaEngine.functionNames());
+    const captured = (formula: string) => renameIsCaptured(formula, oldName, newName, (fn) => functions.has(fn));
+    for (const sheet of this._sheets) {
+      const data = sheet.id === this._activeSheetId ? this._internalData : sheet.data;
+      for (const [key, cell] of data) {
+        if (captured(cell.rawValue)) return `the formula in ${sheet.name}!${coordToRef(parseKey(key))}`;
+      }
+    }
+    const other = this._formulaEngine.getNames().find((n) => captured(n.formula));
+    if (other) return `the name ${other.name}`;
+    let stored: string | undefined;
+    // Visits without changing anything
+    this._rewriteStoredFormulas((formula) => {
+      if (stored === undefined && captured(formula)) stored = formula;
+      return formula;
+    });
+    return stored === undefined ? undefined : `${stored} (a conditional format, or a formula undo would bring back)`;
+  }
+
+  /**
+   * Rewrite a renamed name in the formulas of every sheet, in the other
+   * names, and in what undo would write back. Returns `definition` (the
+   * name's own formula) rewritten the same way.
+   */
+  private _renameNameEverywhere(oldName: string, newName: string, definition: string): string {
+    const functions = new Set(this._formulaEngine.functionNames());
+    const rewrite = (formula: string) => renameNameInFormula(formula, oldName, newName, (fn) => functions.has(fn));
+    for (const sheet of this._sheets) {
+      const data = sheet.id === this._activeSheetId ? this._internalData : sheet.data;
+      for (const cell of data.values()) {
+        if (cell.rawValue.startsWith('=')) cell.rawValue = rewrite(cell.rawValue);
+      }
+    }
+    this._formulaEngine.mapNameFormulas(rewrite);
+    this._rewriteStoredFormulas(rewrite);
+    // Undo of a row or column change finds the names it moved by name
+    const lower = oldName.toLowerCase();
+    for (const batch of [...this._undoStack, ...this._redoStack]) {
+      for (const moved of batch.structure?.names ?? []) {
+        if (moved.name.toLowerCase() === lower) moved.name = newName;
+      }
+    }
+    return rewrite(definition.startsWith('=') ? definition : '=' + definition);
+  }
+
+  /** Enter in the Name Box: go to the cells typed, or name the selection. */
+  private _handleNameBoxCommit(e: CustomEvent<NameBoxCommitDetail>): void {
+    this._syncPendingData();
+    const bar = e.currentTarget as Y11nFormulaBar;
+    const value = e.detail.value;
+    const target = this._formulaEngine.referenceOf(value, this._activeState.name);
+    if (target) {
+      if (!this._goToRange(target, 'user')) this._modeAnnouncement = `${value} is outside the sheet`;
+      bar.resetNameBox();
+      return;
+    }
+    const names = this.getNames();
+    const existing = names.find((n) => n.name.toLowerCase() === value.toLowerCase());
+    if (existing) {
+      this._modeAnnouncement = `${existing.name} does not refer to cells: it is ${existing.refersTo}`;
+      bar.resetNameBox();
+      return;
+    }
+    if (!isValidName(value)) {
+      this._modeAnnouncement = `${value} is not a cell reference or a valid name`;
+      bar.resetNameBox();
+      return;
+    }
+    const sheet = this._activeState.name;
+    const refersTo = this._selectionReference();
+    const defined = this._changeNamesByUser([...names, { name: value, refersTo, sheet }], () =>
+      this._formulaEngine.defineName(value, refersTo, sheet)
+    );
+    bar.resetNameBox();
+    if (!defined) return;
+    this._modeAnnouncement = `Named ${refersTo.slice(1)} ${value}`;
+    this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  // ─── Sheet Internals ────────────────────────────────
+
+  /** The sheet being shown. */
+  private get _activeState(): SheetState {
+    return this._sheets.find((s) => s.id === this._activeSheetId)!;
+  }
+
+  private _findSheet(name: string): SheetState | undefined {
+    const lower = name.toLowerCase();
+    return this._sheets.find((s) => s.name.toLowerCase() === lower);
+  }
+
+  private _requireSheet(name: string, method: string): SheetState {
+    const state = this._findSheet(name);
+    if (!state) throw new RangeError(`${method}: there is no sheet named "${name}"`);
+    return state;
+  }
+
+  /** Cells for a sheet that is not being shown: copies, with literal values displayed and formulas left to the engine. */
+  private _prepareSheetData(data: GridData | undefined): GridData {
+    const out: GridData = new Map();
+    if (!data) return out;
+    for (const [key, cell] of data) {
+      const stored = storedCell(cell);
+      if (!stored) continue;
+      const copy = cloneCell(stored);
+      delete copy.spill;
+      delete copy.array;
+      if (copy.rawValue.startsWith('=')) {
+        // Computed (and number-formatted) by the next recalculation
+        copy.displayValue = '';
+        copy.type = 'text';
+      } else {
+        const evaluated = this._formulaEngine.evaluate(copy.rawValue);
+        copy.type = evaluated.type;
+        copy.displayValue =
+          evaluated.type === 'number' && copy.format?.numberFormat
+            ? formatNumber(Number(copy.rawValue), copy.format.numberFormat)
+            : evaluated.displayValue;
+      }
+      out.set(key, copy);
+    }
+    return out;
+  }
+
+  /** Keep the view of the sheet being shown, before another one replaces it. */
+  private _stashSheet(state: SheetState): void {
+    state.data = this._internalData;
+    state.rows = this.rows;
+    state.cols = this.cols;
+    state.frozenRows = this.frozenRows;
+    state.frozenCols = this.frozenCols;
+    state.colWidths = this._colWidths;
+    state.filter = this._filter;
+    state.cfRules = this._cfRules;
+    state.selection = this._snapshotSelection();
+    state.scrollTop = this._scrollTop;
+    state.scrollLeft = this._scrollLeft;
+  }
+
+  private _loadSheet(state: SheetState): void {
+    this._internalData = state.data;
+    this.rows = state.rows;
+    this.cols = state.cols;
+    this.frozenRows = state.frozenRows;
+    this.frozenCols = state.frozenCols;
+    this._colWidths = state.colWidths;
+    this._colWidthsRevision++;
+    this._resizePreview = null;
+    this._filter = state.filter;
+    this._filterRevision++;
+    this._formulaEngine.setActiveSheet(state.name);
+    this._syncEngineSize();
+    this._setConditionalRules(state.cfRules);
+    this._cf.invalidate();
+    this._selection.setBounds(this.rows, this.cols);
+    this._selection.setSelection(state.selection.anchor, state.selection.head, state.selection.active);
+    this._fillPreview = null;
+    this._summaryCache = null;
+    // Work that is waiting on the clipboard must not land on another sheet
+    this._structureRevision++;
+    this._mutationCount++;
+    this._scrollTop = state.scrollTop;
+    this._scrollLeft = state.scrollLeft;
+  }
+
+  private _activateSheet(state: SheetState, source: SheetChangeDetail['source']): boolean {
+    if (state.id === this._activeSheetId) return true;
+    if (this._pasteInProgress) return false;
+    this._syncPendingData();
+    if (this._isEditing) {
+      if (source === 'user' && this._editValue.startsWith('=')) {
+        // A formula stays open while another sheet is shown, so a reference can be picked on it.
+        // A reference already being picked stays replaceable: the next pick takes its place.
+        this._switchSheetView(state, source);
+        const edited = this._sheets.find((s) => s.id === this._editSheetId);
+        const cell = this._editingCellKey ? coordToRef(parseKey(this._editingCellKey)) : '';
+        this._modeAnnouncement =
+          state.id === this._editSheetId || !edited
+            ? `${state.name}, still editing ${cell}`
+            : `${state.name}. Pick a cell for the formula in ${edited.name}!${cell}; Enter finishes`;
+        return true;
+      }
+      this._exitRefMode();
+      this._commitEdit();
+      // Committing shows the edited cell's sheet again, which may be this one
+      if (state.id === this._activeSheetId) return true;
+    }
+    this._closeFilterMenu(false);
+    this._closePasteSpecial(false);
+    this.closeConditionalFormatManager(false);
+    this.closeCellValues(false);
+    this._switchSheetView(state, source);
+    if (source !== 'programmatic') {
+      this._modeAnnouncement = `${state.name}, sheet ${this._sheets.indexOf(state) + 1} of ${this._sheets.length}`;
+    }
+    return true;
+  }
+
+  /** Swap the view to another sheet: store this sheet's view, load the other's, tell listeners. */
+  private _switchSheetView(state: SheetState, source: SheetChangeDetail['source']): void {
+    const hadFocus = this._gridHasFocus();
+    const previous = this._activeState;
+    // A size set just before must reach the engine while this sheet is still the active one
+    if (this._syncEngineSize()) this._recalcAll();
+    this._stashSheet(previous);
+    this._activeSheetId = state.id;
+    this._loadSheet(state);
+    // Text typed into the formula bar or the Name Box was for the sheet that was shown
+    const bar = this.shadowRoot?.querySelector<Y11nFormulaBar>('y11n-formula-bar');
+    bar?.resetDraft();
+    bar?.resetNameBox();
+    this.dispatchEvent(
+      new CustomEvent<SheetChangeDetail>('sheet-change', {
+        detail: { sheet: state.name, previous: previous.name, source },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    this._dispatchSelectionChange();
+    this.requestUpdate();
+    this.updateComplete.then(() => {
+      if (this._activeSheetId !== state.id) return;
+      const grid = this._grid;
+      if (grid) {
+        grid.scrollTop = state.scrollTop;
+        grid.scrollLeft = state.scrollLeft;
+      }
+      if (hadFocus && !this._isEditing) this._focusActiveCell();
+    });
+  }
+
+  /** Show the sheet a recorded change belongs to. False when that sheet no longer exists. */
+  private _showSheetOf(batch: CommandBatch, source: 'undo' | 'redo'): boolean {
+    if (batch.sheetId === undefined || batch.sheetId === this._activeSheetId) return true;
+    const state = this._sheets.find((s) => s.id === batch.sheetId);
+    return !!state && this._activateSheet(state, source);
+  }
+
+  private _stepSheet(delta: number): void {
+    const count = this._sheets.length;
+    const index = this._sheets.indexOf(this._activeState);
+    const next = this._sheets[(index + delta + count) % count];
+    if (this._activateSheet(next, 'user')) {
+      this.updateComplete.then(() => {
+        if (!this._isEditing) this._focusActiveCell();
+      });
+    }
+  }
+
+  /** Adding, removing or renaming sheets ends an edit first (and shows its sheet again). */
+  private _endEditForSheetChange(): void {
+    if (!this._isEditing) return;
+    this._exitRefMode();
+    this._commitEdit();
+  }
+
+  private _dropHistoryOf(sheetId: number): void {
+    this._undoStack = this._undoStack.filter((b) => b.sheetId !== sheetId);
+    this._redoStack = this._redoStack.filter((b) => b.sheetId !== sheetId);
+  }
+
+  private _addSheet(name: string, options: AddSheetOptions, source: 'user' | 'programmatic'): string {
+    const rows = Math.max(1, Math.round(options.rows ?? this.rows));
+    const cols = Math.max(1, Math.round(options.cols ?? this.cols));
+    const state = newSheetState(this._nextSheetId++, name, this._prepareSheetData(options.data), rows, cols);
+    const index = Math.max(0, Math.min(Math.trunc(options.index ?? this._sheets.length), this._sheets.length));
+    const sheets = [...this._sheets];
+    sheets.splice(index, 0, state);
+    this._sheets = sheets;
+    this._formulaEngine.addSheet(name, state.data, rows, cols);
+    this._formulaEngine.moveSheet(name, index);
+    // Formulas that already named this sheet now resolve
+    this._recalcAll();
+    this._dispatchSheetsChange('add', name, source);
+    if (options.activate) this._activateSheet(state, source);
+    this.requestUpdate();
+    return name;
+  }
+
+  private _removeSheet(state: SheetState, source: 'user' | 'programmatic'): boolean {
+    if (this._pasteInProgress || this._sheets.length === 1) return false;
+    this._syncPendingData();
+    this._endEditForSheetChange();
+    const index = this._sheets.indexOf(state);
+    if (state.id === this._activeSheetId) {
+      const next = this._sheets[index + 1] ?? this._sheets[index - 1];
+      if (!this._activateSheet(next, source)) return false;
+    }
+    const namesBefore = JSON.stringify(this.getNames());
+    this._sheets = this._sheets.filter((s) => s !== state);
+    this._formulaEngine.removeSheet(state.name);
+    this._dropHistoryOf(state.id);
+    this._recalcAll();
+    this._dispatchSheetsChange('remove', state.name, source);
+    // Names that were based on the sheet no longer have one
+    if (JSON.stringify(this.getNames()) !== namesBefore) this._dispatchNamesChange(source);
+    this.requestUpdate();
+    return true;
+  }
+
+  private _renameSheet(state: SheetState, newName: string, source: 'user' | 'programmatic'): void {
+    const oldName = state.name;
+    if (oldName === newName) return;
+    this._syncPendingData();
+    if (this._isEditing) {
+      this._exitRefMode();
+      this._commitEdit();
+    }
+    const namesBefore = JSON.stringify(this.getNames());
+    // Rewrites the formulas of every sheet, and the defined names
+    this._formulaEngine.renameSheet(oldName, newName);
+    state.name = newName;
+
+    this._rewriteStoredFormulas((formula) => renameSheetInFormula(formula, oldName, newName));
+    for (const batch of [...this._undoStack, ...this._redoStack]) {
+      for (const moved of batch.structure?.names ?? []) {
+        if (moved.sheet === oldName) moved.sheet = newName;
+      }
+    }
+    this._recalcAll();
+    this._dispatchSheetsChange('rename', newName, source, oldName);
+    // Names based on the sheet, or referring to it, changed with it
+    if (JSON.stringify(this.getNames()) !== namesBefore) this._dispatchNamesChange(source);
+    this.requestUpdate();
+  }
+
+  /**
+   * Apply a rewrite to the formulas kept outside the cells: what undo and
+   * redo would write back, and conditional-format rules of every sheet.
+   */
+  private _rewriteStoredFormulas(rewrite: (formula: string) => string): void {
+    const rewriteCell = (cell: CellData | undefined) => {
+      if (cell) cell.rawValue = rewrite(cell.rawValue);
+    };
+    // Undo knows a sheet's rules by identity, and one array can be in several
+    // batches: every array is rewritten once, and everything pointing at it follows
+    const rewritten = new Map<readonly ConditionalFormatRule[], readonly ConditionalFormatRule[]>();
+    const rewriteRules = (rules: readonly ConditionalFormatRule[]) => {
+      let next = rewritten.get(rules);
+      if (!next) rewritten.set(rules, (next = mapRuleFormulas(rules, rewrite)));
+      return next;
+    };
+    for (const batch of [...this._undoStack, ...this._redoStack]) {
+      for (const delta of batch.deltas) {
+        delta.before = rewrite(delta.before);
+        delta.after = rewrite(delta.after);
+      }
+      for (const cell of [...(batch.structure?.cells ?? []), ...(batch.sort?.cells ?? [])]) {
+        rewriteCell(cell.before);
+        rewriteCell(cell.after);
+      }
+      for (const other of batch.structure?.others ?? []) {
+        other.before = rewrite(other.before);
+        other.after = rewrite(other.after);
+      }
+      for (const moved of batch.structure?.names ?? []) {
+        moved.before = rewrite(moved.before);
+        moved.after = rewrite(moved.after);
+      }
+      for (const rules of batch.structure?.otherRules ?? []) {
+        rules.before = rewriteRules(rules.before);
+        rules.after = rewriteRules(rules.after);
+      }
+      if (batch.conditional) {
+        batch.conditional = {
+          before: rewriteRules(batch.conditional.before),
+          after: rewriteRules(batch.conditional.after),
+        };
+      }
+    }
+    for (const sheet of this._sheets) {
+      if (sheet.id === this._activeSheetId) {
+        const rules = rewriteRules(this._cfRules);
+        if (rules !== this._cfRules) this._setConditionalRules(rules);
+      } else {
+        sheet.cfRules = rewriteRules(sheet.cfRules);
+      }
+    }
+  }
+
+  private _moveSheet(state: SheetState, index: number, source: 'user' | 'programmatic'): void {
+    const from = this._sheets.indexOf(state);
+    const to = Math.max(0, Math.min(Math.trunc(index) || 0, this._sheets.length - 1));
+    if (from === to) return;
+    const sheets = this._sheets.filter((s) => s !== state);
+    sheets.splice(to, 0, state);
+    this._sheets = sheets;
+    this._formulaEngine.moveSheet(state.name, to);
+    this._dispatchSheetsChange('move', state.name, source);
+    this.requestUpdate();
+  }
+
+  private _dispatchSheetsChange(
+    kind: SheetsChangeDetail['kind'],
+    sheet: string,
+    source: 'user' | 'programmatic',
+    previous?: string
+  ): void {
+    const detail: SheetsChangeDetail = { sheets: this.sheets, kind, sheet, source };
+    if (previous !== undefined) detail.previous = previous;
+    this.dispatchEvent(new CustomEvent<SheetsChangeDetail>('sheets-change', { detail, bubbles: true, composed: true }));
+  }
+
+  /**
+   * Ask `before-sheets-change` listeners whether a user may change the
+   * sheets as described. Returns false when cancelled.
+   */
+  private _confirmSheetsChange(detail: SheetsChangeDetail): boolean {
+    const event = new CustomEvent<SheetsChangeDetail>('before-sheets-change', {
+      detail,
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+    });
+    return this.dispatchEvent(event);
+  }
+
+  private _namesChanged(source: NamesChangeDetail['source']): void {
+    this._recalcAll();
+    this._dispatchNamesChange(source);
+    this.requestUpdate();
+  }
+
+  private _dispatchNamesChange(source: NamesChangeDetail['source']): void {
+    this.dispatchEvent(
+      new CustomEvent<NamesChangeDetail>('names-change', {
+        detail: { names: this.getNames(), source },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /**
+   * Add to a structure batch what a row/column change on this sheet does
+   * elsewhere: formulas on other sheets that refer to it, and defined names.
+   */
+  private _addCrossSheetStructure(structure: StructureBatch): void {
+    const { change } = structure;
+    const changedSheet = this._activeState.name;
+    const others: NonNullable<StructureBatch['others']> = [];
+    for (const sheet of this._sheets) {
+      if (sheet.id === this._activeSheetId) continue;
+      for (const [id, cell] of sheet.data) {
+        // Only a sheet-qualified reference can point here
+        if (!cell.rawValue.startsWith('=') || !cell.rawValue.includes('!')) continue;
+        const after = adjustFormulaForStructureChange(cell.rawValue, change, { formulaSheet: sheet.name, changedSheet });
+        if (after !== cell.rawValue) others.push({ sheetId: sheet.id, id, before: cell.rawValue, after });
+      }
+    }
+    if (others.length > 0) structure.others = others;
+
+    const otherRules: NonNullable<StructureBatch['otherRules']> = [];
+    for (const sheet of this._sheets) {
+      if (sheet.id === this._activeSheetId) continue;
+      const after = mapRuleFormulas(sheet.cfRules, (formula) =>
+        adjustFormulaForStructureChange(formula, change, { formulaSheet: sheet.name, changedSheet })
+      );
+      if (after !== sheet.cfRules) otherRules.push({ sheetId: sheet.id, before: sheet.cfRules, after });
+    }
+    if (otherRules.length > 0) structure.otherRules = otherRules;
+
+    const names: NonNullable<StructureBatch['names']> = [];
+    for (const n of this._formulaEngine.getNames()) {
+      const after = adjustFormulaForStructureChange(n.formula, change, { formulaSheet: n.sheet, changedSheet });
+      if (after !== n.formula) names.push({ name: n.name, sheet: n.sheet, before: n.formula, after });
+    }
+    if (names.length > 0) structure.names = names;
+  }
+
+  // ─── Sheet tab events ───────────────────────────────
+
+  private _handleSheetSelect(e: CustomEvent<{ id: number }>): void {
+    const state = this._sheets.find((s) => s.id === e.detail.id);
+    if (state) this._activateSheet(state, 'user');
+  }
+
+  private _handleSheetAdd(): void {
+    if (this.readOnly) return;
+    this._syncPendingData();
+    this._endEditForSheetChange();
+    const name = nextSheetName(this.sheets);
+    if (!this._confirmSheetsChange({ sheets: [...this.sheets, name], kind: 'add', sheet: name, source: 'user' })) return;
+    this._addSheet(name, { activate: true }, 'user');
+    this._modeAnnouncement = `Added ${name}`;
+  }
+
+  private _handleSheetRename(e: CustomEvent<{ id: number; name: string }>): void {
+    if (this.readOnly) return;
+    const state = this._sheets.find((s) => s.id === e.detail.id);
+    const newName = e.detail.name;
+    if (!state || state.name === newName) return;
+    const problem = validateSheetName(newName, this.sheets.filter((n) => n !== state.name));
+    if (problem) {
+      this._modeAnnouncement = problem;
+      return;
+    }
+    const oldName = state.name;
+    const sheets = this.sheets.map((n) => (n === oldName ? newName : n));
+    if (!this._confirmSheetsChange({ sheets, kind: 'rename', sheet: newName, previous: oldName, source: 'user' })) return;
+    this._renameSheet(state, newName, 'user');
+    this._modeAnnouncement = `Renamed ${oldName} to ${newName}`;
+  }
+
+  private _handleSheetRemove(e: CustomEvent<{ id: number }>): void {
+    if (this.readOnly || this._sheets.length === 1) return;
+    const state = this._sheets.find((s) => s.id === e.detail.id);
+    if (!state) return;
+    const sheets = this.sheets.filter((n) => n !== state.name);
+    if (!this._confirmSheetsChange({ sheets, kind: 'remove', sheet: state.name, source: 'user' })) return;
+    if (this._removeSheet(state, 'user')) this._modeAnnouncement = `Deleted ${state.name}`;
+  }
+
+  private _handleSheetMove(e: CustomEvent<{ id: number; index: number }>): void {
+    if (this.readOnly) return;
+    const state = this._sheets.find((s) => s.id === e.detail.id);
+    if (!state) return;
+    const sheets = this.sheets.filter((n) => n !== state.name);
+    const index = Math.max(0, Math.min(e.detail.index, sheets.length));
+    sheets.splice(index, 0, state.name);
+    if (!this._confirmSheetsChange({ sheets, kind: 'move', sheet: state.name, source: 'user' })) return;
+    this._moveSheet(state, index, 'user');
+  }
+
+  // ─── Lists API ───────────────────────────────────────
+
+  /**
+   * Turn the text of the cells in a range into lists: several values in one
+   * cell. `Ann, Bob` becomes a list of two items, which can be filtered by
+   * item and used in formulas (`=HAS(A2, "Bob")`, `=COUNTA(A2)`). Formula
+   * cells are left alone. A list is stored as the formula `={{"Ann";"Bob"}}`.
+   * What Ctrl+J does for the selection. Undoable.
+   *
+   * @param range - Default: the selection
+   * @returns The number of cells converted
+   */
+  convertToList(range?: SelectionRange): number {
+    return this._convertLists(this._normalizeRange(range ?? this._selection.range, 'convertToList'), true, 'programmatic');
+  }
+
+  /**
+   * Turn the lists in a range back into comma-separated text. Undoable.
+   *
+   * @param range - Default: the selection
+   * @returns The number of cells converted
+   */
+  convertListToText(range?: SelectionRange): number {
+    return this._convertLists(
+      this._normalizeRange(range ?? this._selection.range, 'convertListToText'),
+      false,
+      'programmatic'
+    );
+  }
+
+  /**
+   * The values of a cell that holds several (a list, or an array kept in the
+   * cell with `={...}`), or `null` for any other cell.
+   *
+   * @param cellId - Cell key in `"row:col"` format
+   */
+  getCellValues(cellId: string): CellArray | null {
+    this._syncPendingData();
+    const array = this._internalData.get(cellId)?.array;
+    return array ? (JSON.parse(JSON.stringify(array)) as CellArray) : null;
+  }
+
+  /**
+   * Open the popup that shows the values of a cell holding several values
+   * (what Alt+Down and the cell's icon do). Nested arrays can be opened from
+   * it. Escape closes it.
+   *
+   * @param cellId - Default: the active cell
+   * @returns Whether it opened (false when the cell holds a single value)
+   */
+  async showCellValues(cellId?: string): Promise<boolean> {
+    this._syncPendingData();
+    const key = cellId ?? this._getActiveCellKey();
+    if (!this._internalData.get(key)?.array) return false;
+    if (this._isEditing) this._commitEdit();
+    this._closeFilterMenu(false);
+    const coord = parseKey(key);
+    if (key !== this._getActiveCellKey()) {
+      this._selection.setSelection(coord, coord, null);
+      this._dispatchSelectionChange();
+    }
+    this._ensureCellVisible(coord.row, coord.col);
+    this._arrayCard = { key, path: [] };
+    if (!this._arrayCardCleanup) {
+      const onPointerDown = (e: PointerEvent) => {
+        const cardEl = this.renderRoot.querySelector('.ls-array-card');
+        if (cardEl && e.composedPath().includes(cardEl)) return;
+        this.closeCellValues(false);
+      };
+      document.addEventListener('pointerdown', onPointerDown);
+      this._arrayCardCleanup = () => document.removeEventListener('pointerdown', onPointerDown);
+    }
+    this._modeAnnouncement = '';
+    await this.updateComplete;
+    this.renderRoot.querySelector<HTMLElement>('.ls-array-card-body')?.focus();
+    return true;
+  }
+
+  /** Close the values popup. */
+  closeCellValues(focusCell = true): void {
+    this._arrayCardCleanup?.();
+    this._arrayCardCleanup = null;
+    if (!this._arrayCard) return;
+    this._arrayCard = null;
+    if (focusCell) this.updateComplete.then(() => this._focusActiveCell());
   }
 
   // ─── Paste API ───────────────────────────────────────
@@ -1868,7 +3079,9 @@ export class Y11nSpreadsheet extends LitElement {
     // leak into the caller's objects, and caller mutations never leak in.
     const newData: GridData = new Map();
     for (const [key, cell] of this.data) {
-      newData.set(key, cloneCell(cell));
+      // Spilled values are recomputed, never imported
+      const stored = storedCell(cell);
+      if (stored) newData.set(key, cloneCell(stored));
     }
 
     // Diff old vs new to collect changed keys for future targeted recalc
@@ -1883,11 +3096,21 @@ export class Y11nSpreadsheet extends LitElement {
         !formatsEqual(oldCell.format, cell.format)
       ) {
         changedKeys.push(key);
+        // What the caller's copy says it spills or holds is recomputed
+        delete cell.spill;
+        delete cell.array;
+        delete cell.spilledFrom;
       } else {
         // Unchanged cells keep their computed values; the caller's copy may
         // carry a placeholder displayValue (e.g. '' for formulas).
         cell.displayValue = oldCell.displayValue;
         cell.type = oldCell.type;
+        if (oldCell.spill) cell.spill = oldCell.spill;
+        else delete cell.spill;
+        if (oldCell.array) cell.array = oldCell.array;
+        else delete cell.array;
+        // A formatted cell that shows a spilled value still does
+        if (oldCell.spilledFrom !== undefined && cell.rawValue === '') cell.spilledFrom = oldCell.spilledFrom;
       }
     }
 
@@ -1900,8 +3123,8 @@ export class Y11nSpreadsheet extends LitElement {
 
     this._internalData = newData;
     this._lastSyncedDataRef = this.data;
-    this._undoStack = [];
-    this._redoStack = [];
+    // Changes made on this sheet can't be undone into the new data; other sheets keep theirs
+    this._dropHistoryOf(this._activeSheetId);
     this._dataGeneration++;
     this._mutationCount++;
 
@@ -1943,15 +3166,51 @@ export class Y11nSpreadsheet extends LitElement {
     if (this.data !== this._lastSyncedDataRef) this._syncData();
   }
 
+  /**
+   * Tell the engine the grid's size, which bounds spills and whole-column
+   * references. Returns whether it changed.
+   */
+  private _syncEngineSize(): boolean {
+    return this._formulaEngine.setSheetSize(Math.max(1, Math.round(this.rows)), Math.max(1, Math.round(this.cols)));
+  }
+
   private _recalcAll(): void {
+    this._syncEngineSize();
     this._formulaEngine.recalculate();
     this._reapplyNumberFormats();
+    this._formatOtherSheets();
     this._cf.invalidate();
+    this._nameRanges = null;
+  }
+
+  /** Apply number formats to the cells of other sheets that the last recalculation changed. */
+  private _formatOtherSheets(): void {
+    if (this._sheets.length === 1) return;
+    const active = this._activeState.name;
+    for (const [name, keys] of this._formulaEngine.changes) {
+      if (name === active) continue;
+      const data = this._findSheet(name)?.data;
+      if (!data) continue;
+      for (const key of keys) {
+        const cell = data.get(key);
+        if (cell && cell.type === 'number' && cell.format?.numberFormat) {
+          const plain = this._formulaEngine.resultFor(key, cell.rawValue, name).displayValue;
+          cell.displayValue = formatNumber(Number(plain), cell.format.numberFormat);
+        }
+      }
+    }
   }
 
   private _recalcAffected(changedKeys: string[]): void {
+    if (this._syncEngineSize()) {
+      // The size bounds every spill and whole-column reference
+      this._formulaEngine.updateData(this._internalData, changedKeys);
+      this._recalcAll();
+      return;
+    }
     const changed = this._formulaEngine.recalculateAffected(changedKeys);
     this._applyNumberFormatsToKeys(changed);
+    this._formatOtherSheets();
     // Conditional formats follow the values: the written cells and every formula that changed with them
     this._cf.invalidate(changedKeys);
     this._cf.invalidate(changed);
@@ -1977,11 +3236,15 @@ export class Y11nSpreadsheet extends LitElement {
   /** Apply number formatting to a single cell using rawValue for robustness */
   private _applyNumberFormatToCell(key: string, cell: CellData): void {
     if (cell.type === 'number' && cell.format?.numberFormat) {
-      const numericValue = cell.rawValue.startsWith('=')
-        ? Number(this._formulaEngine.resultFor(key, cell.rawValue).displayValue)
-        : Number(cell.rawValue);
-      cell.displayValue = formatNumber(numericValue, cell.format.numberFormat);
+      cell.displayValue = formatNumber(this._plainNumber(key, cell), cell.format.numberFormat);
     }
+  }
+
+  /** The number a number cell holds, whatever its display format: typed, computed, or spilled into it. */
+  private _plainNumber(key: string, cell: CellData): number {
+    return cell.rawValue.startsWith('=') || cell.spilledFrom !== undefined
+      ? Number(this._formulaEngine.resultFor(key, cell.rawValue).displayValue)
+      : Number(cell.rawValue);
   }
 
   // ─── Cell Access ────────────────────────────────────
@@ -2147,6 +3410,7 @@ export class Y11nSpreadsheet extends LitElement {
    */
   private _pushHistory(batch: CommandBatch, generation: number): void {
     if (generation !== this._dataGeneration) return;
+    batch.sheetId ??= this._activeSheetId;
     this._undoStack.push(batch);
     this._redoStack = [];
     if (this._undoStack.length > this._maxHistory) {
@@ -2258,7 +3522,7 @@ export class Y11nSpreadsheet extends LitElement {
     } else {
       delete cell.format;
       // Remove empty cells
-      if (cell.rawValue === '' && !cell.readOnly) {
+      if (cell.rawValue === '' && !cell.readOnly && cell.spilledFrom === undefined) {
         this._internalData.delete(cellId);
         return;
       }
@@ -2267,12 +3531,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (cell.type === 'number' && cell.format?.numberFormat) {
       // For formula cells, get the unformatted result from the engine
       // (displayValue may already be formatted, e.g., "$1,234.50")
-      if (cell.rawValue.startsWith('=')) {
-        const evaluated = this._formulaEngine.resultFor(cellId, cell.rawValue);
-        cell.displayValue = formatNumber(Number(evaluated.displayValue), cell.format.numberFormat);
-      } else {
-        cell.displayValue = formatNumber(Number(cell.rawValue), cell.format.numberFormat);
-      }
+      cell.displayValue = formatNumber(this._plainNumber(cellId, cell), cell.format.numberFormat);
     } else if (cell.type === 'number' && !cell.format?.numberFormat) {
       // Remove number formatting — show the plain result
       const evaluated = this._formulaEngine.resultFor(cellId, cell.rawValue);
@@ -2498,8 +3757,9 @@ export class Y11nSpreadsheet extends LitElement {
       },
     };
     if (this._filter) batch.filter = { before: this._filter, after: this._filterAfterStructureChange(change) };
-    const rulesAfter = adjustRulesForStructureChange(this._cfRules, change);
+    const rulesAfter = adjustRulesForStructureChange(this._cfRules, change, this._activeState.name);
     if (rulesAfter !== this._cfRules) batch.conditional = { before: this._cfRules, after: rulesAfter };
+    this._addCrossSheetStructure(batch.structure!);
     this._commitBatch(batch, source);
 
     if (source === 'user') {
@@ -2540,7 +3800,10 @@ export class Y11nSpreadsheet extends LitElement {
   private _computeStructureCells(change: StructureChange): StructureCellDelta[] {
     const { axis, kind, index, count } = change;
     const next: GridData = new Map();
-    for (const [key, cell] of this._internalData) {
+    for (const [key, shown] of this._internalData) {
+      // Spilled values don't move: their formula does, and spills again
+      const cell = storedCell(shown);
+      if (!cell) continue;
       const { row, col } = parseKey(key);
       const p = axis === 'row' ? row : col;
       let moved = p;
@@ -2552,14 +3815,15 @@ export class Y11nSpreadsheet extends LitElement {
         continue; // deleted
       }
       const copy = cloneCell(cell);
-      copy.rawValue = adjustFormulaForStructureChange(cell.rawValue, change);
+      copy.rawValue = adjustFormulaForStructureChange(cell.rawValue, change, { formulaSheet: this._activeState.name });
       next.set(axis === 'row' ? cellKey(moved, col) : cellKey(row, moved), copy);
     }
 
     const cells: StructureCellDelta[] = [];
     for (const id of new Set([...this._internalData.keys(), ...next.keys()])) {
-      const before = this._internalData.get(id);
+      const before = storedCell(this._internalData.get(id));
       const after = next.get(id);
+      if (!before && !after) continue;
       if (
         before &&
         after &&
@@ -2657,6 +3921,27 @@ export class Y11nSpreadsheet extends LitElement {
     this._selection.setBounds(this.rows, this.cols);
     this._lastSyncedDataRef = this.data;
 
+    // Formulas on other sheets and defined names that refer to this sheet move with it
+    // Only where the formula is still the one this change wrote (or found)
+    const from = side === 'after' ? 'before' : 'after';
+    for (const other of structure.others ?? []) {
+      const cell = this._sheets.find((s) => s.id === other.sheetId)?.data.get(other.id);
+      if (cell && cell.rawValue === other[from]) cell.rawValue = other[side];
+    }
+    for (const rules of structure.otherRules ?? []) {
+      const sheet = this._sheets.find((s) => s.id === rules.sheetId);
+      if (sheet && sheet.cfRules === rules[from]) sheet.cfRules = rules[side];
+    }
+    if (structure.names) {
+      const current = new Map(this._formulaEngine.getNames().map((n) => [n.name.toLowerCase(), n]));
+      for (const moved of structure.names) {
+        const name = current.get(moved.name.toLowerCase());
+        if (name && name.formula === moved[from] && name.sheet === moved.sheet) {
+          this._formulaEngine.setNameFormula(name.name, moved[side]);
+        }
+      }
+    }
+
     // Every reference may have moved, so rebuild the dependency graph.
     this._formulaEngine.setData(this._internalData);
     this._recalcAll();
@@ -2674,6 +3959,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (frozen) this._dispatchFreezeChange({ ...frozen, source });
     if (filterMoved) this._dispatchFilterChange(this._filterDetail(this._filter, source));
     if (batch.conditional) this._dispatchConditionalChange(source);
+    if (structure.names) this._dispatchNamesChange(source);
     if (movedWidths.length > 0) {
       // So hosts that save widths on column-resize see them move
       this.dispatchEvent(
@@ -2808,8 +4094,8 @@ export class Y11nSpreadsheet extends LitElement {
       if (src === target) return;
       for (let c = c0; c <= c1; c++) {
         const id = cellKey(target, c);
-        const before = this._internalData.get(id);
-        const source = this._internalData.get(cellKey(src, c));
+        const before = storedCell(this._internalData.get(id));
+        const source = storedCell(this._internalData.get(cellKey(src, c)));
         let after: CellData | undefined;
         if (source) {
           after = cloneCell(source);
@@ -2911,7 +4197,7 @@ export class Y11nSpreadsheet extends LitElement {
     let lastRow = -1;
     let lastCol = -1;
     for (const [key, cell] of this._internalData) {
-      if (cell.rawValue === '') continue;
+      if (!hasContent(cell)) continue;
       const { row, col } = parseKey(key);
       if (row < range.start.row || row > range.end.row || col < range.start.col || col > range.end.col) continue;
       if (row > lastRow) lastRow = row;
@@ -2934,10 +4220,10 @@ export class Y11nSpreadsheet extends LitElement {
     if (end.row <= start.row) return false;
     for (let c = start.col; c <= end.col; c++) {
       const cell = this._internalData.get(cellKey(start.row, c));
-      if (!cell || cell.rawValue === '' || cell.type !== 'text') return false;
+      if (!hasContent(cell) || cell.type !== 'text') return false;
     }
     for (const [key, cell] of this._internalData) {
-      if (cell.rawValue === '' || cell.type === 'text') continue;
+      if (!hasContent(cell) || cell.type === 'text') continue;
       const { row, col } = parseKey(key);
       if (row > start.row && row <= end.row && col >= start.col && col <= end.col) return true;
     }
@@ -2975,10 +4261,20 @@ export class Y11nSpreadsheet extends LitElement {
     return this._internalData.get(cellKey(row, col))?.displayValue ?? '';
   }
 
-  /** Whether a row meets every column's criteria, optionally leaving one column out. */
+  /**
+   * Whether a row meets every column's criteria, optionally leaving one
+   * column out. A cell that holds several values matches when any one of
+   * them is kept, so a list can be filtered by its items.
+   */
   private _rowMatches(row: number, criteria: Map<number, Set<string>>, ignoreCol = -1): boolean {
     for (const [col, values] of criteria) {
-      if (col !== ignoreCol && !values.has(this._filterValue(row, col))) return false;
+      if (col === ignoreCol) continue;
+      const array = this._internalData.get(cellKey(row, col))?.array;
+      if (array) {
+        if (!arrayScalars(array).some((item) => values.has(arrayItemText(item)))) return false;
+      } else if (!values.has(this._filterValue(row, col))) {
+        return false;
+      }
     }
     return true;
   }
@@ -3202,18 +4498,35 @@ export class Y11nSpreadsheet extends LitElement {
     const filter = this._filter!;
     const range = this._extendFilterRange(filter.range);
     // One cell per distinct value, to sort the values by
-    const cells = new Map<string, { key: string; cell: CellData | undefined }>();
+    const cells = new Map<string, SortValue>();
     for (let r = range.start.row + 1; r <= range.end.row; r++) {
       if (!this._rowMatches(r, filter.criteria, col)) continue;
       const key = cellKey(r, col);
       const cell = this._internalData.get(key);
+      if (cell?.array) {
+        // A cell that holds several values lists each of them
+        for (const item of arrayScalars(cell.array)) {
+          const text = arrayItemText(item);
+          if (cells.has(text)) continue;
+          cells.set(
+            text,
+            text === ''
+              ? { kind: 'blank' }
+              : typeof item === 'number'
+                ? { kind: 'number', value: item }
+                : typeof item === 'boolean'
+                  ? { kind: 'boolean', value: item }
+                  : { kind: 'text', value: text }
+          );
+        }
+        continue;
+      }
       const value = cell?.displayValue ?? '';
-      if (!cells.has(value)) cells.set(value, { key, cell });
+      if (!cells.has(value)) {
+        cells.set(value, value === '' ? { kind: 'blank' } : this._cfValue(key));
+      }
     }
-    const entries = [...cells].map(([value, { key, cell }]) => ({
-      value,
-      sort: sortValueOf(value === '' ? undefined : cell, (c) => this._sortNumber(key, c)),
-    }));
+    const entries = [...cells].map(([value, sort]) => ({ value, sort }));
     entries.sort((a, b) => compareSortValues(a.sort, b.sort, 'ascending') || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
     return entries.map((e) => e.value);
   }
@@ -3221,6 +4534,261 @@ export class Y11nSpreadsheet extends LitElement {
   /** The values checked when the menu opens: those the criteria keep, or all. */
   private _checkedForCriteria(values: string[], criteria: Set<string> | undefined): Set<string> {
     return new Set(criteria ? values.filter((v) => criteria.has(v)) : values);
+  }
+
+  // ─── Spilled values ─────────────────────────────────
+
+  /**
+   * The range a formula's array result spills over, when the cell at
+   * (row, col) is part of one: the formula's own cell or a cell showing one
+   * of its values.
+   */
+  private _spillRangeAt(row: number, col: number): SelectionRange | null {
+    const cell = this._getCell(row, col);
+    if (!cell) return null;
+    let anchor: CellCoord = { row, col };
+    let spill = cell.spill;
+    if (cell.spilledFrom !== undefined) {
+      anchor = parseKey(cell.spilledFrom);
+      spill = this._internalData.get(cell.spilledFrom)?.spill;
+    }
+    if (!spill) return null;
+    return { start: anchor, end: { row: anchor.row + spill.rows - 1, col: anchor.col + spill.cols - 1 } };
+  }
+
+  /** Classes that outline the spill range the active cell belongs to. */
+  private _spillClasses(row: number, col: number): string {
+    const spill = this._activeSpill;
+    if (!spill || row < spill.start.row || row > spill.end.row || col < spill.start.col || col > spill.end.col) {
+      return '';
+    }
+    return (
+      'in-spill' +
+      (row === spill.start.row ? ' spill-top' : '') +
+      (row === spill.end.row ? ' spill-bottom' : '') +
+      (col === spill.start.col ? ' spill-left' : '') +
+      (col === spill.end.col ? ' spill-right' : '')
+    );
+  }
+
+  // ─── Lists and arrays in cells ──────────────────────
+
+  /** Ctrl+J: turn the selected cells into lists, or back into text when they all are lists. */
+  private _toggleListsInSelection(): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const range = this._selection.range;
+    let lists = 0;
+    let others = 0;
+    for (const r of this._visibleRowsBetween(range.start.row, range.end.row)) {
+      for (let c = range.start.col; c <= range.end.col; c++) {
+        const raw = this._internalData.get(cellKey(r, c))?.rawValue ?? '';
+        if (raw === '') continue;
+        if (listItemsOf(raw)) lists++;
+        else if (!raw.startsWith('=')) others++;
+      }
+    }
+    if (lists === 0 && others === 0) {
+      // Nothing to convert: type the items of a new list
+      this._startEditing('');
+      if (this._isEditing) {
+        this._editListMode = true;
+        this._modeAnnouncement = `Editing ${coordToRef(this._selection.activeCell)} as a list. Separate the items with commas`;
+      }
+      return;
+    }
+    this._convertLists(range, others > 0, 'user');
+  }
+
+  /**
+   * Convert the cells of a range between text and lists. Returns how many
+   * cells changed. Formulas are left alone.
+   */
+  private _convertLists(range: SelectionRange, toList: boolean, source: 'user' | 'programmatic'): number {
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    if (source === 'user' && this.readOnly) return 0;
+    const updates: Array<{ id: string; value: string }> = [];
+    for (const r of this._visibleRowsBetween(range.start.row, Math.min(range.end.row, this.rows - 1))) {
+      for (let c = range.start.col; c <= Math.min(range.end.col, this.cols - 1); c++) {
+        const id = cellKey(r, c);
+        const raw = this._internalData.get(id)?.rawValue ?? '';
+        if (raw === '') continue;
+        const items = listItemsOf(raw);
+        if (toList) {
+          if (items || raw.startsWith('=')) continue;
+          const parsed = parseListText(raw);
+          if (parsed.length > 0) updates.push({ id, value: listToFormula(parsed) });
+        } else if (items) {
+          updates.push({ id, value: listToText(items) });
+        }
+      }
+    }
+    const selection = this._snapshotSelection();
+    let batch = this._buildCommandBatch(updates, 'edit', selection, selection);
+    if (batch && source === 'user') batch = this._vetUserBatch(batch);
+    if (!batch) {
+      if (source === 'user') this._modeAnnouncement = toList ? 'No text to turn into lists' : 'No lists to turn into text';
+      return 0;
+    }
+    this._commitBatch(batch, source);
+    const count = batch.deltas.length;
+    if (source === 'user') {
+      this._modeAnnouncement = toList
+        ? `Turned ${count} cell${count === 1 ? '' : 's'} into ${count === 1 ? 'a list' : 'lists'}`
+        : `Turned ${count} list${count === 1 ? '' : 's'} into text`;
+    }
+    this.dispatchEvent(
+      new CustomEvent<ListConversionDetail>('list-change', {
+        detail: { cellIds: batch.deltas.map((d) => d.id), toList, source },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    return count;
+  }
+
+  private _handleArrayButtonPointerDown(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    if (this._endEditElsewhere()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const cellEl = (e.currentTarget as HTMLElement).closest<HTMLElement>('.ls-cell');
+    if (!cellEl) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const key = cellEl.dataset.key!;
+    if (this._arrayCard?.key === key) {
+      this.closeCellValues(true);
+      return;
+    }
+    if (this._isEditing) this._commitEdit();
+    const coord = parseKey(key);
+    this._selection.setSelection(coord, coord, null);
+    this._dispatchSelectionChange();
+    void this.showCellValues(key);
+  }
+
+  private _handleArrayCardKeydown(e: KeyboardEvent): void {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this.closeCellValues(true);
+    } else if (e.key === 'Backspace' && this._arrayCard && this._arrayCard.path.length > 0) {
+      e.preventDefault();
+      this._arrayCardGo(this._arrayCard.path.slice(0, -1));
+    } else if (e.key === 'Tab') {
+      // Modal: keep focus inside
+      const card = e.currentTarget as HTMLElement;
+      const focusables = [...card.querySelectorAll<HTMLElement>('button, [tabindex="0"]')];
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const current = this.shadowRoot?.activeElement;
+      if (e.shiftKey && current === first) {
+        e.preventDefault();
+        last?.focus();
+      } else if (!e.shiftKey && current === last) {
+        e.preventDefault();
+        first?.focus();
+      }
+    }
+  }
+
+  /** Show another level of the values popup (into a nested array, or back out). */
+  private _arrayCardGo(path: number[]): void {
+    if (!this._arrayCard) return;
+    this._arrayCard = { key: this._arrayCard.key, path };
+    this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('.ls-array-card-body')?.focus());
+  }
+
+  private _renderArrayCard(card: { key: string; path: number[] }) {
+    const root = this._internalData.get(card.key)?.array;
+    if (!root) return nothing;
+    let array = root;
+    const trail: string[] = [];
+    for (const index of card.path) {
+      const item = array.values[index];
+      if (item === null || typeof item !== 'object') break;
+      trail.push(`item ${index + 1}`);
+      array = item;
+    }
+    const { row, col } = parseKey(card.key);
+    const ref = coordToRef({ row, col });
+    const title = [ref, ...trail].join(' › ');
+    const isList = array.cols === 1 || array.rows === 1;
+    const maxRows = Y11nSpreadsheet.ARRAY_CARD_MAX_ROWS;
+    const maxCols = Y11nSpreadsheet.ARRAY_CARD_MAX_COLS;
+    const total = array.rows * array.cols;
+    const item = (index: number) => {
+      const value = array.values[index];
+      if (value !== null && typeof value === 'object') {
+        return html`<button
+          type="button"
+          class="ls-array-nested"
+          @click="${() => this._arrayCardGo([...card.path.slice(0, trail.length), index])}"
+        >${describeArray(value)}: ${arrayText(value)}</button>`;
+      }
+      return value === null ? html`<span class="ls-array-blank">(blank)</span>` : arrayItemText(value);
+    };
+
+    let body;
+    let more = 0;
+    if (isList) {
+      const shown = Math.min(total, maxRows);
+      more = total - shown;
+      body = html`<ol class="ls-array-list">
+        ${Array.from({ length: shown }, (_, i) => html`<li>${item(i)}</li>`)}
+      </ol>`;
+    } else {
+      const shownRows = Math.min(array.rows, maxRows);
+      const shownCols = Math.min(array.cols, maxCols);
+      more = total - shownRows * shownCols;
+      body = html`<table class="ls-array-table">
+        <thead>
+          <tr>
+            <td></td>
+            ${Array.from({ length: shownCols }, (_, c) => html`<th scope="col">${c + 1}</th>`)}
+          </tr>
+        </thead>
+        <tbody>
+          ${Array.from(
+            { length: shownRows },
+            (_, r) => html`<tr>
+              <th scope="row">${r + 1}</th>
+              ${Array.from({ length: shownCols }, (_, c) => html`<td>${item(r * array.cols + c)}</td>`)}
+            </tr>`
+          )}
+        </tbody>
+      </table>`;
+    }
+
+    return html`
+      <div
+        class="ls-array-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Values in ${title}"
+        style=${styleMap(this._getFilterMenuStyle(col, row))}
+        @keydown="${this._handleArrayCardKeydown}"
+      >
+        <div class="ls-array-card-head">
+          ${trail.length > 0
+            ? html`<button
+                type="button"
+                class="ls-array-back"
+                @click="${() => this._arrayCardGo(card.path.slice(0, trail.length - 1))}"
+              >Back</button>`
+            : nothing}
+          <span class="ls-array-card-title" id="array-card-title">${title}: ${describeArray(array)}</span>
+          <button type="button" class="ls-array-close" aria-label="Close" @click="${() => this.closeCellValues(true)}">×</button>
+        </div>
+        <div class="ls-array-card-body" tabindex="0" role="group" aria-labelledby="array-card-title">
+          ${body}
+          ${more > 0 ? html`<p class="ls-array-more">and ${more} more</p>` : nothing}
+        </div>
+      </div>
+    `;
   }
 
   /** The menu's values that match its search text (case-insensitive). */
@@ -3385,6 +4953,11 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _handleFilterButtonPointerDown(e: PointerEvent): void {
     if (e.button !== 0) return;
+    if (this._endEditElsewhere()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     // Keep the cell underneath from starting a selection, and the
     // outside-click listener from closing the menu this button toggles
     e.preventDefault();
@@ -3840,6 +5413,11 @@ export class Y11nSpreadsheet extends LitElement {
   /** Pointer drag on a column header's right border: resize with a live preview. */
   private _handleResizerPointerDown(e: PointerEvent): void {
     if (e.button !== 0) return;
+    if (this._endEditElsewhere()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     const handle = e.currentTarget as HTMLElement;
     const col = parseInt(handle.dataset.resizeCol!, 10);
     e.preventDefault();
@@ -3888,6 +5466,7 @@ export class Y11nSpreadsheet extends LitElement {
   private _handleResizerDblClick(e: MouseEvent): void {
     e.preventDefault();
     e.stopPropagation();
+    if (this._endEditElsewhere()) return;
     const col = parseInt((e.currentTarget as HTMLElement).dataset.resizeCol!, 10);
     this._autoFitUserColumns(this._columnsToResize(col));
   }
@@ -3897,6 +5476,8 @@ export class Y11nSpreadsheet extends LitElement {
 
     const batch = this._undoStack.pop();
     if (!batch) return;
+    // A change made on another sheet is undone there, in view
+    if (!this._showSheetOf(batch, 'undo')) return;
 
     // Recorded before reverting, for the same reason as in _commitBatch: a
     // change a listener makes while it reverts clears the redo stack
@@ -3910,6 +5491,7 @@ export class Y11nSpreadsheet extends LitElement {
 
     const batch = this._redoStack.pop();
     if (!batch) return;
+    if (!this._showSheetOf(batch, 'redo')) return;
 
     // Recorded before applying (see _commitBatch)
     this._undoStack.push(batch);
@@ -3962,6 +5544,9 @@ export class Y11nSpreadsheet extends LitElement {
     if (!this.dispatchEvent(event)) return;
 
     this._editingCellKey = key;
+    this._editSheetId = this._activeSheetId;
+    // Editing a list edits its items; typing over it replaces it
+    this._editListMode = initialValue === undefined && listItemsOf(cell?.rawValue ?? '') !== null;
     this._editValue = initialValue ?? this._editTextFor(cell);
     this._validationMessage = '';
     this._isEditing = true;
@@ -3977,9 +5562,10 @@ export class Y11nSpreadsheet extends LitElement {
    */
   private _commitEdit(onInvalid: 'keep' | 'cancel' = 'cancel'): boolean {
     if (!this._isEditing || !this._editingCellKey) return true;
+    this._returnToEditSheet();
 
     const key = this._editingCellKey;
-    const { value: newValue, format } = this._interpretInput(key, this._editValue);
+    const { value: newValue, format } = this._interpretInput(key, this._editValue, this._editListMode);
     if (!this._checkEditValue(key, newValue, onInvalid)) return false;
 
     this._isEditing = false;
@@ -4022,8 +5608,24 @@ export class Y11nSpreadsheet extends LitElement {
    * `13` and `0.13` both store 0.13 (numbers of 1 or more are divided by 100).
    * With `raw-input`, or for anything else, the value is stored as typed and
    * `format` is undefined.
+   *
+   * Text becomes a list (several values in the cell) when `asList` is set
+   * (a list's items were edited, or Ctrl+J), and when comma-separated text is
+   * typed right below a list, as Excel continues a column of lists.
    */
-  private _interpretInput(key: string, value: string): { value: string; format?: CellFormat } {
+  private _interpretInput(key: string, value: string, asList = false): { value: string; format?: CellFormat } {
+    const listText = value.trim();
+    if (listText !== '' && !listText.startsWith('=')) {
+      let list = asList;
+      if (!list && !this.rawInput && looksLikeList(listText)) {
+        const { row, col } = parseKey(key);
+        list = row > 0 && listItemsOf(this._internalData.get(cellKey(row - 1, col))?.rawValue ?? '') !== null;
+      }
+      if (list) {
+        const items = parseListText(listText);
+        if (items.length > 0) return { value: listToFormula(items) };
+      }
+    }
     if (this.rawInput) return { value };
     const existing = this._internalData.get(key)?.format;
     const text = value.trim();
@@ -4044,6 +5646,9 @@ export class Y11nSpreadsheet extends LitElement {
    */
   private _editTextFor(cell: CellData | undefined): string {
     const raw = cell?.rawValue ?? '';
+    // A list is edited as its items: Ann, Bob
+    const items = listItemsOf(raw);
+    if (items) return listToText(items);
     const type = cell?.format?.numberFormat?.type;
     if (this.rawInput || cell?.type !== 'number' || raw.startsWith('=') || (type !== 'percent' && type !== 'date')) {
       return raw;
@@ -4053,6 +5658,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _cancelEdit(announcement = 'Edit cancelled'): void {
+    this._returnToEditSheet();
     this._isEditing = false;
     this._editingCellKey = null;
     this._validationMessage = '';
@@ -4074,7 +5680,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (before === '=') return true;
 
     const lastChar = before[before.length - 1];
-    return ['+', '-', '*', '/', '&', '(', ',', ':', '<', '>', '='].includes(lastChar);
+    return ['+', '-', '*', '/', '^', '&', '(', ',', ':', ';', '{', '<', '>', '=', '@'].includes(lastChar);
   }
 
   /**
@@ -4096,7 +5702,7 @@ export class Y11nSpreadsheet extends LitElement {
 
       const cursorPos = this._editor?.selectionStart ?? this._editValue.length;
       this._refInsertStart = cursorPos;
-      const ref = coordToRef({ row: this._refCursorRow, col: this._refCursorCol });
+      const ref = this._refText({ row: this._refCursorRow, col: this._refCursorCol });
       this._editValue =
         this._editValue.substring(0, cursorPos) +
         ref +
@@ -4111,7 +5717,7 @@ export class Y11nSpreadsheet extends LitElement {
       this._refCursorRow = moved.row;
       this._refCursorCol = moved.col;
 
-      const ref = coordToRef({ row: this._refCursorRow, col: this._refCursorCol });
+      const ref = this._refText({ row: this._refCursorRow, col: this._refCursorCol });
       this._modeAnnouncement = `Selecting ${ref}`;
       this._editValue =
         this._editValue.substring(0, this._refInsertStart) +
@@ -4121,6 +5727,99 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     this._ensureCellVisible(this._refCursorRow, this._refCursorCol);
+  }
+
+  /** Whether the cell being edited is on another sheet than the one shown (a reference is being picked there). */
+  private get _editingElsewhere(): boolean {
+    return this._isEditing && this._editSheetId !== this._activeSheetId;
+  }
+
+  /** Show the sheet of the cell being edited again, before the edit ends. */
+  private _returnToEditSheet(): void {
+    if (!this._editingElsewhere) return;
+    const state = this._sheets.find((s) => s.id === this._editSheetId);
+    if (state) this._switchSheetView(state, 'user');
+  }
+
+  /**
+   * The text of a reference picked while editing a formula: `B2`, `B2:C4`,
+   * and with the sheet's name when it is picked on another sheet.
+   */
+  private _refText(a: CellCoord, b: CellCoord = a): string {
+    const start = { row: Math.min(a.row, b.row), col: Math.min(a.col, b.col) };
+    const end = { row: Math.max(a.row, b.row), col: Math.max(a.col, b.col) };
+    const cells =
+      start.row === end.row && start.col === end.col ? coordToRef(start) : `${coordToRef(start)}:${coordToRef(end)}`;
+    return (this._editingElsewhere ? sheetPrefix(this._activeState.name) : '') + cells;
+  }
+
+  /** Put a picked reference into the formula at the caret, replacing the one being picked. */
+  private _insertReference(ref: string): void {
+    if (!this._refMode) {
+      // Selected text is replaced, as typing would replace it
+      const cursorPos = this._editor?.selectionStart ?? this._editValue.length;
+      this._refInsertStart = cursorPos;
+      this._refInsertEnd = Math.max(cursorPos, this._editor?.selectionEnd ?? cursorPos);
+      this._refMode = true;
+    }
+    this._editValue =
+      this._editValue.substring(0, this._refInsertStart) + ref + this._editValue.substring(this._refInsertEnd);
+    this._refInsertEnd = this._refInsertStart + ref.length;
+  }
+
+  /**
+   * A click (or drag) on cells while a formula is being typed where a
+   * reference fits: the cell or range goes into the formula.
+   */
+  private _pickReferenceWithPointer(row: number, col: number, e: PointerEvent): void {
+    e.preventDefault();
+    this._refPickPointer = true;
+    const anchor = { row, col };
+    const pick = (head: CellCoord) => {
+      this._refCursorRow = head.row;
+      this._refCursorCol = head.col;
+      const ref = this._refText(anchor, head);
+      this._insertReference(ref);
+      this._modeAnnouncement = `Selecting ${ref}`;
+    };
+    pick(anchor);
+
+    const controller = new AbortController();
+    const { signal } = controller;
+    const onPointerMove = (ev: PointerEvent) => {
+      const el = this.shadowRoot?.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+      const nearest = el?.closest?.('[data-row]') as HTMLElement | null;
+      if (!nearest) return;
+      const head = { row: parseInt(nearest.dataset.row!, 10), col: parseInt(nearest.dataset.col!, 10) };
+      if (head.row !== this._refCursorRow || head.col !== this._refCursorCol) pick(head);
+    };
+    const onPointerUp = () => {
+      controller.abort();
+      this._refPickPointer = false;
+      // Typing goes on after the reference
+      this.updateComplete.then(() => {
+        if (!this._isEditing) return;
+        this._editor?.focus();
+        this._editor?.setSelectionRange(this._refInsertEnd, this._refInsertEnd);
+      });
+    };
+    document.addEventListener('pointermove', onPointerMove, { signal });
+    document.addEventListener('pointerup', onPointerUp, { signal });
+    document.addEventListener('pointercancel', onPointerUp, { signal });
+    window.addEventListener('blur', onPointerUp, { signal });
+  }
+
+  /**
+   * For grid controls other than cells (headers, resize handles, filter
+   * buttons): with a formula open whose cell is on another sheet, the click
+   * ends the edit, which shows that sheet again, and does nothing else. What
+   * was clicked belonged to the sheet that is no longer shown.
+   */
+  private _endEditElsewhere(): boolean {
+    if (!this._editingElsewhere) return false;
+    this._exitRefMode();
+    this._commitEdit();
+    return true;
   }
 
   private _exitRefMode(): void {
@@ -4175,6 +5874,10 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     this._editValue = text.substring(0, start) + newRef + text.substring(start + full.length);
+    // A reference that is being picked stays the one the next pick replaces
+    if (this._refMode && start >= this._refInsertStart && start + full.length <= this._refInsertEnd) {
+      this._refInsertEnd += newRef.length - full.length;
+    }
 
     // Adjust cursor position to stay at the end of the reference
     const newCursorPos = start + newRef.length;
@@ -4257,13 +5960,38 @@ export class Y11nSpreadsheet extends LitElement {
       return;
     }
 
-    // Alt+Down on a filter header cell: open its filter menu
+    // Ctrl+PageDown / Ctrl+PageUp (or with Alt, where the browser keeps
+    // Ctrl+Page keys for its own tabs): show the next / previous sheet
+    if ((ctrl || e.altKey) && !shift && (e.key === 'PageDown' || e.key === 'PageUp') && this._sheets.length > 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      this._stepSheet(e.key === 'PageDown' ? 1 : -1);
+      return;
+    }
+
+    // Ctrl+J: turn the selected cells into lists (several values in one
+    // cell), or lists back into text. Matched by e.code (Option changes e.key on macOS).
+    if (ctrl && !e.altKey && !shift && e.code === 'KeyJ') {
+      e.preventDefault();
+      e.stopPropagation();
+      this._toggleListsInSelection();
+      return;
+    }
+
+    // Alt+Down on a filter header cell: open its filter menu. On a cell that
+    // holds several values: show them.
     if (e.altKey && !shift && !ctrl && e.key === 'ArrowDown') {
       const { row, col } = this._selection.activeCell;
       if (this._isFilterHeader(row, col)) {
         e.preventDefault();
         e.stopPropagation();
         void this.openFilterMenu(col);
+        return;
+      }
+      if (this._getCell(row, col)?.array) {
+        e.preventDefault();
+        e.stopPropagation();
+        void this.showCellValues();
         return;
       }
     }
@@ -4571,6 +6299,21 @@ export class Y11nSpreadsheet extends LitElement {
       void this.openConditionalFormatManager();
       return true;
     }
+    // Alt+Shift+V: the values of a cell that holds several (also where Alt+Down opens a filter menu)
+    if (alt && shift && !ctrl && e.code === 'KeyV') {
+      void this.showCellValues();
+      return true;
+    }
+    // Ctrl+F3: the name manager
+    if (ctrl && !alt && !shift && e.key === 'F3') {
+      void this.openNameManager();
+      return true;
+    }
+    // Ctrl+G: go to a cell, range or name through the Name Box
+    if (ctrl && !alt && !shift && e.code === 'KeyG') {
+      this.focusNameBox();
+      return true;
+    }
     if (!ctrl || alt) return false;
     if (e.code === 'Semicolon') {
       if (!this.readOnly) this._startEditing(shift ? currentTimeText() : todayText());
@@ -4715,7 +6458,7 @@ export class Y11nSpreadsheet extends LitElement {
     let format: NumberFormatOptions | undefined;
     let firstNumberKey: string | null = null;
     const visit = (key: string, cell: CellData) => {
-      if (cell.rawValue === '') return;
+      if (!hasContent(cell)) return;
       count++;
       if (cell.type !== 'number') return;
       const n = this._sortNumber(key, cell);
@@ -4794,6 +6537,27 @@ export class Y11nSpreadsheet extends LitElement {
       } else {
         this._editValue += text;
       }
+      return;
+    }
+
+    // Ctrl+PageDown / PageUp (or with Alt) in a formula: show another sheet to pick a reference there
+    if (
+      (e.ctrlKey || e.metaKey || e.altKey) &&
+      !e.shiftKey &&
+      (e.key === 'PageDown' || e.key === 'PageUp') &&
+      this._sheets.length > 1
+    ) {
+      e.preventDefault();
+      if (this._editValue.startsWith('=')) this._stepSheet(e.key === 'PageDown' ? 1 : -1);
+      return;
+    }
+
+    // Ctrl+J: commit what was typed as a list (Ann, Bob, Cy → three values in the cell)
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'KeyJ') {
+      e.preventDefault();
+      this._exitRefMode();
+      this._editListMode = true;
+      this._commitEdit('keep');
       return;
     }
 
@@ -4903,7 +6667,7 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _isCellFilled(row: number, col: number): boolean {
     const cell = this._internalData.get(cellKey(row, col));
-    return cell !== undefined && cell.rawValue !== '';
+    return hasContent(cell);
   }
 
   /**
@@ -4935,6 +6699,11 @@ export class Y11nSpreadsheet extends LitElement {
    */
   private _handleHeaderPointerDown(e: PointerEvent): void {
     if (e.button !== 0) return;
+    if (this._endEditElsewhere()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     const headerEl = (e.target as HTMLElement).closest(
       '[data-header-col], [data-header-row]'
     ) as HTMLElement | null;
@@ -4990,6 +6759,7 @@ export class Y11nSpreadsheet extends LitElement {
   // ─── Select All (Corner Header) ─────────────────────
 
   private _handleSelectAll(): void {
+    if (this._endEditElsewhere()) return;
     this._selection.selectAll();
     this._dispatchSelectionChange();
     this.updateComplete.then(() => this._focusActiveCell());
@@ -5014,9 +6784,17 @@ export class Y11nSpreadsheet extends LitElement {
     const row = parseInt(cellEl.dataset.row!, 10);
     const col = parseInt(cellEl.dataset.col!, 10);
 
-    // Commit any in-progress edit
     if (this._isEditing) {
+      // In a formula, where a reference fits, the click picks the cell
+      if (e.button === 0 && this._editValue.startsWith('=') && (this._refMode || this._isRefPositionInFormula())) {
+        this._pickReferenceWithPointer(row, col, e);
+        return;
+      }
+      // Otherwise it commits the edit
+      const shown = this._activeSheetId;
       this._commitEdit();
+      // The edit was on another sheet, which is shown again: the click was not for it
+      if (this._activeSheetId !== shown) return;
     }
 
     this._selection.startSelection(row, col, e.shiftKey);
@@ -5110,9 +6888,26 @@ export class Y11nSpreadsheet extends LitElement {
     }
   }
 
+  /**
+   * The cell a fill copies from. A value spilled into it by a formula is
+   * filled as a plain value, unless the formula is part of what is filled
+   * from: then the copy of the formula spills it again, and the cell is empty.
+   */
+  private _fillSource(key: string, inSource: (row: number, col: number) => boolean): CellData | undefined {
+    const cell = this._internalData.get(key);
+    if (!cell || cell.spilledFrom === undefined || cell.rawValue !== '') return cell;
+    const { spilledFrom, array: _array, ...rest } = cell;
+    const anchor = parseKey(spilledFrom);
+    // As a copy would write it: text that reads like a number stays text, several values stay several
+    return {
+      ...rest,
+      rawValue: inSource(anchor.row, anchor.col) ? '' : computedLiteral(key, cell, this._computedValue),
+    };
+  }
+
   /** A formula cell's unformatted result, which a values-only paste writes. */
   private _computedValue = (key: string, cell: CellData): string =>
-    this._formulaEngine.resultFor(key, cell.rawValue).displayValue;
+    cell.array ? arrayToFormula(cell.array) : this._formulaEngine.resultFor(key, cell.rawValue).displayValue;
 
   private async _handlePaste(options: Required<PasteSpecialOptions> = { mode: 'all', transpose: false }): Promise<void> {
     if (this.readOnly || this._pasteInProgress) return;
@@ -5376,7 +7171,9 @@ export class Y11nSpreadsheet extends LitElement {
       for (const cross of down ? cols : rows) {
         const srcKey = down ? cellKey(source, cross) : cellKey(cross, source);
         const dstKey = down ? cellKey(target, cross) : cellKey(cross, target);
-        const src = this._internalData.get(srcKey);
+        const src = this._fillSource(srcKey, (r, c) =>
+          down ? r === source && cols.includes(c) : c === source && rows.includes(r)
+        );
         const offset = target - source;
         updates.push({
           id: dstKey,
@@ -5572,7 +7369,18 @@ export class Y11nSpreadsheet extends LitElement {
     const updates: CellUpdate[] = [];
     for (const x of lineLength > 0 ? positions(cross, source.start[cross], source.end[cross]) : []) {
       const keyAt = (p: number) => (vertical ? cellKey(p, x) : cellKey(x, p));
-      const line = linePositions.map((p) => this._internalData.get(keyAt(p)));
+      const line = linePositions.map((p) =>
+        this._fillSource(
+          keyAt(p),
+          // A formula on a row the filter hides is not part of what is filled from
+          (r, c) =>
+            r >= source.start.row &&
+            r <= source.end.row &&
+            c >= source.start.col &&
+            c <= source.end.col &&
+            !this._isRowHidden(r)
+        )
+      );
       const series = seriesFor(
         line.map((cell) => ({
           raw: cell?.rawValue ?? '',
@@ -5635,6 +7443,7 @@ export class Y11nSpreadsheet extends LitElement {
    */
   private _commitEditToSelection(): void {
     if (!this._isEditing || !this._editingCellKey) return;
+    this._returnToEditSheet();
     const origin = parseKey(this._editingCellKey);
     const typed = this._editValue;
     const { start, end } = this._selection.range;
@@ -5643,7 +7452,8 @@ export class Y11nSpreadsheet extends LitElement {
       this._commitEdit('keep');
       return;
     }
-    const value = this._interpretInput(this._editingCellKey, typed).value;
+    const asList = this._editListMode;
+    const value = this._interpretInput(this._editingCellKey, typed, asList).value;
     // Validate the edited cell's value up front so the editor can stay open;
     // the other cells are validated individually when the batch is vetted.
     if (!this._checkEditValue(this._editingCellKey, value, 'keep')) return;
@@ -5657,7 +7467,7 @@ export class Y11nSpreadsheet extends LitElement {
       for (let c = start.col; c <= end.col; c++) {
         const id = cellKey(r, c);
         // Each cell reads the typed text itself: a percent cell turns 13 into 13%
-        const own = this._interpretInput(id, typed);
+        const own = this._interpretInput(id, typed, asList);
         const update: CellUpdate = {
           id,
           value: typed.startsWith('=') ? this._shiftFormula(value, r - origin.row, c - origin.col) : own.value,
@@ -5759,10 +7569,14 @@ export class Y11nSpreadsheet extends LitElement {
     this._exitRefMode();
   }
 
-  private _handleEditorBlur(): void {
-    if (this._isEditing) {
-      this._commitEdit();
+  private _handleEditorBlur(e: FocusEvent): void {
+    if (!this._isEditing || this._refPickPointer) return;
+    // With a formula open, going to the sheet tabs is how a reference on another sheet is picked
+    const next = e.relatedTarget as Node | null;
+    if (next && this._editValue.startsWith('=') && this.renderRoot.querySelector('y11n-sheet-tabs')?.contains(next)) {
+      return;
     }
+    this._commitEdit();
   }
 
   private _handleFormulaBarModeChange(
@@ -5786,6 +7600,7 @@ export class Y11nSpreadsheet extends LitElement {
     // rather than the current active cell, which may have changed due to clicking.
     let targetKey: string;
     if (this._editingCellKey) {
+      if (this._isEditing) this._returnToEditSheet();
       targetKey = this._editingCellKey;
     } else {
       const coord = refToCoord(detail.cellRef);
@@ -5796,8 +7611,9 @@ export class Y11nSpreadsheet extends LitElement {
       this._modeAnnouncement = `${coordToRef(parseKey(targetKey))} is read-only`;
       return false;
     }
-    const { value, format } = this._interpretInput(targetKey, detail.value);
     const oldValue = this._internalData.get(targetKey)?.rawValue ?? '';
+    // The formula bar shows a list as its items, so what comes back is a list too
+    const { value, format } = this._interpretInput(targetKey, detail.value, listItemsOf(oldValue) !== null);
     const message = value === oldValue ? null : this._validate(targetKey, value);
     if (message) {
       this._dispatchValidationError({ errors: [{ cellId: targetKey, value, message }], operation: 'edit' });
@@ -5822,6 +7638,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   private _dispatchSelectionChange(): void {
+    if (this._arrayCard && this._arrayCard.key !== this._getActiveCellKey()) this.closeCellValues(false);
     const detail: SelectionChangeDetail = { range: this._selection.range };
     this.dispatchEvent(
       new CustomEvent('selection-change', { detail, bubbles: true, composed: true })
@@ -6004,6 +7821,18 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _getEditorStyle(): Record<string, string> {
     if (!this._isEditing) return { display: 'none' };
+    if (this._editingElsewhere) {
+      // The edited cell is on another sheet: keep the formula in view at the bottom of this one
+      return {
+        display: 'block',
+        position: 'absolute',
+        left: `${Y11nSpreadsheet.ROW_HEADER_WIDTH + 4}px`,
+        bottom: '4px',
+        width: 'min(420px, calc(100% - 70px))',
+        height: `${this._cellSize.height}px`,
+        'z-index': '10',
+      };
+    }
 
     const { row, col } = this._selection.activeCell;
     const cellHeight = this._cellSize.height;
@@ -6272,6 +8101,128 @@ export class Y11nSpreadsheet extends LitElement {
      */
     .ls-cell.has-fill[aria-selected='true'] {
       box-shadow: inset 0 0 0 100vmax var(--_selection-bg);
+    }
+
+    /* The range a formula's result spills over, outlined while the active cell is in it */
+    .ls-cell.in-spill::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      border: 0 solid var(--ls-spill-border, #1a73e8);
+    }
+    .ls-cell.spill-top::after { border-top-width: 1px; }
+    .ls-cell.spill-bottom::after { border-bottom-width: 1px; }
+    .ls-cell.spill-left::after { border-left-width: 1px; }
+    .ls-cell.spill-right::after { border-right-width: 1px; }
+
+    /* A cell that holds several values: an icon that opens them */
+    .ls-array-button {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      margin-right: 4px;
+      border-radius: 3px;
+      color: var(--ls-array-icon-color, #5f6368);
+      cursor: pointer;
+    }
+    .ls-array-button:hover {
+      background: var(--ls-array-icon-hover-bg, rgba(0, 0, 0, 0.08));
+    }
+
+    .ls-array-card {
+      position: absolute;
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      background: var(--ls-filter-menu-bg, #fff);
+      border: 1px solid var(--_border-color);
+      border-radius: 4px;
+      box-shadow: var(--_editor-shadow);
+      font-size: 13px;
+      overflow: hidden;
+    }
+    .ls-array-card-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--_border-color);
+    }
+    .ls-array-card-title {
+      flex: 1;
+      min-width: 0;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ls-array-back,
+    .ls-array-close,
+    .ls-array-nested {
+      font: inherit;
+      color: inherit;
+      background: none;
+      border: 1px solid var(--_border-color);
+      border-radius: 3px;
+      padding: 1px 6px;
+      cursor: pointer;
+    }
+    .ls-array-close {
+      border-color: transparent;
+      font-size: 16px;
+      line-height: 1;
+    }
+    .ls-array-nested {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: left;
+    }
+    .ls-array-back:focus-visible,
+    .ls-array-close:focus-visible,
+    .ls-array-nested:focus-visible,
+    .ls-array-card-body:focus-visible {
+      outline: var(--_focus-ring);
+      outline-offset: -2px;
+    }
+    .ls-array-card-body {
+      overflow: auto;
+      padding: 6px 8px;
+      min-height: 0;
+    }
+    .ls-array-list {
+      margin: 0;
+      padding-left: 2.2em;
+    }
+    .ls-array-list li {
+      padding: 1px 0;
+    }
+    .ls-array-table {
+      border-collapse: collapse;
+    }
+    .ls-array-table th,
+    .ls-array-table td {
+      border: 1px solid var(--_border-color);
+      padding: 2px 6px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .ls-array-table th {
+      background: var(--_header-bg);
+      font-weight: 600;
+    }
+    .ls-array-blank,
+    .ls-array-more {
+      color: var(--ls-array-icon-color, #5f6368);
+      font-style: italic;
+    }
+    .ls-array-more {
+      margin: 6px 0 0;
     }
 
     .ls-cell.active-cell {
@@ -6683,6 +8634,9 @@ export class Y11nSpreadsheet extends LitElement {
     // Percent and date cells show as typed (15%, 2026-01-05), like the inline editor
     const activeRawValue = this._editTextFor(this._getCell(activeCell.row, activeCell.col));
     const activeDisplayValue = this._getCellDisplay(activeCell.row, activeCell.col);
+    this._activeSpill = this._spillRangeAt(activeCell.row, activeCell.col);
+    // A spilled value shows the formula it comes from, greyed out, as in Excel
+    const spilledFrom = this._formulaBarMode === 'raw' ? this._getCell(activeCell.row, activeCell.col)?.spilledFrom : undefined;
 
     return html`
       <div class="ls-wrapper">
@@ -6690,6 +8644,11 @@ export class Y11nSpreadsheet extends LitElement {
           cell-ref="${this._getActiveCellRef()}"
           raw-value="${activeRawValue}"
           display-value="${activeDisplayValue}"
+          placeholder="${spilledFrom !== undefined ? this._internalData.get(spilledFrom)?.rawValue ?? '' : ''}"
+          selection-label="${this._selectionName()}"
+          .names="${this._nameList()}"
+          @name-box-commit="${this._handleNameBoxCommit}"
+          @name-box-cancel="${() => this._focusActiveCell()}"
           .mode="${this._formulaBarMode}"
           .readOnly="${this.readOnly || this._isCellLocked(this._getActiveCellKey())}"
           @formula-bar-mode-change="${this._handleFormulaBarModeChange}"
@@ -6721,6 +8680,21 @@ export class Y11nSpreadsheet extends LitElement {
           ${this._findOpen ? this._renderFindBar() : nothing}
           ${this._filterMenu && this._filter ? this._renderFilterMenu(this._filterMenu, this._filter) : nothing}
           ${this._pasteSpecial ? this._renderPasteSpecial(this._pasteSpecial) : nothing}
+          ${this._arrayCard ? this._renderArrayCard(this._arrayCard) : nothing}
+          ${this._nameManagerOpen
+            ? html`<y11n-name-manager
+                .names=${this.getNames()}
+                .sheets=${this.sheets}
+                active-sheet="${this._activeState.name}"
+                selection-ref="${this._selectionReference()}"
+                .readOnly=${this.readOnly}
+                .status=${this._nameManagerStatus}
+                @name-save="${this._handleNameSave}"
+                @name-remove="${this._handleNameRemove}"
+                @name-go="${this._handleNameGo}"
+                @name-close="${() => this.closeNameManager(true)}"
+              ></y11n-name-manager>`
+            : nothing}
           ${this._cfManagerOpen
             ? html`<y11n-conditional-format-dialog
                 .rules=${this._cfRules}
@@ -6754,6 +8728,18 @@ export class Y11nSpreadsheet extends LitElement {
           </div>
         </div>
 
+        ${this.sheetTabs || this._sheets.length > 1
+          ? html`<y11n-sheet-tabs
+              .sheets=${this._sheets.map((sheet) => ({ id: sheet.id, name: sheet.name }))}
+              .activeId=${this._activeSheetId}
+              .readOnly=${this.readOnly}
+              @sheet-select="${this._handleSheetSelect}"
+              @sheet-add="${this._handleSheetAdd}"
+              @sheet-rename="${this._handleSheetRename}"
+              @sheet-remove="${this._handleSheetRemove}"
+              @sheet-move="${this._handleSheetMove}"
+            ></y11n-sheet-tabs>`
+          : nothing}
         ${this.hideStatusBar ? nothing : this._renderStatusBar()}
 
         <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
@@ -7028,17 +9014,20 @@ export class Y11nSpreadsheet extends LitElement {
     if (c < this._frozenColCount) cellStyles.left = this._stickyLeft(c);
     const filterHeader = this._isFilterHeader(row, c);
     const filtered = filterHeader && this._filter!.criteria.has(c);
+    const array = this._internalData.get(key)?.array;
+    const hasPopup = filterHeader || !!array;
+    const expanded = filterHeader ? this._filterMenu?.col === c : this._arrayCard?.key === key;
 
     return html`
       <div
-        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''} ${filterHeader ? 'filter-header' : ''} ${cf ? this._cfClasses(cf) : ''} ${cellStyles['background-color'] ? 'has-fill' : ''} ${this._frozenClasses(row, c)}"
+        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''} ${filterHeader ? 'filter-header' : ''} ${cf ? this._cfClasses(cf) : ''} ${cellStyles['background-color'] ? 'has-fill' : ''} ${array ? 'array-cell' : ''} ${this._spillClasses(row, c)} ${this._frozenClasses(row, c)}"
         role="gridcell"
         aria-colindex="${c + 2}"
         aria-selected="${isSelected}"
         aria-readonly="${this.readOnly || locked}"
         aria-current="${isActive ? 'true' : nothing}"
-        aria-haspopup="${filterHeader ? 'dialog' : nothing}"
-        aria-expanded="${filterHeader ? String(this._filterMenu?.col === c) : nothing}"
+        aria-haspopup="${hasPopup ? 'dialog' : nothing}"
+        aria-expanded="${hasPopup ? String(expanded) : nothing}"
         data-row="${row}"
         data-col="${c}"
         data-key="${key}"
@@ -7048,7 +9037,17 @@ export class Y11nSpreadsheet extends LitElement {
         @dblclick="${this._handleCellDblClick}"
       >
         ${cf ? this._renderCfGraphics(cf) : nothing}
+        ${array
+          ? html`<span
+              class="ls-array-button"
+              aria-hidden="true"
+              title="Show values (Alt+Down)"
+              @pointerdown="${this._handleArrayButtonPointerDown}"
+              @dblclick="${(e: Event) => e.stopPropagation()}"
+            >${array.cols === 1 || array.rows === 1 ? LIST_ICON : ARRAY_ICON}</span>`
+          : nothing}
         <span class="cell-text ${cf && this._cfHidesValue(cf) ? 'sr-only' : ''}">${display}</span>
+        ${array ? html`<span class="sr-only ls-array-label">, ${describeArray(array)}</span>` : nothing}
         ${cf && cf.labels.length > 0 ? html`<span class="sr-only ls-cf-label">, ${cf.labels.join(', ')}</span>` : nothing}
         ${filterHeader
           ? html`<span
@@ -7111,6 +9110,26 @@ export class Y11nSpreadsheet extends LitElement {
     const ref = `${colToLetter(activeCell.col)}${activeCell.row + 1}`;
     const display = this._getCellDisplay(activeCell.row, activeCell.col);
     let base = display ? `${ref}: ${display}` : ref;
+    const cell = this._getCell(activeCell.row, activeCell.col);
+    if (cell?.array) {
+      // On a filter header, Alt+Down belongs to the filter menu
+      const keys = this._isFilterHeader(activeCell.row, activeCell.col) ? 'Alt+Shift+V' : 'Alt+Down';
+      base += `, ${describeArray(cell.array)}. ${keys} to show the values`;
+    }
+    if (cell?.spilledFrom !== undefined) {
+      base += `, spilled from ${coordToRef(parseKey(cell.spilledFrom))}`;
+    } else if (cell?.spill) {
+      const end = { row: activeCell.row + cell.spill.rows - 1, col: activeCell.col + cell.spill.cols - 1 };
+      base += `, spills to ${coordToRef(end)}`;
+    } else if (cell?.displayValue === '#SPILL!' && cell.rawValue.startsWith('=')) {
+      const needs = this._formulaEngine.blockedSpill(cellKey(activeCell.row, activeCell.col));
+      if (needs) {
+        base +=
+          activeCell.row + needs.rows > this.rows || activeCell.col + needs.cols > this.cols
+            ? ', the result does not fit on the sheet'
+            : ', the cells the result would fill are not empty';
+      }
+    }
     const cf = this._cf.resultFor(activeCell.row, activeCell.col);
     if (cf && cf.labels.length > 0) base += `, ${cf.labels.join(', ')}`;
     if (this._isFilterHeader(activeCell.row, activeCell.col)) {

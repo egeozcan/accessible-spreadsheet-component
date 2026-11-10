@@ -32,8 +32,11 @@ export interface ConditionalFormatSource {
   valueAt(row: number, col: number): SortValue;
   /** Call `visit` for every non-empty cell of a range, in any order */
   forEachValue(range: SelectionRange, visit: (value: SortValue) => void): void;
-  /** Evaluate formula text (starting with `=`) on its own */
-  evaluate(formula: string): SortValue;
+  /**
+   * Evaluate formula text (starting with `=`) on its own. `at` is the cell
+   * the rule is being tested for, which `ROW()` and `COLUMN()` report.
+   */
+  evaluate(formula: string, at?: { row: number; col: number }): SortValue;
   /** Today's date as a date serial number */
   today(): number;
 }
@@ -464,12 +467,14 @@ function inRange(range: SelectionRange, row: number, col: number): boolean {
  * The rules after rows or columns are inserted or deleted. A rule's range
  * moves with its cells like a range reference and grows when rows/columns are
  * inserted inside it; a rule whose cells are all deleted is dropped. Formulas
- * (formula rules and `=` operands) are rewritten like cell formulas. Returns
+ * (formula rules and `=` operands) are rewritten like cell formulas; pass the
+ * name of the sheet the rules are on so sheet-qualified references to it move too. Returns
  * the same array when nothing changes.
  */
 export function adjustRulesForStructureChange(
   rules: readonly ConditionalFormatRule[],
-  change: StructureChange
+  change: StructureChange,
+  sheet?: string
 ): readonly ConditionalFormatRule[] {
   const { axis, kind, index, count } = change;
   let changed = false;
@@ -500,7 +505,8 @@ export function adjustRulesForStructureChange(
       const offset = first - start;
       const anchored =
         offset === 0 ? formula : shiftFormulaReferences(formula, axis === 'row' ? offset : 0, axis === 'col' ? offset : 0);
-      return adjustFormulaForStructureChange(anchored, change);
+      // With the sheet's name, references that spell it out (Sheet1!A1) move too
+      return adjustFormulaForStructureChange(anchored, change, sheet === undefined ? {} : { formulaSheet: sheet });
     };
     let condition = rule.condition;
     if (condition.type === 'formula') {
@@ -853,7 +859,8 @@ export class ConditionalFormatEvaluator {
   private _operand(rule: ConditionalFormatRule, operand: ConditionalOperand, row: number, col: number): SortValue {
     if (typeof operand === 'string' && operand.startsWith('=')) {
       return this._source.evaluate(
-        shiftFormulaReferences(operand, row - rule.range.start.row, col - rule.range.start.col)
+        shiftFormulaReferences(operand, row - rule.range.start.row, col - rule.range.start.col),
+        { row, col }
       );
     }
     return literalOperand(operand);
@@ -954,7 +961,8 @@ export class ConditionalFormatEvaluator {
       }
       case 'formula': {
         const result = this._source.evaluate(
-          shiftFormulaReferences(c.formula, row - rule.range.start.row, col - rule.range.start.col)
+          shiftFormulaReferences(c.formula, row - rule.range.start.row, col - rule.range.start.col),
+          { row, col }
         );
         return result.kind === 'boolean' ? result.value : result.kind === 'number' && result.value !== 0;
       }

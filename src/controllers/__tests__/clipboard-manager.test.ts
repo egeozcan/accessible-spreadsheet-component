@@ -430,3 +430,38 @@ describe('ClipboardManager', () => {
     });
   });
 });
+
+describe('copying a spill range', () => {
+  it('pastes the formula alone, and every value for a values-only paste', async () => {
+    const manager = new ClipboardManager();
+    const data: GridData = new Map([
+      ['0:0', { rawValue: '=SEQUENCE(3)', displayValue: '1', type: 'number', spill: { rows: 3, cols: 1 } }],
+      ['1:0', { rawValue: '', displayValue: '2', type: 'number', spilledFrom: '0:0' }],
+      ['2:0', { rawValue: '', displayValue: '3', type: 'number', spilledFrom: '0:0' }],
+    ]);
+    const range = { start: { row: 0, col: 0 }, end: { row: 2, col: 0 } };
+    const original = globalThis.navigator;
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        clipboard: {
+          write: async () => {},
+          writeText: async () => {},
+          // Denied: the manager then trusts what it copied itself
+          readText: async () => {
+            throw new Error('denied');
+          },
+        },
+      },
+      configurable: true,
+    });
+    try {
+      await manager.copy(data, range);
+      const all = await manager.paste(0, 2, 20, 20);
+      expect(all!.map((u) => u.value)).toEqual(['=SEQUENCE(3)', '', '']);
+      const values = await manager.paste(0, 2, 20, 20, undefined, { values: true });
+      expect(values!.map((u) => u.value)).toEqual(['1', '2', '3']);
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', { value: original, configurable: true });
+    }
+  });
+});

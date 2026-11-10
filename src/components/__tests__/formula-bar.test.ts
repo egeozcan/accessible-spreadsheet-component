@@ -29,10 +29,10 @@ async function createFormulaBar(
 }
 
 function getInput(el: Y11nFormulaBar): HTMLInputElement {
-  return el.shadowRoot!.querySelector('input')!;
+  return el.shadowRoot!.querySelector('input.formula-input')!;
 }
 
-function getCellRef(el: Y11nFormulaBar): HTMLElement {
+function getCellRef(el: Y11nFormulaBar): HTMLInputElement {
   return el.shadowRoot!.querySelector('.cell-ref')!;
 }
 
@@ -60,7 +60,7 @@ describe('Y11nFormulaBar', () => {
     it('displays the cell reference', async () => {
       const el = await createFormulaBar({ cellRef: 'B5' });
       const ref = getCellRef(el);
-      expect(ref.textContent).toBe('B5');
+      expect(ref.value).toBe('B5');
     });
 
     it('updates when cellRef changes', async () => {
@@ -68,7 +68,7 @@ describe('Y11nFormulaBar', () => {
       el.cellRef = 'C3';
       await el.updateComplete;
       const ref = getCellRef(el);
-      expect(ref.textContent).toBe('C3');
+      expect(ref.value).toBe('C3');
     });
   });
 

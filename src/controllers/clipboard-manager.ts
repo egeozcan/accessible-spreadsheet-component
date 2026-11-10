@@ -8,6 +8,8 @@ import {
 } from '../types.js';
 import { parseDelimited, quoteDelimitedField } from '../utils/delimited.js';
 import { shiftFormulaReferences } from '../utils/references.js';
+import { arrayToFormula } from '../utils/list.js';
+import { ERROR_CODE_LIST } from '../engine/parser.js';
 
 /** Maps the index of a pasted row to the grid row it goes to (-1 drops it). */
 export type RowMapper = (index: number) => number;
@@ -51,6 +53,34 @@ function transposeRows<T>(rows: T[][], empty: () => T): T[][] {
  * ClipboardManager - Handles copy, cut, and paste operations
  * using the system clipboard API with TSV and HTML table formats.
  */
+/**
+ * What to write into a cell so it holds a computed value as a value. Text
+ * that would be read back as something else (`00456` as a number, `TRUE`,
+ * `#N/A`, `=A1`) is written as a text formula, `="00456"`, so it stays text.
+ */
+function literalFor(value: string, type: CellData['type']): string {
+  if (type !== 'text' || value === '') return value;
+  const readsAsOther =
+    value.startsWith('=') ||
+    (value.trim() !== '' && !isNaN(Number(value))) ||
+    /^(true|false)$/i.test(value) ||
+    ERROR_CODE_LIST.includes(value);
+  return readsAsOther ? `="${value.replace(/"/g, '""')}"` : value;
+}
+
+/**
+ * What to write into a cell so it holds what `cell` computed (or what was
+ * spilled into it): several values as an array constant, anything else as a literal.
+ */
+export function computedLiteral(
+  key: string,
+  cell: CellData,
+  valueOf?: (key: string, cell: CellData) => string
+): string {
+  if (cell.array) return arrayToFormula(cell.array);
+  return literalFor(valueOf ? valueOf(key, cell) : cell.displayValue, cell.type);
+}
+
 export class ClipboardManager {
   /** Source range and data from the last internal copy/cut, used for reference adjustment on paste */
   private _copySourceRange: SelectionRange | null = null;
@@ -91,9 +121,25 @@ export class ClipboardManager {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const key = cellKey(r, c);
         const cell = data.get(key);
-        if (cell) {
+        if (cell && cell.spilledFrom !== undefined && cell.rawValue === '') {
+          const { spilledFrom: _spilledFrom, ...rest } = cell;
+          const value = computedLiteral(key, cell, valueOf);
+          const [anchorRow, anchorCol] = cell.spilledFrom.split(':').map(Number);
+          if (copied.includes(anchorRow) && anchorCol >= range.start.col && anchorCol <= range.end.col) {
+            // Copied together with its formula: a paste leaves the cell to the formula, which
+            // spills again; a values-only paste writes the value it had
+            snapshot.set(key, { ...rest, rawValue: '' });
+            values.set(key, value);
+          } else {
+            // On its own, a value spilled into the cell by another cell's formula is copied as a plain value
+            snapshot.set(key, { ...rest, rawValue: value });
+            values.set(key, value);
+          }
+        } else if (cell) {
           snapshot.set(key, { ...cell });
-          if (cell.rawValue.startsWith('=')) values.set(key, valueOf ? valueOf(key, cell) : cell.displayValue);
+          if (cell.rawValue.startsWith('=')) {
+            values.set(key, computedLiteral(key, cell, valueOf));
+          }
         }
       }
     }
@@ -101,7 +147,7 @@ export class ClipboardManager {
     this._copySourceValues = values;
     const tsv = this.serializeRange(data, range, copied);
     this._lastWrittenText = tsv;
-    const htmlStr = this._serializeRangeAsHTML(data, range, copied);
+    const htmlStr = this._serializeRangeAsHTML(data, range, copied, valueOf);
 
     try {
       // Try writing both HTML and plain text using ClipboardItem
@@ -256,9 +302,12 @@ export class ClipboardManager {
         const cell = srcData.get(key);
         let value = cell?.rawValue ?? '';
 
-        if (value.startsWith('=')) {
+        if (options.values && this._copySourceValues?.has(key)) {
+          // What a formula showed (or spilled into this cell) when it was copied
+          value = this._copySourceValues.get(key)!;
+        } else if (value.startsWith('=')) {
           if (options.values) {
-            value = this._copySourceValues?.get(key) ?? cell?.displayValue ?? '';
+            value = cell?.displayValue ?? '';
           } else {
             // Each cell shifts its references by how far it actually moved,
             // which differs per row when copied or pasted rows skip hidden ones
@@ -310,7 +359,11 @@ export class ClipboardManager {
         // data-raw holds the cell's formula; pasting values takes the shown text instead
         const raw = el.getAttribute('data-raw');
         const text = (el.textContent ?? '').trim();
-        const value = raw !== null && !(values && raw.startsWith('=')) ? raw : text;
+        // data-spilled marks a value its (also copied) formula spills again; only a values paste writes it
+        const spilled = el.hasAttribute('data-spilled') && !values;
+        // data-value is the unformatted value behind a formula or a spilled cell
+        const plain = el.getAttribute('data-value') ?? text;
+        const value = spilled ? '' : raw !== null && !(values && raw.startsWith('=')) ? raw : plain;
 
         // Try lossless data-format first, then parse inline styles
         let format: CellFormat | undefined;
@@ -452,19 +505,39 @@ export class ClipboardManager {
    * Convert a selection range to an HTML table string.
    * Includes inline styles for visual formatting and data-format for lossless round-trip.
    */
-  private _serializeRangeAsHTML(data: GridData, range: SelectionRange, rowList = rangeRows(range)): string {
+  private _serializeRangeAsHTML(
+    data: GridData,
+    range: SelectionRange,
+    rowList = rangeRows(range),
+    valueOf?: (key: string, cell: CellData) => string
+  ): string {
     const rows: string[] = [];
 
     for (const r of rowList) {
       const cells: string[] = [];
       for (let c = range.start.col; c <= range.end.col; c++) {
-        const cell = data.get(cellKey(r, c));
+        const key = cellKey(r, c);
+        const cell = data.get(key);
         const value = cell?.displayValue ?? '';
         const rawValue = cell?.rawValue ?? '';
         const attrs: string[] = [];
 
         if (rawValue && rawValue !== value) {
           attrs.push(`data-raw="${this._escapeHTML(rawValue)}"`);
+        }
+        // What a formula computed, or what was spilled into the cell, without its
+        // number format: what a paste of values (or of a spilled value alone) writes
+        if (cell && valueOf && (rawValue.startsWith('=') || (rawValue === '' && cell.spilledFrom !== undefined))) {
+          const plain = computedLiteral(key, cell, valueOf);
+          if (plain !== value) attrs.push(`data-value="${this._escapeHTML(plain)}"`);
+        }
+        // A value spilled by a formula that is copied too: a paste into another
+        // spreadsheet leaves the cell to that formula
+        if (cell?.spilledFrom !== undefined && rawValue === '') {
+          const [anchorRow, anchorCol] = cell.spilledFrom.split(':').map(Number);
+          if (rowList.includes(anchorRow) && anchorCol >= range.start.col && anchorCol <= range.end.col) {
+            attrs.push('data-spilled="true"');
+          }
         }
 
         if (cell?.format) {

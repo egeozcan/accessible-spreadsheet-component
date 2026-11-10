@@ -43,6 +43,9 @@ const spreadsheetStories: StoryMeta[] = [
   { id: 'components-y11n-spreadsheet--frozen-panes', name: 'Frozen Panes', waitFor: 'y11n-spreadsheet' },
   { id: 'components-y11n-spreadsheet--filter', name: 'Filter', waitFor: 'y11n-spreadsheet' },
   { id: 'components-y11n-spreadsheet--conditional-formatting', name: 'Conditional Formatting', waitFor: 'y11n-spreadsheet' },
+  { id: 'components-y11n-spreadsheet--dynamic-arrays', name: 'Dynamic Arrays', waitFor: 'y11n-spreadsheet' },
+  { id: 'components-y11n-spreadsheet--lists-in-cells', name: 'Lists and Arrays in Cells', waitFor: 'y11n-spreadsheet' },
+  { id: 'components-y11n-spreadsheet--multiple-sheets', name: 'Multiple Sheets and Names', waitFor: 'y11n-sheet-tabs' },
 ];
 
 const toolbarStories: StoryMeta[] = [

@@ -421,7 +421,7 @@ describe('tier 2 grid features', () => {
       await el.updateComplete;
       const bar = shadow(el).querySelector('y11n-formula-bar')!;
       await (bar as unknown as { updateComplete: Promise<unknown> }).updateComplete;
-      const input = bar.shadowRoot!.querySelector('input')!;
+      const input = bar.shadowRoot!.querySelector<HTMLInputElement>('input.formula-input')!;
       input.value = 'bad';
       input.dispatchEvent(new Event('input'));
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
