@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-10
+
 ### Added
 
 - Typed input is recognised as in Excel: `15%`, `$1,200` (also `€`, `£`, `¥`), `1,234.5`, `2026-01-05`, `14:30` and `2026-01-05 14:30` are stored as numbers and the cell gets the matching number format (unless it already has one of that type). A plain number typed into a percent cell is a percentage (`13` → 13%, like Excel's automatic percent entry). Percent and date cells are edited as displayed. The `raw-input` attribute turns this off; `parseInput()` is exported.
