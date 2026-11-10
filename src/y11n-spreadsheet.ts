@@ -29,6 +29,7 @@ import {
   type FilterColumn,
   type FilterInfo,
   type FilterChangeDetail,
+  type NumberFormatOptions,
   cellKey,
   colToLetter,
   coordToRef,
@@ -41,6 +42,8 @@ import { SelectionManager, findDataEdge } from './controllers/selection-manager.
 import { parseDelimited, serializeDelimited } from './utils/delimited.js';
 import { adjustFormulaForStructureChange, type StructureChange } from './utils/references.js';
 import { compareSortValues, sortValueOf, type SortValue } from './utils/sort.js';
+import { parseInput } from './utils/input-parse.js';
+import { formatSeriesNumber, seriesFor } from './utils/series.js';
 import { FormulaEngine } from './engine/formula-engine.js';
 import { ClipboardManager } from './controllers/clipboard-manager.js';
 import './components/y11n-formula-bar.js';
@@ -117,6 +120,32 @@ const ARROW_DELTAS: Record<string, [number, number]> = {
  * A cell write for `_buildCellBatch`. `format: undefined` leaves the cell's
  * format alone, `null` clears it, and an object replaces it.
  */
+/** What a paste brings over: everything, only values (no formulas or formats), or only formats. */
+export type PasteMode = 'all' | 'values' | 'formats';
+
+/** Options for `paste()`. */
+export interface PasteSpecialOptions {
+  /** Default: 'all' */
+  mode?: PasteMode;
+  /** Swap rows and columns. Default: false */
+  transpose?: boolean;
+}
+
+/** What the status bar shows for the selection (`_selectionSummary()`). */
+interface SelectionSummary {
+  count: number;
+  /** Formatted sum of the number cells; undefined when there are none */
+  sum?: string;
+  average?: string;
+}
+
+/** Order cell keys in reading order (row, then column). */
+function compareKeys(a: string, b: string): number {
+  const pa = parseKey(a);
+  const pb = parseKey(b);
+  return pa.row - pb.row || pa.col - pb.col;
+}
+
 interface CellUpdate {
   id: string;
   value: string;
@@ -249,29 +278,18 @@ const STRUCTURE_OPERATIONS: Record<string, DataChangeOperation> = {
   'delete:col': 'delete-columns',
 };
 
-/**
- * Least-squares linear trend of a run of numbers (for fill-handle series),
- * or null if the run has fewer than two values or any non-number (null).
- */
-function linearTrend(values: Array<number | null>): { intercept: number; slope: number } | null {
-  if (values.length < 2 || values.some((v) => v === null)) return null;
-  const ys = values as number[];
-  const n = ys.length;
-  const meanX = (n - 1) / 2;
-  const meanY = ys.reduce((a, b) => a + b, 0) / n;
-  let num = 0;
-  let den = 0;
-  ys.forEach((y, x) => {
-    num += (x - meanX) * (y - meanY);
-    den += (x - meanX) ** 2;
-  });
-  const slope = num / den;
-  return { intercept: meanY - slope * meanX, slope };
+/** Today's date as `YYYY-MM-DD`, which typed input reads back as a date (Ctrl+;). */
+function todayText(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** Render a computed series value without floating-point noise (0.1+0.2 → 0.3). */
-function formatSeriesNumber(value: number): string {
-  return String(parseFloat(value.toPrecision(15)));
+/** The current time as `HH:mm`, which typed input reads back as a time (Ctrl+Shift+;). */
+function currentTimeText(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /**
@@ -335,6 +353,14 @@ export class Y11nSpreadsheet extends LitElement {
    * least one column always scrolls. Default: 0
    */
   @property({ type: Number, attribute: 'frozen-cols', reflect: true }) frozenCols = 0;
+  /**
+   * When true, typed values are stored exactly as entered. By default, as in
+   * Excel, input like `15%`, `$1,200`, `1,234.5`, `2026-01-05` or `14:30` is
+   * stored as a number and the cell gets the matching number format.
+   */
+  @property({ type: Boolean, attribute: 'raw-input' }) rawInput = false;
+  /** When true, the status bar under the grid (Sum, Average, Count of the selection) is hidden. */
+  @property({ type: Boolean, attribute: 'hide-status-bar' }) hideStatusBar = false;
 
   // ─── Internal State ─────────────────────────────────
 
@@ -363,6 +389,8 @@ export class Y11nSpreadsheet extends LitElement {
 
   /** The open filter menu, if any */
   @state() private _filterMenu: FilterMenuState | null = null;
+  /** The open Paste Special dialog's choices, or null when it is closed */
+  @state() private _pasteSpecial: Required<PasteSpecialOptions> | null = null;
 
   /** Track scroll position for virtual rendering */
   @state() private _scrollTop = 0;
@@ -420,6 +448,8 @@ export class Y11nSpreadsheet extends LitElement {
    * dispatch to detect a listener that changed the grid reentrantly.
    */
   private _mutationCount = 0;
+  /** `_selectionSummary()` result for the selection and data it was computed for */
+  private _summaryCache: { key: string; value: SelectionSummary | null } | null = null;
 
   /** Number of cells to process per animation frame during large pastes */
   private static readonly PASTE_CHUNK_SIZE = 500;
@@ -452,6 +482,7 @@ export class Y11nSpreadsheet extends LitElement {
   private _rowLayout: { key: string; visible: Int32Array | null } | null = null;
   /** Removes the filter menu's outside-click listener */
   private _filterMenuCleanup: (() => void) | null = null;
+  private _pasteSpecialCleanup: (() => void) | null = null;
   /** Most values the filter menu lists at once; the search box narrows the rest */
   private static readonly FILTER_MENU_MAX_VALUES = 500;
 
@@ -475,6 +506,7 @@ export class Y11nSpreadsheet extends LitElement {
     super.disconnectedCallback();
     this._cellSizeObserver?.disconnect();
     this._closeFilterMenu(false);
+    this._closePasteSpecial(false);
   }
 
   protected firstUpdated(): void {
@@ -1024,6 +1056,45 @@ export class Y11nSpreadsheet extends LitElement {
     return true;
   }
 
+  // ─── Paste API ───────────────────────────────────────
+
+  /**
+   * Paste the clipboard at the selection, as Ctrl+V does, with Paste Special
+   * options: `mode: 'values'` pastes values without formulas or formats (what
+   * Ctrl+Shift+V does), `mode: 'formats'` only the formats, and `transpose`
+   * swaps rows and columns. Reads the system clipboard, so browsers may ask
+   * for permission or require a user gesture. Undoable.
+   */
+  async paste(options: PasteSpecialOptions = {}): Promise<void> {
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    await this._handlePaste({ mode: options.mode ?? 'all', transpose: options.transpose ?? false });
+  }
+
+  /**
+   * Open the Paste Special dialog (what Ctrl+Alt+V does): choose All, Values
+   * or Formats, and whether to transpose. Returns false in read-only mode.
+   */
+  async openPasteSpecial(): Promise<boolean> {
+    if (this.readOnly) return false;
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    this._closeFilterMenu(false);
+    this._pasteSpecial = { mode: 'all', transpose: false };
+    if (!this._pasteSpecialCleanup) {
+      const onPointerDown = (e: PointerEvent) => {
+        const el = this.renderRoot.querySelector('.ls-paste-special');
+        if (el && e.composedPath().includes(el)) return;
+        this._closePasteSpecial(false);
+      };
+      document.addEventListener('pointerdown', onPointerDown);
+      this._pasteSpecialCleanup = () => document.removeEventListener('pointerdown', onPointerDown);
+    }
+    await this.updateComplete;
+    this.renderRoot.querySelector<HTMLInputElement>('.ls-paste-special input:checked')?.focus();
+    return true;
+  }
+
   // ─── Find API ────────────────────────────────────────
 
   /**
@@ -1424,11 +1495,6 @@ export class Y11nSpreadsheet extends LitElement {
     return cell?.displayValue ?? '';
   }
 
-  private _getCellRaw(row: number, col: number): string {
-    const cell = this._getCell(row, col);
-    return cell?.rawValue ?? '';
-  }
-
   private _getActiveCellKey(): string {
     const { row, col } = this._selection.activeCell;
     return cellKey(row, col);
@@ -1722,18 +1788,20 @@ export class Y11nSpreadsheet extends LitElement {
     this._applyBatch(batch, source);
   }
 
-  private _commitRawValue(key: string, newValue: string, options: { validate?: boolean } = {}): boolean {
+  private _commitRawValue(
+    key: string,
+    newValue: string,
+    options: { validate?: boolean; format?: CellFormat | null } = {}
+  ): boolean {
     const oldCell = this._internalData.get(key);
     const oldValue = oldCell?.rawValue ?? '';
-    if (newValue === oldValue) return false;
-
     const selection = this._snapshotSelection();
-    const batch = this._buildCommandBatch(
-      [{ id: key, value: newValue }],
-      'edit',
-      selection,
-      selection
-    );
+    const batch =
+      options.format !== undefined
+        ? this._buildCellBatch([{ id: key, value: newValue, format: options.format }], 'edit', selection)
+        : newValue === oldValue
+          ? null
+          : this._buildCommandBatch([{ id: key, value: newValue }], 'edit', selection, selection);
 
     const vetted = batch && this._vetUserBatch(batch, options);
     if (!vetted) return false;
@@ -3380,7 +3448,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (!this.dispatchEvent(event)) return;
 
     this._editingCellKey = key;
-    this._editValue = initialValue ?? cell?.rawValue ?? '';
+    this._editValue = initialValue ?? this._editTextFor(cell);
     this._validationMessage = '';
     this._isEditing = true;
     this._editorNeedsCursorReset = true;
@@ -3397,7 +3465,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (!this._isEditing || !this._editingCellKey) return true;
 
     const key = this._editingCellKey;
-    const newValue = this._editValue;
+    const { value: newValue, format } = this._interpretInput(key, this._editValue);
     if (!this._checkEditValue(key, newValue, onInvalid)) return false;
 
     this._isEditing = false;
@@ -3405,7 +3473,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._validationMessage = '';
     this._modeAnnouncement = 'Edit committed';
 
-    this._commitRawValue(key, newValue, { validate: false });
+    this._commitRawValue(key, newValue, { validate: false, format });
 
     // Return focus to the grid
     this.updateComplete.then(() => this._focusActiveCell());
@@ -3429,6 +3497,45 @@ export class Y11nSpreadsheet extends LitElement {
       this._cancelEdit(`Invalid value: ${message}. Edit cancelled`);
     }
     return false;
+  }
+
+  /**
+   * How typed input is stored in `key`: `15%`, `$1,200`, `2026-01-05` and
+   * the like become a number, and the cell gets the number format the input
+   * implies, unless it already has a number format of that type (so a custom
+   * date pattern survives typing a new date). A plain number typed into a
+   * percent cell is a percentage, as with Excel's automatic percent entry:
+   * `13` and `0.13` both store 0.13 (numbers of 1 or more are divided by 100).
+   * With `raw-input`, or for anything else, the value is stored as typed and
+   * `format` is undefined.
+   */
+  private _interpretInput(key: string, value: string): { value: string; format?: CellFormat } {
+    if (this.rawInput) return { value };
+    const existing = this._internalData.get(key)?.format;
+    const text = value.trim();
+    if (existing?.numberFormat?.type === 'percent' && /^[+-]?(\d+\.?\d*|\.\d+)$/.test(text)) {
+      return { value: Math.abs(Number(text)) >= 1 ? String(parseFloat(`${text}e-2`)) : String(Number(text)) };
+    }
+    const parsed = parseInput(value);
+    if (!parsed) return { value };
+    if (existing?.numberFormat?.type === parsed.numberFormat.type) return { value: parsed.value };
+    return { value: parsed.value, format: { ...existing, numberFormat: parsed.numberFormat } };
+  }
+
+  /**
+   * The text the inline editor starts with for a cell. Percent and date
+   * cells holding a plain number are edited as displayed (`15%`,
+   * `2026-01-05`), as in Excel, when that text reads back as the same number;
+   * everything else is edited as its raw value.
+   */
+  private _editTextFor(cell: CellData | undefined): string {
+    const raw = cell?.rawValue ?? '';
+    const type = cell?.format?.numberFormat?.type;
+    if (this.rawInput || cell?.type !== 'number' || raw.startsWith('=') || (type !== 'percent' && type !== 'date')) {
+      return raw;
+    }
+    const parsed = parseInput(cell.displayValue);
+    return parsed && Math.abs(Number(parsed.value) - Number(raw)) < 1e-9 ? cell.displayValue : raw;
   }
 
   private _cancelEdit(announcement = 'Edit cancelled'): void {
@@ -3680,6 +3787,12 @@ export class Y11nSpreadsheet extends LitElement {
       return;
     }
 
+    if (this._handleQuickShortcut(e, ctrl, shift)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
     let handled = true;
 
     // Normalize letter keys so shortcuts work with Caps Lock / Shift held.
@@ -3820,7 +3933,8 @@ export class Y11nSpreadsheet extends LitElement {
       case 'v':
         if (ctrl) {
           e.preventDefault();
-          this._handlePaste();
+          // Ctrl+Shift+V: paste values only
+          void this._handlePaste({ mode: shift ? 'values' : 'all', transpose: false });
         } else {
           handled = false;
         }
@@ -3912,8 +4026,257 @@ export class Y11nSpreadsheet extends LitElement {
     }
   }
 
+  /**
+   * Excel shortcuts matched by `e.code`, since Shift and Option change
+   * `e.key` (Shift+4 is `$`, Option+= is `≠` on macOS). Returns whether the
+   * key was handled.
+   *
+   * - Alt+=: AutoSum
+   * - Ctrl+; / Ctrl+Shift+;: enter today's date / the current time
+   * - Ctrl+' / Ctrl+Shift+': edit with the formula / value of the cell above
+   * - Ctrl+Shift+1/3/4/5/`: number, date, currency, percent, general format
+   * - Alt+Shift+S: announce the selection's Sum, Average and Count
+   * - Ctrl+Alt+V: open Paste Special
+   */
+  private _handleQuickShortcut(e: KeyboardEvent, ctrl: boolean, shift: boolean): boolean {
+    const alt = e.altKey;
+    if (alt && !ctrl && !shift && e.code === 'Equal') {
+      this._autoSum();
+      return true;
+    }
+    if (alt && shift && !ctrl && e.code === 'KeyS') {
+      this._announceSelectionSummary();
+      return true;
+    }
+    if (ctrl && alt && !shift && e.code === 'KeyV') {
+      void this.openPasteSpecial();
+      return true;
+    }
+    if (!ctrl || alt) return false;
+    if (e.code === 'Semicolon') {
+      if (!this.readOnly) this._startEditing(shift ? currentTimeText() : todayText());
+      return true;
+    }
+    if (e.code === 'Quote') {
+      this._editFromCellAbove(shift ? 'value' : 'formula');
+      return true;
+    }
+    if (!shift) return false;
+    const formats: Record<string, [NumberFormatOptions | undefined, string]> = {
+      Digit1: [{ type: 'number', decimals: 2, thousandsSep: true }, 'Number'],
+      Digit3: [{ type: 'date', datePattern: 'YYYY-MM-DD' }, 'Date'],
+      Digit4: [{ type: 'currency', decimals: 2 }, 'Currency'],
+      Digit5: [{ type: 'percent', decimals: 0 }, 'Percent'],
+      Backquote: [undefined, 'General'],
+    };
+    const entry = formats[e.code];
+    if (!entry) return false;
+    this._applyNumberFormatToSelection(entry[0], entry[1]);
+    return true;
+  }
+
+  /** Ctrl+Shift+1/3/4/5/`: set (or, with undefined, remove) the selection's number format. */
+  private _applyNumberFormatToSelection(numberFormat: NumberFormatOptions | undefined, label: string): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const range = this._selection.range;
+    const cellIds: string[] = [];
+    let locked = 0;
+    for (const r of this._visibleRowsBetween(range.start.row, range.end.row)) {
+      for (let c = range.start.col; c <= range.end.col; c++) {
+        const id = cellKey(r, c);
+        if (this._isCellLocked(id)) locked++;
+        else cellIds.push(id);
+      }
+    }
+    if (locked > 0) this._announceSkipped(locked, []);
+    if (cellIds.length === 0) return;
+    this._applyFormat(cellIds, { numberFormat }, 'user');
+    if (locked === 0) this._modeAnnouncement = `${label} format`;
+  }
+
+  /**
+   * Ctrl+' / Ctrl+Shift+': start editing with the formula (raw value) or the
+   * displayed value of the nearest visible cell above, as in Excel.
+   */
+  private _editFromCellAbove(what: 'formula' | 'value'): void {
+    if (this.readOnly) return;
+    const { row, col } = this._selection.activeCell;
+    let above = row - 1;
+    while (above >= 0 && this._isRowHidden(above)) above--;
+    if (above < 0) return;
+    const cell = this._getCell(above, col);
+    this._startEditing(what === 'formula' ? this._editTextFor(cell) : cell?.displayValue ?? '');
+  }
+
+  /**
+   * Alt+=: AutoSum. On a single cell, start editing a SUM of the numbers
+   * directly above it (or, if there are none, to its left). On a range, write
+   * a SUM under each column: in the selection's last row if that row is
+   * empty, otherwise in the row below. A single-row range gets its sum to
+   * the right instead.
+   */
+  private _autoSum(): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const { start, end } = this._selection.range;
+    const isNumber = (r: number, c: number) => this._getCell(r, c)?.type === 'number';
+
+    if (start.row === end.row && start.col === end.col) {
+      const { row, col } = start;
+      let top = row;
+      for (let r = row - 1; r >= 0; r--) {
+        if (this._isRowHidden(r)) continue;
+        if (!isNumber(r, col)) break;
+        top = r;
+      }
+      let ref = '';
+      if (top < row) {
+        ref = `${coordToRef({ row: top, col })}:${coordToRef({ row: row - 1, col })}`;
+      } else {
+        let left = col;
+        while (left > 0 && isNumber(row, left - 1)) left--;
+        if (left < col) ref = `${coordToRef({ row, col: left })}:${coordToRef({ row, col: col - 1 })}`;
+      }
+      this._startEditing(`=SUM(${ref})`);
+      return;
+    }
+
+    const updates: CellUpdate[] = [];
+    if (start.row !== end.row) {
+      const rows = this._visibleRowsBetween(start.row, end.row);
+      const last = rows[rows.length - 1];
+      let lastEmpty = rows.length > 1;
+      for (let c = start.col; c <= end.col && lastEmpty; c++) lastEmpty = !this._isCellFilled(last, c);
+      const target = lastEmpty ? last : this._visibleRowToward(end.row + 1, 1);
+      const sumEnd = lastEmpty ? rows[rows.length - 2] : end.row;
+      if (!lastEmpty && (end.row + 1 >= this.rows || target <= end.row)) {
+        this._modeAnnouncement = 'No room below the selection for the sums';
+        return;
+      }
+      for (let c = start.col; c <= end.col; c++) {
+        updates.push({
+          id: cellKey(target, c),
+          value: `=SUM(${coordToRef({ row: start.row, col: c })}:${coordToRef({ row: sumEnd, col: c })})`,
+        });
+      }
+    } else {
+      const lastEmpty = !this._isCellFilled(start.row, end.col);
+      const target = lastEmpty ? end.col : end.col + 1;
+      if (target >= this.cols) {
+        this._modeAnnouncement = 'No room right of the selection for the sum';
+        return;
+      }
+      const sumEnd = lastEmpty ? end.col - 1 : end.col;
+      updates.push({
+        id: cellKey(start.row, target),
+        value: `=SUM(${coordToRef({ row: start.row, col: start.col })}:${coordToRef({ row: start.row, col: sumEnd })})`,
+      });
+    }
+    const batch = this._buildCellBatch(updates, 'edit', this._snapshotSelection());
+    const vetted = batch && this._vetUserBatch(batch);
+    if (!vetted) return;
+    this._modeAnnouncement = `Inserted ${vetted.deltas.length === 1 ? 'a sum' : `${vetted.deltas.length} sums`}`;
+    void this._runUserBatch(vetted);
+  }
+
+  /**
+   * Sum, Average and Count of the selection, as the status bar shows them:
+   * Count is the number of non-empty cells; Sum and Average cover the number
+   * cells (formula results included) and use the first one's number format.
+   * Rows hidden by the filter are left out. Null for a single cell, or when
+   * fewer than two cells are filled. Cached until the data or selection changes.
+   */
+  private _selectionSummary(): SelectionSummary | null {
+    const { start, end } = this._selection.range;
+    const cacheKey = `${start.row}:${start.col}:${end.row}:${end.col}:${this._mutationCount}:${this._filterRevision}`;
+    if (this._summaryCache?.key === cacheKey) return this._summaryCache.value;
+
+    let count = 0;
+    let numbers = 0;
+    let sum = 0;
+    let format: NumberFormatOptions | undefined;
+    let firstNumberKey: string | null = null;
+    const visit = (key: string, cell: CellData) => {
+      if (cell.rawValue === '') return;
+      count++;
+      if (cell.type !== 'number') return;
+      const n = this._sortNumber(key, cell);
+      if (!Number.isFinite(n)) return;
+      numbers++;
+      sum += n;
+      if (firstNumberKey === null || compareKeys(key, firstNumberKey) < 0) {
+        firstNumberKey = key;
+        format = cell.format?.numberFormat;
+      }
+    };
+    const area = (end.row - start.row + 1) * (end.col - start.col + 1);
+    if (area > this._internalData.size) {
+      for (const [key, cell] of this._internalData) {
+        const { row, col } = parseKey(key);
+        if (row < start.row || row > end.row || col < start.col || col > end.col || this._isRowHidden(row)) continue;
+        visit(key, cell);
+      }
+    } else {
+      for (const r of this._visibleRowsBetween(start.row, end.row)) {
+        for (let c = start.col; c <= end.col; c++) {
+          const key = cellKey(r, c);
+          const cell = this._internalData.get(key);
+          if (cell) visit(key, cell);
+        }
+      }
+    }
+
+    let value: SelectionSummary | null = null;
+    if (area > 1 && count > 1) {
+      const show = (n: number) => (format ? formatNumber(n, format) : formatSeriesNumber(n));
+      value = numbers > 0
+        ? { count, sum: show(sum), average: show(sum / numbers) }
+        : { count };
+    }
+    this._summaryCache = { key: cacheKey, value };
+    return value;
+  }
+
+  /** Alt+Shift+S: announce the selection's Sum, Average and Count. */
+  private _announceSelectionSummary(): void {
+    const summary = this._selectionSummary();
+    if (!summary) {
+      this._modeAnnouncement = 'Select two or more filled cells for a sum, average and count';
+      return;
+    }
+    this._modeAnnouncement = summary.sum !== undefined
+      ? `Sum ${summary.sum}, Average ${summary.average}, Count ${summary.count}`
+      : `Count ${summary.count}, no numbers`;
+  }
+
+  private _renderStatusBar() {
+    const summary = this._selectionSummary();
+    return html`
+      <div class="ls-status" part="status-bar" title="Alt+Shift+S reads these out">
+        ${summary
+          ? html`${summary.sum !== undefined
+              ? html`<span>Average: ${summary.average}</span><span>Count: ${summary.count}</span><span>Sum: ${summary.sum}</span>`
+              : html`<span>Count: ${summary.count}</span>`}`
+          : nothing}
+      </div>
+    `;
+  }
+
   private _handleEditorKeydown(e: KeyboardEvent): void {
     e.stopPropagation();
+
+    // Ctrl+; / Ctrl+Shift+;: insert today's date / the current time at the caret
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.code === 'Semicolon') {
+      e.preventDefault();
+      const input = e.target as HTMLInputElement;
+      const text = e.shiftKey ? currentTimeText() : todayText();
+      if (typeof input.setRangeText === 'function') {
+        input.setRangeText(text, input.selectionStart ?? input.value.length, input.selectionEnd ?? input.value.length, 'end');
+        this._editValue = input.value;
+      } else {
+        this._editValue += text;
+      }
+      return;
+    }
 
     switch (e.key) {
       case 'Enter':
@@ -4187,7 +4550,7 @@ export class Y11nSpreadsheet extends LitElement {
   private async _handleCopy(): Promise<void> {
     // Rows hidden by the filter are not copied
     const range = this._selection.range;
-    await this._clipboardManager.copy(this._internalData, range, this._visibleRowsIn(range));
+    await this._clipboardManager.copy(this._internalData, range, this._visibleRowsIn(range), this._computedValue);
   }
 
   private async _handleCut(): Promise<void> {
@@ -4195,7 +4558,12 @@ export class Y11nSpreadsheet extends LitElement {
 
     const mutations = this._mutationCount;
     const range = this._selection.range;
-    const keysToDelete = await this._clipboardManager.cut(this._internalData, range, this._visibleRowsIn(range));
+    const keysToDelete = await this._clipboardManager.cut(
+      this._internalData,
+      range,
+      this._visibleRowsIn(range),
+      this._computedValue
+    );
     // The grid changed while the clipboard was being written (rows moved, data
     // replaced, cells edited): clearing the saved coordinates could erase
     // something other than what was copied, so leave the data alone.
@@ -4223,7 +4591,11 @@ export class Y11nSpreadsheet extends LitElement {
     }
   }
 
-  private async _handlePaste(): Promise<void> {
+  /** A formula cell's unformatted result, which a values-only paste writes. */
+  private _computedValue = (key: string, cell: CellData): string =>
+    this._formulaEngine.resultFor(key, cell.rawValue).displayValue;
+
+  private async _handlePaste(options: Required<PasteSpecialOptions> = { mode: 'all', transpose: false }): Promise<void> {
     if (this.readOnly || this._pasteInProgress) return;
 
     // Paste anchors at the top-left of the selection (not the head, which may
@@ -4237,7 +4609,10 @@ export class Y11nSpreadsheet extends LitElement {
     // rows hidden by the filter (worked out when the paste is read)
     const targets = this._filter ? this._visibleRowsBetween(row, this.rows - 1) : null;
     const rowFor = targets ? (i: number) => targets[i] ?? -1 : undefined;
-    const updates = await this._clipboardManager.paste(row, col, this.rows, this.cols, rowFor);
+    const updates = await this._clipboardManager.paste(row, col, this.rows, this.cols, rowFor, {
+      values: options.mode === 'values',
+      transpose: options.transpose,
+    });
 
     if (!updates || updates.length === 0) return;
     if (
@@ -4255,15 +4630,125 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     const selection = this._snapshotSelection();
-    // Pasted formats replace the target's; cells pasted without one keep theirs.
-    const batch = this._buildCellBatch(
-      updates.map((u) => ({ id: u.id, value: u.value, format: u.format })),
-      'paste',
-      selection
-    );
+    let cellUpdates: CellUpdate[];
+    if (options.mode === 'formats') {
+      if (!updates.some((u) => u.format)) {
+        this._modeAnnouncement = 'The clipboard has no formats to paste';
+        return;
+      }
+      // Each target keeps its value and takes the copied cell's format (or none)
+      cellUpdates = updates.map((u) => ({
+        id: u.id,
+        value: this._internalData.get(u.id)?.rawValue ?? '',
+        format: u.format ?? null,
+      }));
+    } else if (options.mode === 'values') {
+      // Targets keep their formats
+      cellUpdates = updates.map((u) => ({ id: u.id, value: u.value }));
+    } else {
+      // Pasted formats replace the target's; cells pasted without one keep theirs.
+      cellUpdates = updates.map((u) => ({ id: u.id, value: u.value, format: u.format }));
+    }
+    const batch = this._buildCellBatch(cellUpdates, 'paste', selection);
     const vetted = batch && this._vetUserBatch(batch);
     if (!vetted) return;
+    if (options.mode !== 'all' || options.transpose) {
+      const what = options.mode === 'values' ? 'values' : options.mode === 'formats' ? 'formats' : 'cells';
+      this._modeAnnouncement = `Pasted ${what}${options.transpose ? ', transposed' : ''}`;
+    }
     await this._runUserBatch(vetted);
+  }
+
+  /** Paste Special dialog: close it, optionally returning focus to the grid. */
+  private _closePasteSpecial(focusCell: boolean): void {
+    this._pasteSpecialCleanup?.();
+    this._pasteSpecialCleanup = null;
+    if (!this._pasteSpecial) return;
+    this._pasteSpecial = null;
+    if (focusCell) this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  private _applyPasteSpecial(): void {
+    const options = this._pasteSpecial;
+    if (!options) return;
+    this._closePasteSpecial(true);
+    void this._handlePaste(options);
+  }
+
+  private _handlePasteSpecialKeydown(e: KeyboardEvent): void {
+    e.stopPropagation();
+    const target = e.target as HTMLElement;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this._closePasteSpecial(true);
+      this._modeAnnouncement = 'Paste Special closed';
+    } else if (e.key === 'Enter' && target.tagName !== 'BUTTON') {
+      e.preventDefault();
+      this._applyPasteSpecial();
+    } else if (e.key === 'Tab') {
+      // Modal: keep focus inside
+      const dialog = e.currentTarget as HTMLElement;
+      const focusables = [...dialog.querySelectorAll<HTMLElement>('input:checked[type=radio], input[type=checkbox], button')];
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const current = this.shadowRoot?.activeElement;
+      if (e.shiftKey && current === first) {
+        e.preventDefault();
+        last?.focus();
+      } else if (!e.shiftKey && current === last) {
+        e.preventDefault();
+        first?.focus();
+      }
+    }
+  }
+
+  private _renderPasteSpecial(options: Required<PasteSpecialOptions>) {
+    const modes: Array<[PasteMode, string]> = [
+      ['all', 'All'],
+      ['values', 'Values'],
+      ['formats', 'Formats'],
+    ];
+    return html`
+      <div
+        class="ls-paste-special"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="paste-special-title"
+        @keydown="${this._handlePasteSpecialKeydown}"
+      >
+        <div id="paste-special-title" class="ls-paste-special-title">Paste Special</div>
+        <fieldset class="ls-paste-special-group">
+          <legend>Paste</legend>
+          ${modes.map(
+            ([mode, label]) => html`
+              <label class="ls-filter-option">
+                <input
+                  type="radio"
+                  name="paste-mode"
+                  value="${mode}"
+                  .checked=${options.mode === mode}
+                  @change="${() => (this._pasteSpecial = { ...options, mode })}"
+                />
+                <span>${label}</span>
+              </label>
+            `
+          )}
+        </fieldset>
+        <label class="ls-filter-option">
+          <input
+            type="checkbox"
+            .checked=${options.transpose}
+            @change="${(e: Event) =>
+              (this._pasteSpecial = { ...options, transpose: (e.target as HTMLInputElement).checked })}"
+          />
+          <span>Transpose</span>
+        </label>
+        <div class="ls-filter-row ls-filter-buttons">
+          <button type="button" class="ls-filter-ok" @click="${this._applyPasteSpecial}">OK</button>
+          <button type="button" class="ls-filter-action" @click="${() => this._closePasteSpecial(true)}">Cancel</button>
+        </div>
+      </div>
+    `;
   }
 
   /**
@@ -4407,6 +4892,10 @@ export class Y11nSpreadsheet extends LitElement {
       seeds++;
     }
     const seedEnd = along[seeds - 1];
+    if (down && seeds > 0 && seeds === along.length && this._fillDownToAdjacentData()) {
+      this.updateComplete.then(() => this._focusActiveCell());
+      return;
+    }
     if (seeds === 0 || seeds === along.length) {
       this._modeAnnouncement = `Select the cells to continue and the empty cells ${down ? 'below' : 'to the right of'} them`;
       return;
@@ -4470,6 +4959,46 @@ export class Y11nSpreadsheet extends LitElement {
     window.addEventListener('blur', () => finish(false), { signal });
   }
 
+  /** Double-click on the fill handle: fill down as far as the data next to the selection goes. */
+  private _handleFillHandleDblClick(e: MouseEvent): void {
+    // Keep the cell underneath from opening the editor
+    e.preventDefault();
+    e.stopPropagation();
+    if (this.readOnly || this._pasteInProgress) return;
+    if (!this._fillDownToAdjacentData()) this._modeAnnouncement = 'No data next to the selection to fill along';
+    this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  /**
+   * Fill the selection down to the last row of the data in the column to its
+   * left (or, if that is empty, to its right), as Excel does on a fill-handle
+   * double-click, stopping above the first filled cell below the selection.
+   * Also what Ctrl+Alt+D does when the selection has no empty cells. Returns
+   * false if there is nothing to fill.
+   */
+  private _fillDownToAdjacentData(): boolean {
+    const range = this._selection.range;
+    const { start, end } = range;
+    const filled = (r: number, c: number) => !this._isRowHidden(r) && this._isCellFilled(r, c);
+    for (const adj of [start.col - 1, end.col + 1]) {
+      if (adj < 0 || adj >= this.cols) continue;
+      let last = end.row;
+      for (let r = end.row + 1; r < this.rows; r++) {
+        if (this._isRowHidden(r)) continue;
+        if (!filled(r, adj)) break;
+        let blocked = false;
+        for (let c = start.col; c <= end.col && !blocked; c++) blocked = filled(r, c);
+        if (blocked) break;
+        last = r;
+      }
+      if (last > end.row) {
+        this._autoFill({ start: { ...start }, end: { ...end } }, { start: { ...start }, end: { row: last, col: end.col } });
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * The range a fill-handle drag from `source` to cell (row, col) covers, or
    * null while the pointer is still inside the source.
@@ -4497,7 +5026,9 @@ export class Y11nSpreadsheet extends LitElement {
    * from `source`, as the fill handle does. Each line of the source along
    * the fill direction is handled separately:
    *
-   * - two or more plain numbers continue their linear trend (1, 2 → 3, 4);
+   * - series continue as `seriesFor()` describes: numbers by their linear
+   *   trend (1, 2 → 3, 4), single dates by a day, day and month names, and
+   *   text ending in a number (Item 1 → Item 2);
    * - anything else repeats, with formulas' relative references shifted and
    *   formats copied.
    */
@@ -4519,15 +5050,21 @@ export class Y11nSpreadsheet extends LitElement {
     for (const x of lineLength > 0 ? positions(cross, source.start[cross], source.end[cross]) : []) {
       const keyAt = (p: number) => (vertical ? cellKey(p, x) : cellKey(x, p));
       const line = linePositions.map((p) => this._internalData.get(keyAt(p)));
-      const trend = linearTrend(line.map((cell) => this._literalNumber(cell)));
+      const series = seriesFor(
+        line.map((cell) => ({
+          raw: cell?.rawValue ?? '',
+          number: this._literalNumber(cell),
+          isDate: cell?.format?.numberFormat?.type === 'date',
+        }))
+      );
       span.forEach((p, i) => {
         const offset = i - lineStart;
         if (offset >= 0 && offset < lineLength) return;
         const srcIndex = ((offset % lineLength) + lineLength) % lineLength;
         const src = line[srcIndex];
         let value: string;
-        if (trend) {
-          value = formatSeriesNumber(trend.intercept + trend.slope * offset);
+        if (series) {
+          value = series(offset);
         } else {
           // Shift references by how far the cell actually moves
           const shift = p - linePositions[srcIndex];
@@ -4576,13 +5113,14 @@ export class Y11nSpreadsheet extends LitElement {
   private _commitEditToSelection(): void {
     if (!this._isEditing || !this._editingCellKey) return;
     const origin = parseKey(this._editingCellKey);
-    const value = this._editValue;
+    const typed = this._editValue;
     const { start, end } = this._selection.range;
 
     if (start.row === end.row && start.col === end.col) {
       this._commitEdit('keep');
       return;
     }
+    const value = this._interpretInput(this._editingCellKey, typed).value;
     // Validate the edited cell's value up front so the editor can stay open;
     // the other cells are validated individually when the batch is vetted.
     if (!this._checkEditValue(this._editingCellKey, value, 'keep')) return;
@@ -4594,10 +5132,16 @@ export class Y11nSpreadsheet extends LitElement {
     const updates: CellUpdate[] = [];
     for (const r of this._visibleRowsBetween(start.row, end.row)) {
       for (let c = start.col; c <= end.col; c++) {
-        updates.push({
-          id: cellKey(r, c),
-          value: this._shiftFormula(value, r - origin.row, c - origin.col),
-        });
+        const id = cellKey(r, c);
+        // Each cell reads the typed text itself: a percent cell turns 13 into 13%
+        const own = this._interpretInput(id, typed);
+        const update: CellUpdate = {
+          id,
+          value: typed.startsWith('=') ? this._shiftFormula(value, r - origin.row, c - origin.col) : own.value,
+        };
+        const format = own.format;
+        if (format) update.format = format;
+        updates.push(update);
       }
     }
     const cellCount = updates.length;
@@ -4729,7 +5273,7 @@ export class Y11nSpreadsheet extends LitElement {
       this._modeAnnouncement = `${coordToRef(parseKey(targetKey))} is read-only`;
       return false;
     }
-    const value = detail.value;
+    const { value, format } = this._interpretInput(targetKey, detail.value);
     const oldValue = this._internalData.get(targetKey)?.rawValue ?? '';
     const message = value === oldValue ? null : this._validate(targetKey, value);
     if (message) {
@@ -4745,7 +5289,7 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     // An unchanged value is a successful no-op, not a rejection
-    return this._commitRawValue(targetKey, value, { validate: false }) || value === oldValue;
+    return this._commitRawValue(targetKey, value, { validate: false, format }) || value === oldValue;
   }
 
   // ─── Event Dispatching ──────────────────────────────
@@ -5020,6 +5564,21 @@ export class Y11nSpreadsheet extends LitElement {
       flex-direction: column;
       width: 100%;
       height: 100%;
+      overflow: hidden;
+    }
+
+    .ls-status {
+      flex: 0 0 auto;
+      display: flex;
+      justify-content: flex-end;
+      gap: 16px;
+      min-height: 22px;
+      padding: 2px 12px;
+      font-size: 12px;
+      color: var(--ls-status-color, #555);
+      background: var(--ls-status-bg, #f8fafc);
+      border-top: 1px solid var(--_border-color);
+      white-space: nowrap;
       overflow: hidden;
     }
 
@@ -5386,6 +5945,35 @@ export class Y11nSpreadsheet extends LitElement {
       font-size: 13px;
     }
 
+    .ls-paste-special {
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      width: 220px;
+      padding: 10px;
+      background: var(--ls-filter-menu-bg, #fff);
+      border: 1px solid var(--_border-color);
+      border-radius: 4px;
+      box-shadow: var(--_editor-shadow);
+      font-size: 13px;
+    }
+
+    .ls-paste-special-title {
+      font-weight: 600;
+    }
+
+    .ls-paste-special-group {
+      margin: 0;
+      padding: 4px 8px;
+      border: 1px solid var(--_border-color);
+      border-radius: 3px;
+    }
+
     .ls-filter-row {
       display: flex;
       gap: 6px;
@@ -5493,7 +6081,8 @@ export class Y11nSpreadsheet extends LitElement {
     this._renderedCellSize = this._cellSize;
     const { rows, cols } = this._getVisibleRange();
     const activeCell = this._selection.activeCell;
-    const activeRawValue = this._getCellRaw(activeCell.row, activeCell.col);
+    // Percent and date cells show as typed (15%, 2026-01-05), like the inline editor
+    const activeRawValue = this._editTextFor(this._getCell(activeCell.row, activeCell.col));
     const activeDisplayValue = this._getCellDisplay(activeCell.row, activeCell.col);
 
     return html`
@@ -5532,6 +6121,7 @@ export class Y11nSpreadsheet extends LitElement {
             : nothing}
           ${this._findOpen ? this._renderFindBar() : nothing}
           ${this._filterMenu && this._filter ? this._renderFilterMenu(this._filterMenu, this._filter) : nothing}
+          ${this._pasteSpecial ? this._renderPasteSpecial(this._pasteSpecial) : nothing}
 
           <div
             class="ls-grid"
@@ -5550,6 +6140,8 @@ export class Y11nSpreadsheet extends LitElement {
             ${this._renderRows(rows, cols)}
           </div>
         </div>
+
+        ${this.hideStatusBar ? nothing : this._renderStatusBar()}
 
         <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
           ${this._getAnnouncement(activeCell)}
@@ -5857,6 +6449,7 @@ export class Y11nSpreadsheet extends LitElement {
               class="ls-fill-handle"
               aria-hidden="true"
               @pointerdown="${this._handleFillHandlePointerDown}"
+              @dblclick="${this._handleFillHandleDblClick}"
             ></div>`
           : nothing}
       </div>

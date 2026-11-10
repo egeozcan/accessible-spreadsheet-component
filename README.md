@@ -6,7 +6,11 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 
 - Full keyboard navigation (arrows, Ctrl+Arrow data-edge jumps, Tab, Enter, Escape, Ctrl+A)
 - Row/column selection via headers (click, Shift+click, drag) or Ctrl+Space / Shift+Space
-- Fill down/right (Ctrl+D / Ctrl+R), a draggable fill handle that continues numeric series, and multi-cell entry (Ctrl+Enter)
+- Fill down/right (Ctrl+D / Ctrl+R), a draggable fill handle that continues numbers, dates, day and month names and numbered text (double-click it to fill down the table), and multi-cell entry (Ctrl+Enter)
+- Typed input like `15%`, `$1,200`, `1,234.5`, `2026-01-05` or `14:30` is stored as a number with the matching format
+- Status bar with the Sum, Average and Count of the selection (Alt+Shift+S reads them out)
+- AutoSum (Alt+=), today's date / the time (Ctrl+; / Ctrl+Shift+;), quick number formats (Ctrl+Shift+1 / 3 / 4 / 5 / `)
+- Paste values (Ctrl+Shift+V) and an accessible Paste Special dialog (Ctrl+Alt+V) with Values, Formats and Transpose
 - Insert and delete rows/columns, with formula references rewritten to follow their cells
 - Frozen panes: keep header rows and columns in view while scrolling (`frozen-rows` / `frozen-cols`, Alt+Shift+F)
 - Resizable columns: drag a header border, double-click it to fit the content, or use Alt+Shift+Left / Right and Alt+Shift+0
@@ -17,7 +21,7 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 - CSV/TSV import and export
 - Copy/cut/paste with HTML and TSV clipboard formats
 - Undo/redo with Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)
-- Formula engine with 50+ built-in functions and custom function support
+- Formula engine with 80+ built-in functions and custom function support
 - Arrow key cell reference insertion during formula editing
 - Virtual rendering for large datasets (1000+ rows)
 - Dual-mode formula bar (raw / formatted)
@@ -80,6 +84,8 @@ sheet.setData(data);
 | `frozenRows` | `frozen-rows` | `number` | `0` | Rows at the top that stay in view while scrolling (see [Frozen panes](#frozen-panes)) |
 | `frozenCols` | `frozen-cols` | `number` | `0` | Columns at the left that stay in view while scrolling |
 | `validateCell` | - | `(cellId, value) => string \| null \| undefined` | - | Validates user-entered values; return a message to reject one (see [Validation and edit control](#validation-and-edit-control)) |
+| `rawInput` | `raw-input` | `boolean` | `false` | Store typed values exactly as entered, without recognising percentages, currency, dates and times (see [Typed input](#typed-input)) |
+| `hideStatusBar` | `hide-status-bar` | `boolean` | `false` | Hide the status bar under the grid |
 
 ### Methods
 
@@ -144,6 +150,13 @@ sheet.findCells('total')                      // ['5:0', ...] in reading order
 sheet.findCells('SUM', { formulas: true, matchCase: true })
 sheet.openFind()                              // open the find bar (Ctrl/Cmd+F)
 sheet.closeFind()
+
+// Paste (reads the system clipboard; undoable)
+sheet.paste()                                 // what Ctrl+V does
+sheet.paste({ mode: 'values' })               // values only, no formulas or formats (Ctrl+Shift+V)
+sheet.paste({ mode: 'formats' })              // formats only
+sheet.paste({ transpose: true })              // rows become columns
+sheet.openPasteSpecial()                      // the Paste Special dialog (Ctrl+Alt+V)
 ```
 
 Inserting or deleting rows/columns moves cells with their formats and read-only flags, and rewrites formula references the way Excel does: references after the change move, ranges that span an insertion grow, ranges that lose rows/columns shrink, and references to deleted cells become `#REF!`. Absolute (`$A$1`) references move too. Out-of-range arguments throw a `RangeError`, and at least one row and column must remain.
@@ -153,6 +166,29 @@ Sorting reorders the rows of a range; cells outside it don't move. Ascending ord
 `sortSelection()` sorts the selection, trimmed to its last filled row and column, by the active cell's column. When a single cell is selected, or a single column of a wider table (which would split its records apart), it sorts the block of data around the active cell instead, like Excel's current region. It keeps the first row in place when it looks like a header: all text, above columns with numbers or other non-text values, or bold above a row that isn't. It refuses to move read-only cells, fires `before-sort`, and announces the result.
 
 Column widths are presentation, not data: they can be changed in read-only mode, `setData()` keeps them, and they aren't part of `getData()`. Save them with `getColumnWidths()` (for example on `column-resize`) and restore them with `setColumnWidths()`. Widths move with their columns when columns are inserted or deleted, and `column-resize` reports the columns whose width changed, so saving on `column-resize` keeps the layout in step. Auto-fit measures the displayed values of every row, including rows that aren't rendered; an empty column goes back to the default width.
+
+### Typed input
+
+As in Excel, what the user types (in a cell, the formula bar or with Ctrl+Enter) is stored as a number when it is clearly one with a format:
+
+| Typed | Stored | Format |
+|-------|--------|--------|
+| `15%`, `-2.5%` | `0.15`, `-0.025` | percent, with the decimals typed |
+| `$1,200`, `-€3.50`, `£-3` (also `¥`) | `1200`, `-3.5`, `-3` | currency with that symbol, 0 or 2 decimals |
+| `1,234,567.8` | `1234567.8` | number with thousands separators |
+| `2026-01-05`, `2026/1/5` | the date serial | date, `YYYY-MM-DD` |
+| `14:30`, `9:05:30` | the fraction of a day | date, `HH:mm` / `HH:mm:ss` |
+| `2026-01-05 14:30` | serial plus time | date, `YYYY-MM-DD HH:mm` |
+
+Only year-first dates are recognised, since `1/5/2026` could be January or May. A plain number typed into a percent cell is a percentage, as with Excel's automatic percent entry: `13` and `0.13` both give 13% (numbers of 1 or more are divided by 100). A cell that already has a number format of the same type keeps it, so a custom `DD/MM/YYYY` pattern survives typing a new date. Percent and date cells are edited as they are displayed (`15%`, `2026-01-05`), and the formula bar shows them that way too. `validateCell`, `before-change` and `cell-change` see the stored number. Pastes, fills and API calls are not converted. Set `raw-input` to store everything as typed; `parseInput(text)` is exported if you want the same rules elsewhere.
+
+### Status bar
+
+The bar under the grid shows the Average, Count and Sum of the selection when two or more of its cells are filled. Count counts non-empty cells; Sum and Average cover the number cells, formula results included, and use the number format of the first one. Rows hidden by a filter are left out. The bar isn't a live region, so it doesn't interrupt screen reader users as the selection moves: Alt+Shift+S announces the same figures. Hide it with `hide-status-bar`, or style it with `::part(status-bar)`, `--ls-status-bg` and `--ls-status-color`.
+
+### Paste Special
+
+Ctrl+Shift+V pastes values: formulas copied in this grid paste as the values they had when copied, and the target cells keep their formats. Ctrl+Alt+V opens the Paste Special dialog, a modal dialog with All / Values / Formats radio buttons and a Transpose checkbox (arrow keys pick the mode, Space toggles Transpose, Enter pastes, Escape closes). Formats pastes only the copied cells' formats; the targets keep their values. Transpose turns copied rows into columns; formulas shift their relative references by how far each cell moved. All of this is also available through `paste(options)`.
 
 ### Frozen panes
 
@@ -287,13 +323,16 @@ Formulas start with `=`. Supported syntax:
 
 | Category | Functions |
 |----------|-----------|
-| Aggregates | `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `PRODUCT`, `MEDIAN` |
+| Aggregates | `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `PRODUCT`, `MEDIAN`, `SUMPRODUCT` |
+| Statistics | `STDEV`, `STDEV.S`, `STDEV.P`, `VAR`, `VAR.S`, `VAR.P` |
 | Conditional aggregates | `SUMIF`, `COUNTIF`, `AVERAGEIF`, `SUMIFS`, `COUNTIFS`, `AVERAGEIFS` |
 | Logic | `IF`, `IFS`, `IFERROR`, `AND`, `OR`, `NOT` |
 | Lookup | `VLOOKUP`, `HLOOKUP`, `XLOOKUP`, `INDEX`, `MATCH` |
 | Math | `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `INT`, `MOD`, `POWER`, `SQRT`, `CEILING`, `FLOOR` |
 | Text | `CONCAT`, `TEXTJOIN`, `UPPER`, `LOWER`, `LEN`, `TRIM`, `LEFT`, `RIGHT`, `MID`, `SUBSTITUTE`, `FIND`, `TEXT`, `VALUE` |
-| Date | `DATE`, `TODAY`, `NOW`, `YEAR`, `MONTH`, `DAY`, `WEEKDAY` |
+| Date | `DATE`, `TODAY`, `NOW`, `YEAR`, `MONTH`, `DAY`, `WEEKDAY`, `EDATE`, `EOMONTH` |
+| Financial | `PMT`, `FV`, `PV`, `NPV` |
+| Information | `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISLOGICAL`, `ISERROR`, `ISERR`, `ISNA` |
 
 Omitted arguments use their defaults, e.g. `=XLOOKUP(75, A1:A9, B1:B9, , -1)`. Criteria in `SUMIF`/`COUNTIF`/`AVERAGEIF` and the `*IFS` functions accept operators (`">5"`, `"<>x"`) and wildcards (`*`, `?`, `~` to escape). `XLOOKUP` supports match modes `0`, `-1`, `1` (not wildcard mode `2`) and search modes `1`/`-1`; it returns a single value (no spilling).
 
@@ -362,6 +401,7 @@ y11n-spreadsheet {
 | `--ls-filter-menu-bg` | `#fff` | Filter menu background |
 | `--ls-find-bg` | `#fff` | Find bar background |
 | `--ls-find-status-color` | `#555` | Find bar match count |
+| `--ls-status-bg` / `--ls-status-color` | `#f8fafc` / `#555` | Status bar under the grid |
 
 </details>
 
@@ -390,9 +430,14 @@ y11n-spreadsheet::part(editor) {
 | Enter, F2 | Start editing |
 | Escape | Cancel edit / clear selection |
 | Delete, Backspace | Clear selected cells |
+| Alt + = | AutoSum: on a cell, start a SUM of the numbers above it (or to its left); on a range, write a SUM under each column (or right of a single row) |
+| Ctrl + ; / Ctrl + Shift + ; | Enter today's date / the current time (inserted at the caret while editing) |
+| Ctrl + ' / Ctrl + Shift + ' | Edit with the formula / the value of the cell above |
+| Ctrl + Shift + 1 / 3 / 4 / 5 / ` | Number (2 decimals, separators) / date / currency / percent / general format |
+| Alt + Shift + S | Announce the Sum, Average and Count of the selection |
 | Ctrl/Cmd + D | Fill down (copy the top row of the selection into the rest) |
 | Ctrl/Cmd + R | Fill right (copy the left column of the selection into the rest) |
-| Ctrl + Alt + D / Ctrl + Alt + R | Fill series down / right: continue the filled leading rows/columns of the selection into its empty cells, like dragging the fill handle (on macOS use Ctrl+Option) |
+| Ctrl + Alt + D / Ctrl + Alt + R | Fill series down / right: continue the filled leading rows/columns of the selection into its empty cells, like dragging the fill handle. With no empty cells selected, Ctrl+Alt+D fills down as far as the data next to the selection goes, like double-clicking the fill handle (on macOS use Ctrl+Option) |
 | Ctrl/Cmd + Shift + = (or Ctrl+Alt+=, Ctrl+Numpad +) | Insert as many rows/columns as are selected, before the selection. Needs whole rows (Shift+Space) or columns (Ctrl+Space) selected |
 | Ctrl/Cmd + - (or Ctrl+Alt+-, Ctrl+Numpad -) | Delete the selected whole rows/columns |
 | Alt + Shift + F | Freeze the rows above and the columns left of the active cell; press again to unfreeze |
@@ -405,6 +450,8 @@ y11n-spreadsheet::part(editor) {
 | Ctrl + Alt + L | Reapply the filter, after edits (on macOS use Ctrl+Option) |
 | Ctrl/Cmd + F | Find. In the find bar: Enter / Shift+Enter (or F3 / Shift+F3) next / previous match, Escape closes |
 | Ctrl+C / X / V | Copy / Cut / Paste |
+| Ctrl + Shift + V | Paste values only |
+| Ctrl + Alt + V | Paste Special: values, formats, transpose (on macOS use Ctrl+Option) |
 | Ctrl+Z | Undo |
 | Ctrl+Shift+Z / Ctrl+Y | Redo |
 | Any printable character | Start editing with that character |
@@ -413,7 +460,7 @@ During formula editing, arrow keys insert cell references instead of navigating.
 
 Drag the right border of a column header to resize the column (Escape during the drag cancels it); with whole columns selected, all of them get the new width. Double-click the border to fit the column to its content.
 
-With the mouse, drag the square at the bottom-right corner of the selection (the fill handle) to fill adjacent cells. A run of two or more numbers continues its linear trend (`1, 2` → `3, 4, 5`; `10, 20` → `30, 40`); text, formulas and single numbers repeat, with relative references shifted. From the keyboard, select the cells to continue plus the empty cells after them and press Ctrl+Alt+D (down) or Ctrl+Alt+R (right); Ctrl+D / Ctrl+R copy instead of continuing a series.
+With the mouse, drag the square at the bottom-right corner of the selection (the fill handle) to fill adjacent cells. A run of two or more numbers continues its linear trend (`1, 2` → `3, 4, 5`; `10, 20` → `30, 40`), a single date steps by a day, day and month names continue and wrap (`Mon` → `Tue`, `Nov, Dec` → `Jan`, keeping their case), and text ending in a number counts up (`Item 1` → `Item 2`, `Q09` → `Q10`; `Row 1, Row 3` → `Row 5`). Other text, formulas and single numbers repeat, with relative references shifted. Double-click the fill handle to fill down as far as the column to the left (or right) has data, stopping above any filled cell. From the keyboard, select the cells to continue plus the empty cells after them and press Ctrl+Alt+D (down) or Ctrl+Alt+R (right); Ctrl+D / Ctrl+R copy instead of continuing a series.
 
 ## Types
 
@@ -536,6 +583,8 @@ src/
   utils/
     delimited.ts                    # CSV/TSV parsing and serialization
     references.ts                   # Formula reference rewriting for row/column insert/delete
+    input-parse.ts                  # Recognises typed percentages, currency, dates and times
+    series.ts                       # Fill-handle series (numbers, dates, day/month names, numbered text)
   __tests__/                        # Unit tests colocated with source
 e2e/                                # Playwright E2E tests
 stories/                            # Storybook stories
