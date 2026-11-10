@@ -332,6 +332,179 @@ export interface FilterChangeDetail {
 }
 
 /**
+ * The style a conditional-format rule applies to matching cells: the visual
+ * part of `CellFormat`. It is merged over the cell's own format when the cell
+ * is drawn and never written into the cell.
+ */
+export type ConditionalFormatStyle = Pick<
+  CellFormat,
+  'bold' | 'italic' | 'underline' | 'strikethrough' | 'textColor' | 'backgroundColor'
+>;
+
+/**
+ * A value a `cellValue` rule compares against. A string starting with `=` is
+ * a formula written for the top-left cell of the rule's range and shifted for
+ * every other cell, like a filled formula (`'=$B1'`).
+ */
+export type ConditionalOperand = number | string;
+
+/** Comparisons of a `cellValue` rule. */
+export type ConditionalComparison =
+  | 'greaterThan'
+  | 'greaterThanOrEqual'
+  | 'lessThan'
+  | 'lessThanOrEqual'
+  | 'equal'
+  | 'notEqual'
+  | 'between'
+  | 'notBetween';
+
+/** Text tests of a `text` rule (case-insensitive). */
+export type ConditionalTextOperator = 'contains' | 'notContains' | 'beginsWith' | 'endsWith';
+
+/** Periods of a `date` rule, relative to today. Weeks start on Sunday. */
+export type ConditionalDatePeriod =
+  | 'yesterday'
+  | 'today'
+  | 'tomorrow'
+  | 'last7Days'
+  | 'lastWeek'
+  | 'thisWeek'
+  | 'nextWeek'
+  | 'lastMonth'
+  | 'thisMonth'
+  | 'nextMonth';
+
+/**
+ * A point on the scale of a color scale, data bar or icon set, worked out
+ * from the numbers in the rule's range: the lowest (`min`) or highest (`max`)
+ * number, a fixed `number`, a `percent` of the way from lowest to highest, or
+ * a `percentile` of the numbers.
+ */
+export interface ConditionalThreshold {
+  type: 'min' | 'max' | 'number' | 'percent' | 'percentile';
+  /** Required for `number`, `percent` (0-100) and `percentile` (0-100) */
+  value?: number;
+}
+
+/** A threshold of a color scale and the color at that point (`#rgb` or `#rrggbb`). */
+export interface ConditionalColorStop extends ConditionalThreshold {
+  color: string;
+}
+
+/**
+ * Built-in icon sets. Every set tells its icons apart by shape, not only by
+ * color, and every icon has a text alternative.
+ */
+export type ConditionalIconSetName = 'arrows3' | 'arrows5' | 'shapes3' | 'symbols3' | 'bars5';
+
+/**
+ * What a conditional-format rule tests (highlight rules) or draws (`colorScale`,
+ * `dataBar`, `iconSet`). Empty cells only match `blanks` and `formula` rules.
+ */
+export type ConditionalFormatCondition =
+  | { type: 'cellValue'; operator: ConditionalComparison; value: ConditionalOperand; value2?: ConditionalOperand }
+  | { type: 'text'; operator: ConditionalTextOperator; text: string }
+  | { type: 'date'; period: ConditionalDatePeriod }
+  | { type: 'blanks' | 'notBlanks' | 'errors' | 'notErrors' | 'duplicates' | 'unique' }
+  | { type: 'top' | 'bottom'; rank: number; percent?: boolean }
+  | { type: 'aboveAverage' | 'belowAverage'; orEqual?: boolean }
+  | { type: 'formula'; formula: string }
+  | { type: 'colorScale'; min: ConditionalColorStop; mid?: ConditionalColorStop; max: ConditionalColorStop }
+  | {
+      type: 'dataBar';
+      /** Bar color (any CSS color). Default: `--ls-data-bar-color` */
+      color?: string;
+      /** Color of bars for negative numbers. Default: `--ls-data-bar-negative-color` */
+      negativeColor?: string;
+      /** Default: the lowest number, or 0 if that is lower */
+      min?: ConditionalThreshold;
+      /** Default: the highest number, or 0 if that is higher */
+      max?: ConditionalThreshold;
+      /** Show the cell's value beside the bar. Default: true */
+      showValue?: boolean;
+    }
+  | {
+      type: 'iconSet';
+      icons: ConditionalIconSetName;
+      /**
+       * Where each icon after the first starts, lowest first (one fewer than
+       * the set has icons). Default: equal percent steps (33/67, 20/40/60/80).
+       */
+      thresholds?: ConditionalThreshold[];
+      /** Give the highest numbers the first icon instead of the last */
+      reverse?: boolean;
+      /** Show the cell's value beside the icon. Default: true */
+      showValue?: boolean;
+      /** Text alternatives for the icons, lowest first, replacing the built-in ones */
+      labels?: string[];
+    };
+
+/**
+ * A conditional-format rule: a range, a condition and a format. Rules live
+ * beside the grid data in priority order (first wins).
+ */
+export interface ConditionalFormatRule {
+  /** Unique id, generated when not given */
+  id: string;
+  /** The cells the rule applies to */
+  range: SelectionRange;
+  condition: ConditionalFormatCondition;
+  /** Style for cells that match a highlight rule. Not used by color scales, data bars and icon sets. */
+  format?: ConditionalFormatStyle;
+  /** When a cell matches this rule, skip the rules after it for that cell */
+  stopIfTrue?: boolean;
+  /**
+   * Short text exposed with matching cells and announced ("above average"),
+   * so the meaning doesn't depend on color. Default: generated from the condition.
+   */
+  label?: string;
+}
+
+/** A rule as passed to `addConditionalFormat()`: the id is optional. */
+export type ConditionalFormatRuleInput = Omit<ConditionalFormatRule, 'id'> & { id?: string };
+
+/** What the conditional-format rules give one cell, from `getConditionalFormatResult()`. */
+export interface ConditionalFormatResult {
+  /** Styles of the matching rules, merged in priority order; includes a color scale's fill */
+  format: ConditionalFormatStyle;
+  /** Labels of everything that applies, in priority order */
+  labels: string[];
+  /** Ids of the rules that apply, in priority order */
+  ruleIds: string[];
+  /** Data bar: where it starts and how long it is, as fractions (0-1) of the cell's width */
+  dataBar?: { start: number; size: number; negative: boolean; color?: string; showValue: boolean };
+  /** Icon: the set, the icon's index in it (0 = the icon for the lowest numbers) and its text alternative */
+  icon?: { set: ConditionalIconSetName; index: number; label: string; showValue: boolean };
+  /** Color scale: the cell's position on it, 0 (lowest) to 1 (highest) */
+  scale?: number;
+}
+
+/** One-step rules for the selection, as offered by the format toolbar. */
+export type ConditionalFormatPreset =
+  | 'duplicates'
+  | 'unique'
+  | 'aboveAverage'
+  | 'belowAverage'
+  | 'top10'
+  | 'bottom10'
+  | 'colorScale'
+  | 'dataBar'
+  | 'iconSet';
+
+/**
+ * Detail for `conditional-format-change` (after the rules changed, also on
+ * undo/redo and when rows/columns move them) and the cancelable
+ * `before-conditional-format-change` (before a user change, describing the result).
+ */
+export interface ConditionalFormatChangeDetail {
+  /** All rules in priority order */
+  rules: ConditionalFormatRule[];
+  /** What triggered the change */
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
+}
+
+/**
  * Detail for the `format-change` event, fired when cell formatting is modified.
  */
 export interface FormatChangeDetail {

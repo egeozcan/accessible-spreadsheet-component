@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Conditional formatting. A rule is a range, a condition and a format; rules live beside the data, are evaluated after recalculation and are merged over the cells' own formats when they are drawn, so `getData()`, copy, sort and CSV export still see the real formats.
+  - Highlight rules: cell value (greater, less, between, equal, with numbers, text or `=formula` operands), text contains / begins / ends, dates (today, last 7 days, this week, next month, ...), blanks, errors, duplicates and unique values, top or bottom N (or percent), above or below average, and formula rules written for the top-left cell and shifted like a filled formula.
+  - In-cell graphics: 2- and 3-color scales, data bars (negative bars grow left from a zero axis) and five icon sets (`arrows3`, `arrows5`, `shapes3`, `symbols3`, `bars5`).
+  - Excel's precedence: rules are kept in priority order, formats merge with the earlier rule winning, and `stopIfTrue` ends the evaluation for a cell.
+  - Accessibility: every rule has a short label (generated, or set with `label`) that is part of each matching cell's accessible name and of the active-cell announcement ("B6: 150, above average"). Color scales and data bars announce the cell's position, icons have text alternatives and differ in shape, color scales pick a contrasting text color, and forced-colors mode shows an edge marker for highlights, a meter line for scales and bars, and system-colored icons.
+  - API: `addConditionalFormat()`, `updateConditionalFormat()`, `removeConditionalFormat()`, `moveConditionalFormat()`, `getConditionalFormats()`, `setConditionalFormats()`, `clearConditionalFormats()`, `getConditionalFormatResult()`, and for user actions `applyConditionalFormatPreset()`, `clearSelectionConditionalFormats()` and `openConditionalFormatManager()` / `closeConditionalFormatManager()`.
+  - A rule manager dialog (Alt+Shift+C) to add, edit, reorder and delete rules and set stop-if-true, and a Conditional formatting menu on `<y11n-format-toolbar>` with one-step presets (fires `conditional-format-action`).
+  - Undoable; fires `conditional-format-change` and, for user changes, the cancelable `before-conditional-format-change`. Rules move with inserted and deleted rows/columns (ranges and rule formulas are rewritten), survive `setData()`, and are refused for users in read-only mode.
+  - Range statistics (averages, top/bottom cut-offs, duplicate counts, scale bounds) are cached per rule and recomputed only when a cell inside the rule's range changes.
+  - New CSS custom properties `--ls-data-bar-color` and `--ls-data-bar-negative-color`. New exports: `ConditionalFormatEvaluator`, `normalizeConditionalRule()`, `describeCondition()`, `conditionalFormatPreset()`, `adjustRulesForStructureChange()`, `clearRulesInRange()`, `rangeToA1()`, `parseA1Range()`, `Y11nConditionalFormatDialog` and the `ConditionalFormat*` types.
+
+### Fixed
+
+- Selected cells with a background color of their own (from a format, and now from a conditional format) show the selection tint over the fill. The inline background used to hide it, leaving only the active cell's outline.
+
 ## [1.4.0] - 2026-11-10
 
 ### Added

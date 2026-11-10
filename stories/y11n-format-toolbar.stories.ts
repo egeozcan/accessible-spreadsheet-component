@@ -3,7 +3,11 @@ import type { Meta, StoryObj } from '@storybook/web-components-vite';
 import '../src/y11n-spreadsheet.js';
 import '../src/components/y11n-format-toolbar.js';
 import type { Y11nSpreadsheet } from '../src/y11n-spreadsheet.js';
-import type { Y11nFormatToolbar, FormatActionDetail } from '../src/components/y11n-format-toolbar.js';
+import type {
+  Y11nFormatToolbar,
+  FormatActionDetail,
+  ConditionalFormatActionDetail,
+} from '../src/components/y11n-format-toolbar.js';
 import { computeSelectionFormat } from '../src/components/y11n-format-toolbar.js';
 import { cellKey } from '../src/types.js';
 import { gridFromRows } from './helpers.js';
@@ -173,6 +177,14 @@ export const ToolbarIntegration: StoryObj = {
       syncToolbar();
     }) as EventListener);
 
+    // The Conditional formatting menu: one-step rules, clear, and the rule manager
+    toolbar.addEventListener('conditional-format-action', ((e: CustomEvent<ConditionalFormatActionDetail>) => {
+      const { action } = e.detail;
+      if (action === 'manage') void el.openConditionalFormatManager();
+      else if (action === 'clear') el.clearSelectionConditionalFormats();
+      else el.applyConditionalFormatPreset(action);
+    }) as EventListener);
+
     wrapper.appendChild(toolbar);
     wrapper.appendChild(el);
     return wrapper;
@@ -185,7 +197,8 @@ export const ToolbarIntegration: StoryObj = {
 - Select cells → click **B** to bold
 - Use color pickers to change text/background color
 - **Ctrl+B**, **Ctrl+I**, **Ctrl+U** keyboard shortcuts work too
-- **Ctrl+Z** to undo formatting changes`,
+- **Ctrl+Z** to undo formatting changes
+- Select the salaries and open the **Conditional formatting** menu: highlight above average, add data bars, or manage the rules`,
       },
     },
   },

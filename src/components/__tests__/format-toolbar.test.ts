@@ -181,5 +181,115 @@ describe('Y11nFormatToolbar', () => {
       }
     });
   });
+
+  describe('conditional formatting menu', () => {
+    const root = () => toolbar.shadowRoot!;
+    const button = () => root().querySelector('[aria-label="Conditional formatting"]') as HTMLButtonElement;
+    const menu = () => root().querySelector('[role="menu"]') as HTMLElement | null;
+    const items = () => [...root().querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const key = (el: Element, name: string) => {
+      const event = new KeyboardEvent('keydown', { key: name, bubbles: true, composed: true, cancelable: true });
+      el.dispatchEvent(event);
+      return event;
+    };
+
+    async function open() {
+      button().click();
+      await toolbar.updateComplete;
+      await Promise.resolve();
+    }
+
+    it('is a menu button that is closed at first', () => {
+      expect(button().getAttribute('aria-haspopup')).toBe('menu');
+      expect(button().getAttribute('aria-expanded')).toBe('false');
+      expect(menu()).toBeNull();
+    });
+
+    it('opens on click and focuses the first item', async () => {
+      await open();
+      expect(button().getAttribute('aria-expanded')).toBe('true');
+      expect(items().map((i) => i.textContent)).toEqual([
+        'Highlight duplicate values',
+        'Highlight unique values',
+        'Highlight above average',
+        'Highlight below average',
+        'Highlight top 10',
+        'Highlight bottom 10',
+        'Color scale',
+        'Data bars',
+        'Icon set',
+        'Clear rules from selection',
+        'Manage rules\u2026',
+      ]);
+      expect(root().activeElement).toBe(items()[0]);
+    });
+
+    it('moves through the items with the arrow keys, Home and End', async () => {
+      await open();
+      const all = items();
+      expect(key(all[0], 'ArrowDown').defaultPrevented).toBe(true);
+      expect(root().activeElement).toBe(all[1]);
+      key(all[1], 'ArrowUp');
+      key(all[0], 'ArrowUp');
+      expect(root().activeElement).toBe(all[all.length - 1]);
+      key(all[all.length - 1], 'Home');
+      expect(root().activeElement).toBe(all[0]);
+      key(all[0], 'End');
+      expect(root().activeElement).toBe(all[all.length - 1]);
+      // Left/Right are not passed on to the toolbar while the menu is open
+      key(all[all.length - 1], 'ArrowRight');
+      expect(root().activeElement).toBe(all[all.length - 1]);
+    });
+
+    it('opens from the keyboard with ArrowDown and ArrowUp', async () => {
+      key(button(), 'ArrowUp');
+      await toolbar.updateComplete;
+      await Promise.resolve();
+      const all = items();
+      expect(root().activeElement).toBe(all[all.length - 1]);
+    });
+
+    it('closes on Escape and returns focus to the button', async () => {
+      await open();
+      key(items()[2], 'Escape');
+      await toolbar.updateComplete;
+      expect(menu()).toBeNull();
+      expect(root().activeElement).toBe(button());
+    });
+
+    it('closes when something outside is pressed', async () => {
+      await open();
+      document.body.dispatchEvent(new Event('pointerdown', { bubbles: true, composed: true }));
+      await toolbar.updateComplete;
+      expect(menu()).toBeNull();
+    });
+
+    it('dispatches conditional-format-action and closes when an item is chosen', async () => {
+      const handler = vi.fn();
+      const formatHandler = vi.fn();
+      toolbar.addEventListener('conditional-format-action', handler);
+      toolbar.addEventListener('format-action', formatHandler);
+      await open();
+      (root().querySelector('[data-action="aboveAverage"]') as HTMLElement).click();
+      await toolbar.updateComplete;
+
+      expect(handler).toHaveBeenCalledOnce();
+      expect(handler.mock.calls[0][0].detail).toEqual({ action: 'aboveAverage' });
+      // Hosts that pass every format-action on to setRangeFormat are not affected
+      expect(formatHandler).not.toHaveBeenCalled();
+      expect(menu()).toBeNull();
+      expect(root().activeElement).toBe(button());
+
+      await open();
+      (root().querySelector('[data-action="manage"]') as HTMLElement).click();
+      expect(handler.mock.calls[1][0].detail).toEqual({ action: 'manage' });
+    });
+
+    it('keeps the menu items out of the toolbar arrow-key order', async () => {
+      await open();
+      key(button(), 'ArrowRight');
+      expect((root().activeElement as HTMLElement).getAttribute('aria-label')).toBe('Clear formatting');
+    });
+  });
 });
 

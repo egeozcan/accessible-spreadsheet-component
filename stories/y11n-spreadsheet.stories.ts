@@ -1292,3 +1292,71 @@ export const Filter: StoryObj = {
     },
   },
 };
+
+export const ConditionalFormatting: StoryObj = {
+  name: 'Conditional Formatting',
+  render: () => {
+    const rows: string[][] = [
+      ['Region', 'Sales', 'Growth', 'Stock', 'Score', 'Status'],
+      ['North', '120', '12', '40', '88', 'ok'],
+      ['South', '80', '-5', '15', '42', 'overdue'],
+      ['East', '200', '30', '70', '95', 'ok'],
+      ['West', '45', '-20', '5', '12', 'overdue'],
+      ['Central', '150', '8', '55', '67', 'ok'],
+      ['Islands', '80', '0', '30', '51', 'pending'],
+    ];
+    const column = (col: number) => ({ start: { row: 1, col }, end: { row: 6, col } });
+    const apply = (element?: Element) => {
+      const el = element as Y11nSpreadsheet | undefined;
+      if (el && !el.dataset.formatted) {
+        el.dataset.formatted = 'true';
+        el.updateComplete.then(() =>
+          // In priority order: the first rule wins where two set the same thing
+          el.setConditionalFormats([
+            {
+              range: { start: { row: 1, col: 0 }, end: { row: 6, col: 5 } },
+              condition: { type: 'formula', formula: '=$F2="overdue"' },
+              format: { bold: true, textColor: '#9c0006' },
+              label: 'overdue',
+            },
+            {
+              range: column(1),
+              condition: { type: 'duplicates' },
+              format: { backgroundColor: '#ffc7ce', textColor: '#9c0006' },
+            },
+            {
+              range: column(1),
+              condition: { type: 'aboveAverage' },
+              format: { backgroundColor: '#c6efce', textColor: '#006100' },
+            },
+            { range: column(2), condition: { type: 'dataBar' } },
+            {
+              range: column(3),
+              condition: {
+                type: 'colorScale',
+                min: { type: 'min', color: '#f8696b' },
+                mid: { type: 'percentile', value: 50, color: '#ffeb84' },
+                max: { type: 'max', color: '#63be7b' },
+              },
+            },
+            { range: column(4), condition: { type: 'iconSet', icons: 'arrows5' } },
+          ])
+        );
+      }
+    };
+    return html`
+      <y11n-spreadsheet .rows=${20} .cols=${8} .data=${gridFromRows(rows)} ${ref(apply)}></y11n-spreadsheet>
+    `;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `Rules live beside the data and are merged over the cells' own formats when they are drawn, so copy, sort and export still see the real formats. **Sales** highlights duplicates and values above average, **Growth** has data bars (negative ones grow left from the zero axis), **Stock** a color scale, **Score** an icon set, and a formula rule makes overdue rows bold.
+
+Edit a number and the whole range restyles. Move over the cells with a screen reader on: each one says why it is formatted ("above average", "data bar 64%", "up arrow"), so color never carries the meaning alone. Icons differ in shape, and forced-colors mode replaces fills with an edge marker and a meter line.
+
+Press **Alt+Shift+C** to open the rule manager: add, edit, reorder and delete rules, and set stop-if-true. Every change is one undo step (Ctrl+Z).`,
+      },
+    },
+  },
+};
