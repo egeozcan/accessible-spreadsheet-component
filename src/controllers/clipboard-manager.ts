@@ -1,4 +1,5 @@
 import {
+  type CellData,
   type CellFormat,
   type GridData,
   type NumberFormatOptions,
@@ -28,6 +29,24 @@ export interface PasteUpdate {
   format?: CellFormat;
 }
 
+/** Options for `ClipboardManager.paste()`. */
+export interface PasteOptions {
+  /**
+   * Paste values instead of formulas: formulas copied from this grid paste
+   * as the values they had when copied. Formats are still returned; callers
+   * that paste values only drop them.
+   */
+  values?: boolean;
+  /** Swap rows and columns: the first copied row becomes the first column. */
+  transpose?: boolean;
+}
+
+/** Swap the rows and columns of a ragged 2-D array, padding short rows with `empty`. */
+function transposeRows<T>(rows: T[][], empty: () => T): T[][] {
+  const width = rows.reduce((w, r) => Math.max(w, r.length), 0);
+  return Array.from({ length: width }, (_, c) => rows.map((r) => (c < r.length ? r[c] : empty())));
+}
+
 /**
  * ClipboardManager - Handles copy, cut, and paste operations
  * using the system clipboard API with TSV and HTML table formats.
@@ -38,6 +57,8 @@ export class ClipboardManager {
   /** The rows of `_copySourceRange` that were copied; null for all of them */
   private _copySourceRows: number[] | null = null;
   private _copySourceData: GridData | null = null;
+  /** Computed values of the copied formula cells, for pasting values */
+  private _copySourceValues: Map<string, string> | null = null;
   /** The TSV text we last wrote to the clipboard, used to detect external overwrites */
   private _lastWrittenText: string | null = null;
 
@@ -51,23 +72,33 @@ export class ClipboardManager {
    * @param rows - The rows of the range to copy, ascending (default: all of
    *   them). Rows left out (e.g. hidden by a filter) are skipped, so the copy
    *   holds the remaining rows next to each other.
+   * @param valueOf - The computed, unformatted value of a formula cell, kept
+   *   so a later values-only paste can paste it (default: its display value)
    */
-  async copy(data: GridData, range: SelectionRange, rows?: number[]): Promise<void> {
+  async copy(
+    data: GridData,
+    range: SelectionRange,
+    rows?: number[],
+    valueOf?: (key: string, cell: CellData) => string
+  ): Promise<void> {
     this._copySourceRange = range;
     const copied = rows ?? rangeRows(range);
     this._copySourceRows = rows ?? null;
     // Snapshot only the cells in the range so later mutations (e.g. cut) don't invalidate the data
     const snapshot: GridData = new Map();
+    const values = new Map<string, string>();
     for (const r of copied) {
       for (let c = range.start.col; c <= range.end.col; c++) {
         const key = cellKey(r, c);
         const cell = data.get(key);
         if (cell) {
           snapshot.set(key, { ...cell });
+          if (cell.rawValue.startsWith('=')) values.set(key, valueOf ? valueOf(key, cell) : cell.displayValue);
         }
       }
     }
     this._copySourceData = snapshot;
+    this._copySourceValues = values;
     const tsv = this.serializeRange(data, range, copied);
     this._lastWrittenText = tsv;
     const htmlStr = this._serializeRangeAsHTML(data, range, copied);
@@ -97,11 +128,17 @@ export class ClipboardManager {
    * @param data - The grid data to read cell values from
    * @param range - The rectangular range to cut
    * @param rows - The rows of the range to cut (default: all), as for `copy()`
+   * @param valueOf - As for `copy()`
    * @returns Array of cell keys (in `"row:col"` format) that were included in the cut
    */
-  async cut(data: GridData, range: SelectionRange, rows?: number[]): Promise<string[]> {
+  async cut(
+    data: GridData,
+    range: SelectionRange,
+    rows?: number[],
+    valueOf?: (key: string, cell: CellData) => string
+  ): Promise<string[]> {
     const cutRows = rows ?? rangeRows(range);
-    await this.copy(data, range, cutRows);
+    await this.copy(data, range, cutRows, valueOf);
     const keys: string[] = [];
     for (const r of cutRows) {
       for (let c = range.start.col; c <= range.end.col; c++) {
@@ -122,6 +159,8 @@ export class ClipboardManager {
    * @param maxCols - Grid column count (for bounds clamping)
    * @param rowFor - The grid row the `i`-th pasted row goes to, or -1 to drop
    *   it (default: `targetRow + i`). Lets a paste skip rows hidden by a filter.
+   *   With `transpose`, `i` counts the pasted (transposed) rows.
+   * @param options - Paste values instead of formulas, or transpose
    * @returns Array of cell updates to apply, or null if clipboard is empty/inaccessible
    */
   async paste(
@@ -129,7 +168,8 @@ export class ClipboardManager {
     targetCol: number,
     maxRows: number,
     maxCols: number,
-    rowFor?: RowMapper
+    rowFor?: RowMapper,
+    options: PasteOptions = {}
   ): Promise<PasteUpdate[] | null> {
     const toRow = rowFor ?? ((i: number) => targetRow + i);
     // Try internal paste with formula reference adjustment, but only if
@@ -147,7 +187,7 @@ export class ClipboardManager {
         clipboardMatchesInternal = true;
       }
       if (clipboardMatchesInternal) {
-        const internalResult = this._pasteInternal(targetRow, targetCol, maxRows, maxCols, toRow);
+        const internalResult = this._pasteInternal(targetRow, targetCol, maxRows, maxCols, toRow, options);
         if (internalResult) return internalResult;
       }
     }
@@ -159,9 +199,10 @@ export class ClipboardManager {
         if (item.types.includes('text/html')) {
           const blob = await item.getType('text/html');
           const htmlText = await blob.text();
-          const parsed = this.parseHTMLTableWithFormat(htmlText);
+          const parsed = this.parseHTMLTableWithFormat(htmlText, options.values);
           if (parsed) {
-            return this._applyParsedRowsWithFormat(parsed, targetCol, maxRows, maxCols, toRow);
+            const rows = options.transpose ? transposeRows(parsed, () => ({ value: '' })) : parsed;
+            return this._applyParsedRowsWithFormat(rows, targetCol, maxRows, maxCols, toRow);
           }
         }
       }
@@ -177,6 +218,10 @@ export class ClipboardManager {
       return null;
     }
 
+    if (options.transpose) {
+      const rows = parseDelimited(text, '\t').map((r) => r.map((value) => ({ value })));
+      return this._applyParsedRowsWithFormat(transposeRows(rows, () => ({ value: '' })), targetCol, maxRows, maxCols, toRow);
+    }
     return this.parseTSV(text, targetRow, targetCol, maxRows, maxCols, toRow);
   }
 
@@ -189,31 +234,36 @@ export class ClipboardManager {
     targetCol: number,
     maxRows: number,
     maxCols: number,
-    rowFor: RowMapper = (i) => targetRow + i
+    rowFor: RowMapper = (i) => targetRow + i,
+    options: PasteOptions = {}
   ): PasteUpdate[] | null {
     const srcRange = this._copySourceRange;
     const srcData = this._copySourceData;
     if (!srcRange || !srcData) return null;
 
-    const colOffset = targetCol - srcRange.start.col;
+    const srcRows = this._copySourceRows ?? rangeRows(srcRange);
     const updates: PasteUpdate[] = [];
 
-    (this._copySourceRows ?? rangeRows(srcRange)).forEach((r, i) => {
-      const newRow = rowFor(i);
-      if (newRow < 0 || newRow >= maxRows) return;
-      // Each row shifts its references by how far it actually moved, which
-      // differs per row when copied or pasted rows skip hidden ones
-      const rowOffset = newRow - r;
+    srcRows.forEach((r, i) => {
       for (let c = srcRange.start.col; c <= srcRange.end.col; c++) {
-        const newCol = c + colOffset;
-        if (newCol >= maxCols) continue;
+        const j = c - srcRange.start.col;
+        // Transposed, the i-th copied row becomes the i-th pasted column
+        const newRow = rowFor(options.transpose ? j : i);
+        const newCol = targetCol + (options.transpose ? i : j);
+        if (newRow < 0 || newRow >= maxRows || newCol >= maxCols) continue;
 
-        const cell = srcData.get(cellKey(r, c));
+        const key = cellKey(r, c);
+        const cell = srcData.get(key);
         let value = cell?.rawValue ?? '';
 
-        // Adjust formula references
         if (value.startsWith('=')) {
-          value = this.adjustFormulaReferences(value, rowOffset, colOffset);
+          if (options.values) {
+            value = this._copySourceValues?.get(key) ?? cell?.displayValue ?? '';
+          } else {
+            // Each cell shifts its references by how far it actually moved,
+            // which differs per row when copied or pasted rows skip hidden ones
+            value = this.adjustFormulaReferences(value, newRow - r, newCol - c);
+          }
         }
 
         const update: PasteUpdate = { id: cellKey(newRow, newCol), value };
@@ -235,7 +285,10 @@ export class ClipboardManager {
    * merged ranges: the value lands in the merge's top-left slot and the other
    * slots it covers become empty cells, so later values keep their columns.
    */
-  parseHTMLTableWithFormat(html: string): Array<Array<{ value: string; format?: CellFormat }>> | null {
+  parseHTMLTableWithFormat(
+    html: string,
+    values = false
+  ): Array<Array<{ value: string; format?: CellFormat }>> | null {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
     const table = doc.querySelector('table');
@@ -254,8 +307,10 @@ export class ClipboardManager {
         // Skip slots already covered by a rowspan from a row above
         while (row[col]) col++;
 
+        // data-raw holds the cell's formula; pasting values takes the shown text instead
         const raw = el.getAttribute('data-raw');
-        const value = raw ?? (el.textContent ?? '').trim();
+        const text = (el.textContent ?? '').trim();
+        const value = raw !== null && !(values && raw.startsWith('=')) ? raw : text;
 
         // Try lossless data-format first, then parse inline styles
         let format: CellFormat | undefined;

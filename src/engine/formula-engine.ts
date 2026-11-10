@@ -58,9 +58,13 @@ interface ParserState {
 /** Maximum nesting depth for formula evaluation to prevent stack overflow from deeply nested formulas */
 const MAX_EVAL_DEPTH = 64;
 
+/** Sample/population variance and standard deviation functions */
+const STATISTICAL_FUNCTIONS = ['STDEV', 'STDEV.S', 'STDEV.P', 'VAR', 'VAR.S', 'VAR.P'];
+
 /** Set of aggregate function names that should have RangeValue flattened into individual args */
 const AGGREGATE_FUNCTIONS = new Set([
   'SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'COUNTA', 'CONCAT', 'PRODUCT', 'MEDIAN',
+  ...STATISTICAL_FUNCTIONS, 'NPV',
 ]);
 
 /** Set of volatile function names whose results should never be cached */
@@ -69,6 +73,16 @@ const VOLATILE_FUNCTIONS = new Set(['NOW', 'TODAY']);
 /** Aggregates that propagate an error found anywhere in their arguments (COUNT/COUNTA skip them) */
 const ERROR_PROPAGATING_AGGREGATES = new Set([
   'SUM', 'AVERAGE', 'MIN', 'MAX', 'CONCAT', 'PRODUCT', 'MEDIAN',
+  ...STATISTICAL_FUNCTIONS, 'NPV',
+]);
+
+/**
+ * Information functions that inspect their argument instead of using it, so
+ * an error in it is passed in (not thrown) and an empty referenced cell is
+ * passed as undefined (not 0).
+ */
+const INFO_FUNCTIONS = new Set([
+  'ISBLANK', 'ISNUMBER', 'ISTEXT', 'ISLOGICAL', 'ISERROR', 'ISERR', 'ISNA',
 ]);
 
 /**
@@ -939,6 +953,13 @@ export class FormulaEngine {
           ident += input[i];
           i++;
         }
+        // Dotted function names such as STDEV.S or VAR.P
+        while (
+          !ident.includes('$') && input[i] === '.' && /[A-Za-z]/.test(input[i + 1] ?? '')
+        ) {
+          ident += input[i++];
+          while (i < input.length && /[A-Za-z0-9_]/.test(input[i])) ident += input[i++];
+        }
 
         // Strip $ for structure checks, but keep original for token value
         const stripped = ident.replace(/\$/g, '');
@@ -1175,6 +1196,10 @@ export class FormulaEngine {
       return this._parseIFS(s);
     }
 
+    if (INFO_FUNCTIONS.has(name) && this._functions.has(name)) {
+      return this._parseInfoFunction(s, name);
+    }
+
     // An omitted argument (e.g. the 4th in XLOOKUP(x, A:A, B:B, , -1)) is
     // passed as undefined, which functions treat as "use the default".
     const tolerantIndex = ERROR_TOLERANT_ARGS[name];
@@ -1233,6 +1258,44 @@ export class FormulaEngine {
 
     // An empty cell returned by e.g. VLOOKUP reads as 0, matching how it displays
     return fn(ctx, ...args) ?? 0;
+  }
+
+  /**
+   * Parse an information function (ISBLANK, ISERROR, ...) of one argument.
+   * A lone cell reference is resolved without turning an empty cell into 0,
+   * and an error in the argument is passed in as its code instead of thrown.
+   * Called after LPAREN has already been consumed.
+   */
+  private _parseInfoFunction(s: ParserState, name: string): unknown {
+    let value: unknown;
+    const first = this._peek(s);
+    if (first.type === 'RPAREN') throw new Error('#VALUE!');
+    const savedPos = s.pos;
+    try {
+      if (first.type === 'REF' && s.tokens[s.pos + 1]?.type === 'RPAREN') {
+        this._consume(s);
+        const coord = refToCoord(first.value.replace(/\$/g, ''));
+        const key = cellKey(coord.row, coord.col);
+        const cell = this._data.get(key);
+        if (!cell || cell.rawValue === '') {
+          this._trackDep(key);
+          value = undefined;
+        } else {
+          value = this._resolveRef(first.value);
+        }
+      } else {
+        value = this._parseComparison(s);
+      }
+    } catch (e) {
+      if (e instanceof EvalDepthError) throw e;
+      s.pos = savedPos;
+      this._skipArgument(s);
+      value = toErrorCode(e);
+    }
+    if (this._peek(s).type !== 'RPAREN') throw new Error('#VALUE!');
+    this._consume(s, 'RPAREN');
+    const fn = this._functions.get(name)!;
+    return fn(this._createContext(), value);
   }
 
   /**
@@ -2027,6 +2090,106 @@ export class FormulaEngine {
       return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
     });
 
+    // Sample (n - 1) and population (n) variance / standard deviation.
+    // Text and booleans in ranges are ignored, as in Excel.
+    const variance = (args: unknown[], sample: boolean): number => {
+      const nums = numericArgs(args);
+      const n = nums.length;
+      if (n < (sample ? 2 : 1)) throw new Error('#DIV/0!');
+      const mean = nums.reduce((a, b) => a + b, 0) / n;
+      const ss = nums.reduce((a, b) => a + (b - mean) ** 2, 0);
+      return ss / (sample ? n - 1 : n);
+    };
+    for (const name of ['VAR', 'VAR.S']) {
+      this.registerFunction(name, (_ctx, ...args) => variance(args, true));
+    }
+    this.registerFunction('VAR.P', (_ctx, ...args) => variance(args, false));
+    for (const name of ['STDEV', 'STDEV.S']) {
+      this.registerFunction(name, (_ctx, ...args) => Math.sqrt(variance(args, true)));
+    }
+    this.registerFunction('STDEV.P', (_ctx, ...args) => Math.sqrt(variance(args, false)));
+
+    // SUMPRODUCT: equal-shaped arrays multiplied element-wise; non-numbers are 0.
+    this.registerFunction('SUMPRODUCT', (_ctx, ...arrays) => {
+      if (arrays.length === 0) throw new Error('#VALUE!');
+      const [rows, cols] = rangeShape(arrays[0]);
+      const lists = arrays.map((a) => {
+        const [r, c] = rangeShape(a);
+        if (r !== rows || c !== cols) throw new Error('#VALUE!');
+        return toValueList(a);
+      });
+      let total = 0;
+      for (let i = 0; i < rows * cols; i++) {
+        let product = 1;
+        for (const list of lists) {
+          const v = list[i];
+          if (isErrorCode(v)) throw new Error(v);
+          product *= typeof v === 'number' ? v : 0;
+        }
+        total += product;
+      }
+      return total;
+    });
+
+    // ─── Financial ──────────────────────────────────────
+    // Excel's sign convention: money paid out is negative, received positive.
+    // type 1 means payments at the start of each period, 0 (default) at the end.
+
+    const finArgs = (rate: unknown, nper: unknown, type: unknown) => {
+      const r = toNumber(rate);
+      const n = toNumber(nper);
+      const t = type === undefined ? 0 : toNumber(type) ? 1 : 0;
+      return { r, n, t };
+    };
+
+    this.registerFunction('PMT', (_ctx, rate, nper, pv, fv?, type?) => {
+      const { r, n, t } = finArgs(rate, nper, type);
+      const p = toNumber(pv);
+      const f = fv === undefined ? 0 : toNumber(fv);
+      if (n === 0) throw new Error('#NUM!');
+      if (r === 0) return -(p + f) / n;
+      const g = Math.pow(1 + r, n);
+      return -(r * (p * g + f)) / ((1 + r * t) * (g - 1));
+    });
+
+    this.registerFunction('FV', (_ctx, rate, nper, pmt, pv?, type?) => {
+      const { r, n, t } = finArgs(rate, nper, type);
+      const m = toNumber(pmt);
+      const p = pv === undefined ? 0 : toNumber(pv);
+      if (r === 0) return -(p + m * n);
+      const g = Math.pow(1 + r, n);
+      return -(p * g + (m * (1 + r * t) * (g - 1)) / r);
+    });
+
+    this.registerFunction('PV', (_ctx, rate, nper, pmt, fv?, type?) => {
+      const { r, n, t } = finArgs(rate, nper, type);
+      const m = toNumber(pmt);
+      const f = fv === undefined ? 0 : toNumber(fv);
+      if (r === 0) return -(f + m * n);
+      const g = Math.pow(1 + r, n);
+      return -(f + (m * (1 + r * t) * (g - 1)) / r) / g;
+    });
+
+    // NPV: discounted values starting one period from now; text and blanks skipped.
+    this.registerFunction('NPV', (_ctx, rate, ...values) => {
+      const r = toNumber(rate);
+      if (r === -1) throw new Error('#DIV/0!');
+      const nums = numericArgs(values);
+      if (nums.length === 0) throw new Error('#VALUE!');
+      return nums.reduce((sum, v, i) => sum + v / Math.pow(1 + r, i + 1), 0);
+    });
+
+    // ─── Information ────────────────────────────────────
+    // Parsed by _parseInfoFunction: errors arrive as their code, empty cells as undefined.
+
+    this.registerFunction('ISBLANK', (_ctx, v) => v === undefined);
+    this.registerFunction('ISNUMBER', (_ctx, v) => typeof v === 'number');
+    this.registerFunction('ISLOGICAL', (_ctx, v) => typeof v === 'boolean');
+    this.registerFunction('ISTEXT', (_ctx, v) => typeof v === 'string' && !isErrorCode(v));
+    this.registerFunction('ISERROR', (_ctx, v) => isErrorCode(v));
+    this.registerFunction('ISERR', (_ctx, v) => isErrorCode(v) && v !== '#N/A');
+    this.registerFunction('ISNA', (_ctx, v) => v === '#N/A');
+
     // ─── String ─────────────────────────────────────────
 
     this.registerFunction('TEXTJOIN', (_ctx, delimiter, ignoreEmpty, ...texts) => {
@@ -2184,6 +2347,24 @@ export class FormulaEngine {
     this.registerFunction('MONTH', (_ctx, serial) => serialArg(serial).getUTCMonth() + 1);
 
     this.registerFunction('DAY', (_ctx, serial) => serialArg(serial).getUTCDate());
+
+    // EDATE: same day n months later, clamped to the end of a shorter month.
+    this.registerFunction('EDATE', (_ctx, start, months) => {
+      const d = serialArg(start);
+      const m = d.getUTCMonth() + Math.trunc(toNumber(months));
+      const lastDay = new Date(Date.UTC(d.getUTCFullYear(), m + 1, 0)).getUTCDate();
+      const serial = dateToSerial(d.getUTCFullYear(), m, Math.min(d.getUTCDate(), lastDay));
+      if (serial < 0) throw new Error('#NUM!');
+      return serial;
+    });
+
+    // EOMONTH: last day of the month n months later.
+    this.registerFunction('EOMONTH', (_ctx, start, months) => {
+      const d = serialArg(start);
+      const serial = dateToSerial(d.getUTCFullYear(), d.getUTCMonth() + Math.trunc(toNumber(months)) + 1, 0);
+      if (serial < 0) throw new Error('#NUM!');
+      return serial;
+    });
 
     this.registerFunction('WEEKDAY', (_ctx, serial, returnType?) => {
       const day = serialArg(serial).getUTCDay(); // 0 = Sunday

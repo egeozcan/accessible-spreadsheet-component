@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Typed input is recognised as in Excel: `15%`, `$1,200` (also `€`, `£`, `¥`), `1,234.5`, `2026-01-05`, `14:30` and `2026-01-05 14:30` are stored as numbers and the cell gets the matching number format (unless it already has one of that type). A plain number typed into a percent cell is a percentage (`13` → 13%, like Excel's automatic percent entry). Percent and date cells are edited as displayed. The `raw-input` attribute turns this off; `parseInput()` is exported.
+- Status bar under the grid with the Average, Count and Sum of the selection (skipping filtered rows), and Alt+Shift+S to announce them. `hide-status-bar` attribute, `status-bar` CSS part, `--ls-status-bg` / `--ls-status-color`.
+- Paste values (Ctrl+Shift+V) and a Paste Special dialog (Ctrl+Alt+V) with All / Values / Formats and Transpose. API: `paste({ mode, transpose })`, `openPasteSpecial()`. `ClipboardManager.paste()` takes `{ values, transpose }` options, and `copy()` / `cut()` an optional function giving formula cells' computed values.
+- Shortcuts: Alt+= (AutoSum), Ctrl+; / Ctrl+Shift+; (today's date / the current time), Ctrl+' / Ctrl+Shift+' (formula / value from the cell above), Ctrl+Shift+1 / 3 / 4 / 5 / ` (number, date, currency, percent, general format).
+- The fill handle continues single dates, day and month names, and text ending in a number (`Item 1` → `Item 2`). Double-clicking it fills down as far as the adjacent column has data; Ctrl+Alt+D does the same when the selection has no empty cells. `seriesFor()` is exported.
+- Formula functions: `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISLOGICAL`, `ISERROR`, `ISERR`, `ISNA`, `STDEV`, `STDEV.S`, `STDEV.P`, `VAR`, `VAR.S`, `VAR.P`, `SUMPRODUCT`, `EDATE`, `EOMONTH`, `PMT`, `FV`, `PV`, `NPV`. Function names may contain dots.
+
 ## [1.3.0] - 2026-11-08
 
 ### Added

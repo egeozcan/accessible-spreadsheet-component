@@ -5,7 +5,7 @@ export type { FormatActionDetail } from './components/y11n-format-toolbar.js';
 export { FormulaEngine, RangeValue } from './engine/formula-engine.js';
 export { SelectionManager } from './controllers/selection-manager.js';
 export { ClipboardManager } from './controllers/clipboard-manager.js';
-export type { PasteUpdate } from './controllers/clipboard-manager.js';
+export type { PasteUpdate, PasteOptions } from './controllers/clipboard-manager.js';
 export type {
   CellCoord,
   CellData,
@@ -44,4 +44,8 @@ export { adjustFormulaForStructureChange, shiftFormulaReferences } from './utils
 export type { StructureChange } from './utils/references.js';
 export { compareSortValues, sortValueOf } from './utils/sort.js';
 export type { SortValue } from './utils/sort.js';
-export type { CSVExportOptions, CSVImportOptions, FindOptions } from './y11n-spreadsheet.js';
+export type { CSVExportOptions, CSVImportOptions, FindOptions, PasteMode, PasteSpecialOptions } from './y11n-spreadsheet.js';
+export { parseInput } from './utils/input-parse.js';
+export type { ParsedInput } from './utils/input-parse.js';
+export { seriesFor } from './utils/series.js';
+export type { SeriesCell } from './utils/series.js';
