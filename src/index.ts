@@ -1,7 +1,16 @@
 export { Y11nSpreadsheet } from './y11n-spreadsheet.js';
 export { Y11nFormulaBar } from './components/y11n-formula-bar.js';
 export { Y11nFormatToolbar, computeSelectionFormat } from './components/y11n-format-toolbar.js';
-export type { FormatActionDetail } from './components/y11n-format-toolbar.js';
+export { Y11nConditionalFormatDialog } from './components/y11n-conditional-format-dialog.js';
+export type {
+  ConditionalFormatSaveDetail,
+  ConditionalFormatMoveDetail,
+} from './components/y11n-conditional-format-dialog.js';
+export type {
+  FormatActionDetail,
+  ConditionalFormatActionDetail,
+  ConditionalFormatMenuAction,
+} from './components/y11n-format-toolbar.js';
 export { FormulaEngine, RangeValue } from './engine/formula-engine.js';
 export { SelectionManager } from './controllers/selection-manager.js';
 export { ClipboardManager } from './controllers/clipboard-manager.js';
@@ -36,6 +45,20 @@ export type {
   FilterColumn,
   FilterInfo,
   FilterChangeDetail,
+  ConditionalFormatRule,
+  ConditionalFormatRuleInput,
+  ConditionalFormatCondition,
+  ConditionalFormatStyle,
+  ConditionalFormatResult,
+  ConditionalFormatPreset,
+  ConditionalFormatChangeDetail,
+  ConditionalOperand,
+  ConditionalComparison,
+  ConditionalTextOperator,
+  ConditionalDatePeriod,
+  ConditionalThreshold,
+  ConditionalColorStop,
+  ConditionalIconSetName,
 } from './types.js';
 export { cellKey, parseKey, colToLetter, letterToCol, refToCoord, coordToRef, formatsEqual, formatNumber, dateToSerial, dateSerialToDate } from './types.js';
 export { parseDelimited, serializeDelimited, quoteDelimitedField } from './utils/delimited.js';
@@ -49,3 +72,17 @@ export { parseInput } from './utils/input-parse.js';
 export type { ParsedInput } from './utils/input-parse.js';
 export { seriesFor } from './utils/series.js';
 export type { SeriesCell } from './utils/series.js';
+export {
+  ConditionalFormatEvaluator,
+  normalizeConditionalRule,
+  describeCondition,
+  conditionalFormatPreset,
+  adjustRulesForStructureChange,
+  clearRulesInRange,
+  rangeToA1,
+  parseA1Range,
+  ICON_SET_LABELS,
+  ICON_SET_NAMES,
+  HIGHLIGHT_STYLES,
+} from './utils/conditional-format.js';
+export type { ConditionalFormatSource } from './utils/conditional-format.js';

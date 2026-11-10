@@ -42,6 +42,7 @@ const spreadsheetStories: StoryMeta[] = [
   { id: 'components-y11n-spreadsheet--column-widths', name: 'Column Widths', waitFor: 'y11n-spreadsheet' },
   { id: 'components-y11n-spreadsheet--frozen-panes', name: 'Frozen Panes', waitFor: 'y11n-spreadsheet' },
   { id: 'components-y11n-spreadsheet--filter', name: 'Filter', waitFor: 'y11n-spreadsheet' },
+  { id: 'components-y11n-spreadsheet--conditional-formatting', name: 'Conditional Formatting', waitFor: 'y11n-spreadsheet' },
 ];
 
 const toolbarStories: StoryMeta[] = [

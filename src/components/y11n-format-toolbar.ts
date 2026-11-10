@@ -1,5 +1,33 @@
-import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { LitElement, html, css, nothing } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
+import type { ConditionalFormatPreset } from '../types.js';
+
+/**
+ * What the Conditional formatting menu asks for: a one-step rule for the
+ * selection, clearing the selection's rules, or opening the rule manager.
+ */
+export type ConditionalFormatMenuAction = ConditionalFormatPreset | 'clear' | 'manage';
+
+/** Detail for the `conditional-format-action` event dispatched by the format toolbar. */
+export interface ConditionalFormatActionDetail {
+  action: ConditionalFormatMenuAction;
+}
+
+const CONDITIONAL_MENU: Array<[ConditionalFormatMenuAction, string] | null> = [
+  ['duplicates', 'Highlight duplicate values'],
+  ['unique', 'Highlight unique values'],
+  ['aboveAverage', 'Highlight above average'],
+  ['belowAverage', 'Highlight below average'],
+  ['top10', 'Highlight top 10'],
+  ['bottom10', 'Highlight bottom 10'],
+  null,
+  ['colorScale', 'Color scale'],
+  ['dataBar', 'Data bars'],
+  ['iconSet', 'Icon set'],
+  null,
+  ['clear', 'Clear rules from selection'],
+  ['manage', 'Manage rules\u2026'],
+];
 
 /** Detail for the `format-action` custom event dispatched by the format toolbar. */
 export interface FormatActionDetail {
@@ -32,7 +60,20 @@ export interface FormatActionDetail {
  * ></y11n-format-toolbar>
  * ```
  *
+ * The Conditional formatting menu fires its own event, which maps onto three
+ * spreadsheet methods:
+ *
+ * ```js
+ * toolbar.addEventListener('conditional-format-action', (e) => {
+ *   const { action } = e.detail;
+ *   if (action === 'manage') sheet.openConditionalFormatManager();
+ *   else if (action === 'clear') sheet.clearSelectionConditionalFormats();
+ *   else sheet.applyConditionalFormatPreset(action);
+ * });
+ * ```
+ *
  * @fires format-action - Dispatched when the user clicks a formatting button or changes a value
+ * @fires conditional-format-action - Dispatched when the user picks an item of the Conditional formatting menu
  */
 @customElement('y11n-format-toolbar')
 export class Y11nFormatToolbar extends LitElement {
@@ -47,6 +88,15 @@ export class Y11nFormatToolbar extends LitElement {
   @property({ type: String }) textAlign: 'left' | 'center' | 'right' = 'left';
   @property({ type: Number }) fontSize = 13;
   @property({ type: Boolean, attribute: 'read-only', reflect: true }) readOnly = false;
+
+  /** Whether the Conditional formatting menu is open */
+  @state() private _menuOpen = false;
+  private _menuCleanup: (() => void) | null = null;
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this._closeMenu(false);
+  }
 
   // ─── Styles ────────────────────────────────────────────
 
@@ -211,6 +261,50 @@ export class Y11nFormatToolbar extends LitElement {
       opacity: 0.4;
       cursor: not-allowed;
     }
+
+    .menu-wrapper {
+      position: relative;
+      display: inline-flex;
+    }
+
+    .menu-button {
+      gap: 3px;
+    }
+
+    .menu {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      min-width: 220px;
+      margin-top: 2px;
+      padding: 4px;
+      background: var(--ls-filter-menu-bg, #fff);
+      border: 1px solid var(--ls-border-color, #e0e0e0);
+      border-radius: 4px;
+      box-shadow: var(--ls-editor-shadow, 0 2px 6px rgba(0, 0, 0, 0.2));
+    }
+
+    .menu button {
+      justify-content: flex-start;
+      width: 100%;
+      padding: 0 8px;
+      white-space: nowrap;
+    }
+
+    .menu [role='separator'] {
+      height: 1px;
+      margin: 4px 0;
+      background: var(--ls-border-color, #e0e0e0);
+    }
+
+    button:focus-visible,
+    select:focus-visible {
+      outline: var(--ls-focus-ring, 2px solid #1a73e8);
+      outline-offset: 1px;
+    }
   `;
 
   // ─── Event Dispatching ─────────────────────────────────
@@ -230,7 +324,7 @@ export class Y11nFormatToolbar extends LitElement {
   private _handleToolbarKeydown(e: KeyboardEvent): void {
     const toolbar = e.currentTarget as HTMLElement;
     const focusable = Array.from(
-      toolbar.querySelectorAll('button:not(:disabled), select:not(:disabled), .color-wrapper')
+      toolbar.querySelectorAll('button:not(:disabled):not([role="menuitem"]), select:not(:disabled), .color-wrapper')
     ) as HTMLElement[];
 
     const current = focusable.findIndex(
@@ -255,6 +349,119 @@ export class Y11nFormatToolbar extends LitElement {
       const inner = el.querySelector('input, select, button') as HTMLElement | null;
       (inner ?? el).focus();
     }
+  }
+
+  // ─── Conditional Formatting Menu ───────────────────────
+
+  private _menuItems(): HTMLElement[] {
+    return [...this.renderRoot.querySelectorAll<HTMLElement>('.menu [role="menuitem"]:not(:disabled)')];
+  }
+
+  private async _openMenu(focus: 'first' | 'last' = 'first'): Promise<void> {
+    this._menuOpen = true;
+    if (!this._menuCleanup) {
+      // Clicking anywhere else closes the menu, like a native dropdown
+      const onPointerDown = (e: PointerEvent) => {
+        const wrapper = this.renderRoot.querySelector('.menu-wrapper');
+        if (wrapper && e.composedPath().includes(wrapper)) return;
+        this._closeMenu(false);
+      };
+      document.addEventListener('pointerdown', onPointerDown);
+      this._menuCleanup = () => document.removeEventListener('pointerdown', onPointerDown);
+    }
+    await this.updateComplete;
+    const items = this._menuItems();
+    (focus === 'first' ? items[0] : items[items.length - 1])?.focus();
+  }
+
+  private _closeMenu(focusButton: boolean): void {
+    this._menuCleanup?.();
+    this._menuCleanup = null;
+    if (!this._menuOpen) return;
+    this._menuOpen = false;
+    if (focusButton) this.renderRoot.querySelector<HTMLElement>('.menu-button')?.focus();
+  }
+
+  private _handleMenuButtonKeydown(e: KeyboardEvent): void {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      void this._openMenu(e.key === 'ArrowDown' ? 'first' : 'last');
+    }
+  }
+
+  private _handleMenuKeydown(e: KeyboardEvent): void {
+    // Arrow keys move inside the menu here, not along the toolbar
+    e.stopPropagation();
+    const items = this._menuItems();
+    const current = items.indexOf((this.renderRoot as ShadowRoot).activeElement as HTMLElement);
+    let next = -1;
+    if (e.key === 'ArrowDown') next = (current + 1) % items.length;
+    else if (e.key === 'ArrowUp') next = (current - 1 + items.length) % items.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = items.length - 1;
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      this._closeMenu(true);
+    } else if (e.key === 'Tab') {
+      this._closeMenu(false);
+    }
+    if (next >= 0) {
+      e.preventDefault();
+      items[next]?.focus();
+    }
+  }
+
+  private _chooseMenuItem(action: ConditionalFormatMenuAction): void {
+    this._closeMenu(true);
+    this.dispatchEvent(
+      new CustomEvent<ConditionalFormatActionDetail>('conditional-format-action', {
+        detail: { action },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  private _renderConditionalMenu() {
+    return html`
+      <div class="menu-wrapper">
+        <button
+          class="menu-button"
+          type="button"
+          aria-label="Conditional formatting"
+          aria-haspopup="menu"
+          aria-expanded="${this._menuOpen}"
+          title="Conditional formatting"
+          ?disabled=${this.readOnly}
+          tabindex="-1"
+          @click=${() => (this._menuOpen ? this._closeMenu(false) : void this._openMenu())}
+          @keydown=${this._handleMenuButtonKeydown}
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+            <path d="M2 3h12v2.5H2zM2 6.75h8v2.5H2zM2 10.5h4.5V13H2z" fill="currentColor" />
+          </svg>
+          <svg viewBox="0 0 10 10" width="8" height="8" aria-hidden="true" focusable="false">
+            <path d="M1.5 3.5 5 7l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+          </svg>
+        </button>
+        ${this._menuOpen && !this.readOnly
+          ? html`<div class="menu" role="menu" aria-label="Conditional formatting" @keydown=${this._handleMenuKeydown}>
+              ${CONDITIONAL_MENU.map((item) =>
+                item === null
+                  ? html`<div role="separator"></div>`
+                  : html`<button
+                      type="button"
+                      role="menuitem"
+                      tabindex="-1"
+                      data-action="${item[0]}"
+                      @click=${() => this._chooseMenuItem(item[0])}
+                    >${item[1]}</button>`
+              )}
+            </div>`
+          : nothing}
+      </div>
+    `;
   }
 
   // ─── Render ────────────────────────────────────────────
@@ -395,6 +602,11 @@ export class Y11nFormatToolbar extends LitElement {
             (size) => html`<option value=${size} ?selected=${this.fontSize === size}>${size}</option>`
           )}
         </select>
+
+        <div class="separator" role="separator"></div>
+
+        <!-- Conditional formatting: one-step rules, clear, and the rule manager -->
+        ${this._renderConditionalMenu()}
 
         <div class="separator" role="separator"></div>
 

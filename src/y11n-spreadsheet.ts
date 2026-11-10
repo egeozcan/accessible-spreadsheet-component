@@ -30,9 +30,16 @@ import {
   type FilterInfo,
   type FilterChangeDetail,
   type NumberFormatOptions,
+  type ConditionalFormatChangeDetail,
+  type ConditionalFormatPreset,
+  type ConditionalFormatResult,
+  type ConditionalFormatRule,
+  type ConditionalFormatRuleInput,
+  type ConditionalFormatStyle,
   cellKey,
   colToLetter,
   coordToRef,
+  dateToSerial,
   formatNumber,
   formatsEqual,
   parseKey,
@@ -46,8 +53,26 @@ import { parseInput } from './utils/input-parse.js';
 import { formatSeriesNumber, seriesFor } from './utils/series.js';
 import { FormulaEngine } from './engine/formula-engine.js';
 import { ClipboardManager } from './controllers/clipboard-manager.js';
+import {
+  ConditionalFormatEvaluator,
+  adjustRulesForStructureChange,
+  clearRulesInRange,
+  cloneConditionalRule,
+  conditionalFormatPreset,
+  conditionalRulesEqual,
+  describeCondition,
+  normalizeConditionalRule,
+  rangeToA1,
+} from './utils/conditional-format.js';
 import './components/y11n-formula-bar.js';
 import type { FormulaBarMode, Y11nFormulaBar } from './components/y11n-formula-bar.js';
+import './components/y11n-conditional-format-dialog.js';
+import type {
+  ConditionalFormatMoveDetail,
+  ConditionalFormatSaveDetail,
+  Y11nConditionalFormatDialog,
+} from './components/y11n-conditional-format-dialog.js';
+import { conditionalIcon, conditionalIconStyles } from './components/conditional-icons.js';
 
 type ChangeSource = NonNullable<DataChangeDetail['source']>;
 
@@ -269,6 +294,11 @@ interface CommandBatch {
    * batch is a filter change; structure batches carry it when they move the filter.
    */
   filter?: { before: FilterState | null; after: FilterState | null };
+  /**
+   * Conditional-format rules before/after. On its own, the batch is a rule
+   * change; structure batches carry it when they move or drop rules.
+   */
+  conditional?: { before: readonly ConditionalFormatRule[]; after: readonly ConditionalFormatRule[] };
 }
 
 const STRUCTURE_OPERATIONS: Record<string, DataChangeOperation> = {
@@ -283,6 +313,12 @@ function todayText(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Today's date as a date serial number, for conditional-format date rules. */
+function todaySerial(): number {
+  const d = new Date();
+  return dateToSerial(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
 /** The current time as `HH:mm`, which typed input reads back as a time (Ctrl+Shift+;). */
@@ -317,6 +353,8 @@ function currentTimeText(): string {
  * @fires before-column-resize - Before a user resizes columns (cancelable)
  * @fires column-resize - After column widths change (also on undo/redo)
  * @fires freeze-change - After the frozen rows/columns change (not when the properties are set directly)
+ * @fires before-conditional-format-change - Before a user changes the conditional-format rules (cancelable)
+ * @fires conditional-format-change - After the conditional-format rules change (also on undo/redo)
  *
  * @csspart editor - The inline cell editor input element
  * @csspart validation-message - The message shown under the editor when a value is rejected
@@ -391,6 +429,10 @@ export class Y11nSpreadsheet extends LitElement {
   @state() private _filterMenu: FilterMenuState | null = null;
   /** The open Paste Special dialog's choices, or null when it is closed */
   @state() private _pasteSpecial: Required<PasteSpecialOptions> | null = null;
+  /** Whether the conditional-format rule manager is open */
+  @state() private _cfManagerOpen = false;
+  /** Outcome of the last change made in the rule manager, announced inside it */
+  @state() private _cfManagerStatus = '';
 
   /** Track scroll position for virtual rendering */
   @state() private _scrollTop = 0;
@@ -483,6 +525,53 @@ export class Y11nSpreadsheet extends LitElement {
   /** Removes the filter menu's outside-click listener */
   private _filterMenuCleanup: (() => void) | null = null;
   private _pasteSpecialCleanup: (() => void) | null = null;
+
+  /**
+   * Conditional-format rules in priority order. Treated as immutable like
+   * `_filter`: every change builds a new array, so undo can hold on to old ones.
+   */
+  private _cfRules: readonly ConditionalFormatRule[] = [];
+  /** Bumped whenever the rules change, to detect a reentrant change during `before-conditional-format-change` */
+  private _cfRevision = 0;
+  private _cfNextId = 1;
+  private _cfManagerCleanup: (() => void) | null = null;
+  /** Works out what the rules give each cell, reading values the way sorting does */
+  private _cf = new ConditionalFormatEvaluator({
+    valueAt: (row, col) => this._cfValue(cellKey(row, col)),
+    forEachValue: (range, visit) => {
+      const r1 = Math.min(range.end.row, this.rows - 1);
+      const c1 = Math.min(range.end.col, this.cols - 1);
+      const area = Math.max(0, r1 - range.start.row + 1) * Math.max(0, c1 - range.start.col + 1);
+      if (area <= this._internalData.size) {
+        for (let r = range.start.row; r <= r1; r++) {
+          for (let c = range.start.col; c <= c1; c++) {
+            const key = cellKey(r, c);
+            if (this._internalData.has(key)) visit(this._cfValue(key));
+          }
+        }
+        return;
+      }
+      // A range much larger than the data (whole columns): walk the data instead
+      for (const key of this._internalData.keys()) {
+        const { row, col } = parseKey(key);
+        if (row >= range.start.row && row <= r1 && col >= range.start.col && col <= c1) visit(this._cfValue(key));
+      }
+    },
+    evaluate: (formula) => {
+      const result = this._formulaEngine.evaluate(formula);
+      switch (result.type) {
+        case 'number':
+          return { kind: 'number', value: Number(result.displayValue) };
+        case 'boolean':
+          return { kind: 'boolean', value: result.displayValue === 'TRUE' };
+        case 'error':
+          return { kind: 'error' };
+        default:
+          return result.displayValue === '' ? { kind: 'blank' } : { kind: 'text', value: result.displayValue };
+      }
+    },
+    today: todaySerial,
+  });
   /** Most values the filter menu lists at once; the search box narrows the rest */
   private static readonly FILTER_MENU_MAX_VALUES = 500;
 
@@ -507,6 +596,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._cellSizeObserver?.disconnect();
     this._closeFilterMenu(false);
     this._closePasteSpecial(false);
+    this.closeConditionalFormatManager(false);
   }
 
   protected firstUpdated(): void {
@@ -1031,6 +1121,7 @@ export class Y11nSpreadsheet extends LitElement {
       this._dispatchSelectionChange();
     }
     this._ensureCellVisible(headerRow, c);
+    this.closeConditionalFormatManager(false);
     const values = this._filterMenuValues(c);
     this._filterMenu = {
       col: c,
@@ -1080,6 +1171,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._syncPendingData();
     if (this._isEditing) this._commitEdit();
     this._closeFilterMenu(false);
+    this.closeConditionalFormatManager(false);
     this._pasteSpecial = { mode: 'all', transpose: false };
     if (!this._pasteSpecialCleanup) {
       const onPointerDown = (e: PointerEvent) => {
@@ -1236,6 +1328,215 @@ export class Y11nSpreadsheet extends LitElement {
     this._applyFormat(cellIds, format, 'user');
   }
 
+  // ─── Conditional Format API ─────────────────────────
+
+  /**
+   * The conditional-format rules in priority order: where two rules set the
+   * same thing for a cell, the earlier one wins. Returns copies.
+   */
+  getConditionalFormats(): ConditionalFormatRule[] {
+    return this._cfRules.map(cloneConditionalRule);
+  }
+
+  /**
+   * Add a conditional-format rule: a range, a condition and a format. Rules
+   * live beside the data and are merged over the cells' own formats when they
+   * are drawn, so `getData()`, copy, sort and CSV export are unaffected.
+   * Undoable; fires `conditional-format-change`.
+   *
+   * @param rule - The rule; `id` is generated when left out
+   * @param index - Priority position (0 = first). Default: 0, as in Excel
+   * @returns The rule's id
+   * @throws {TypeError} If the rule is invalid or its id is taken
+   * @throws {RangeError} If the range is outside the grid
+   */
+  addConditionalFormat(rule: ConditionalFormatRuleInput, index = 0): string {
+    const normalized = this._normalizeCfRule(rule, 'addConditionalFormat');
+    if (this._cfRules.some((r) => r.id === normalized.id)) {
+      throw new TypeError(`addConditionalFormat: a rule with id "${normalized.id}" already exists`);
+    }
+    const next = [...this._cfRules];
+    next.splice(Math.max(0, Math.min(Math.trunc(index) || 0, next.length)), 0, normalized);
+    this._commitConditional(next, 'programmatic');
+    return normalized.id;
+  }
+
+  /**
+   * Change a rule in place, keeping its priority. `changes` replaces the
+   * given properties (`range`, `condition`, `format`, `stopIfTrue`, `label`).
+   *
+   * @returns False when there is no rule with that id
+   */
+  updateConditionalFormat(id: string, changes: Partial<Omit<ConditionalFormatRule, 'id'>>): boolean {
+    const i = this._cfRules.findIndex((r) => r.id === id);
+    if (i === -1) return false;
+    const next = [...this._cfRules];
+    next[i] = this._normalizeCfRule({ ...this._cfRules[i], ...changes, id }, 'updateConditionalFormat');
+    this._commitConditional(next, 'programmatic');
+    return true;
+  }
+
+  /**
+   * Remove a rule.
+   *
+   * @returns False when there is no rule with that id
+   */
+  removeConditionalFormat(id: string): boolean {
+    if (!this._cfRules.some((r) => r.id === id)) return false;
+    this._commitConditional(this._cfRules.filter((r) => r.id !== id), 'programmatic');
+    return true;
+  }
+
+  /**
+   * Move a rule to another priority position (0 = first).
+   *
+   * @returns False when there is no rule with that id
+   */
+  moveConditionalFormat(id: string, index: number): boolean {
+    const next = this._movedRules(id, index);
+    if (!next) return false;
+    this._commitConditional(next, 'programmatic');
+    return true;
+  }
+
+  /**
+   * Replace all rules, in priority order (for example, to restore saved ones).
+   *
+   * @throws {TypeError} If a rule is invalid or two share an id
+   * @throws {RangeError} If a range is outside the grid
+   */
+  setConditionalFormats(rules: ConditionalFormatRuleInput[]): void {
+    const next = rules.map((rule) => this._normalizeCfRule(rule, 'setConditionalFormats'));
+    if (new Set(next.map((r) => r.id)).size !== next.length) {
+      throw new TypeError('setConditionalFormats: rule ids must be unique');
+    }
+    this._commitConditional(next, 'programmatic');
+  }
+
+  /**
+   * Remove conditional formatting: all of it, or from a range. Rules inside
+   * the range are removed and rules it cuts across a whole edge are trimmed;
+   * a rule that would no longer be one rectangle is kept as it is.
+   */
+  clearConditionalFormats(range?: SelectionRange): void {
+    const next = range
+      ? clearRulesInRange(this._cfRules, this._normalizeRange(range, 'clearConditionalFormats')).rules
+      : [];
+    this._commitConditional(next, 'programmatic');
+  }
+
+  /**
+   * What the conditional-format rules give a cell: the merged style, the
+   * labels exposed to assistive technology, and any data bar, icon or color
+   * scale position. Null when no rule applies to it.
+   *
+   * @param cellId - Cell key in `"row:col"` format
+   */
+  getConditionalFormatResult(cellId: string): ConditionalFormatResult | null {
+    this._syncPendingData();
+    const { row, col } = parseKey(cellId);
+    const result = this._cf.resultFor(row, col);
+    return result ? (JSON.parse(JSON.stringify(result)) as ConditionalFormatResult) : null;
+  }
+
+  /**
+   * Add a one-step rule to the selection, as the format toolbar's
+   * Conditional formatting menu does: `'duplicates'`, `'unique'`,
+   * `'aboveAverage'`, `'belowAverage'`, `'top10'`, `'bottom10'`,
+   * `'colorScale'`, `'dataBar'` or `'iconSet'`. A user action: refused in
+   * read-only mode, fires the cancelable `before-conditional-format-change`,
+   * and announces the outcome.
+   *
+   * @returns The new rule's id, or null when nothing was added
+   */
+  applyConditionalFormatPreset(preset: ConditionalFormatPreset): string | null {
+    if (this.readOnly) return null;
+    const { condition, format } = conditionalFormatPreset(preset);
+    const { start, end } = this._selection.range;
+    const rule = this._normalizeCfRule(
+      { range: { start: { ...start }, end: { ...end } }, condition, format },
+      'applyConditionalFormatPreset'
+    );
+    const result = this._commitConditional([rule, ...this._cfRules], 'user');
+    this._modeAnnouncement =
+      result === 'applied'
+        ? `Conditional format added to ${rangeToA1(rule.range)}: ${describeCondition(rule.condition)}`
+        : 'Conditional format change cancelled';
+    return result === 'applied' ? rule.id : null;
+  }
+
+  /**
+   * Clear conditional formatting from the selection (see
+   * `clearConditionalFormats()`), as a user action: refused in read-only
+   * mode, cancelable, announced.
+   *
+   * @returns Whether any rule was removed or trimmed
+   */
+  clearSelectionConditionalFormats(): boolean {
+    if (this.readOnly) return false;
+    const outcome = clearRulesInRange(this._cfRules, this._selection.range);
+    const count = (n: number) => `${n} rule${n === 1 ? '' : 's'}`;
+    const kept =
+      outcome.kept > 0
+        ? `. ${count(outcome.kept)} only partly in the selection ${outcome.kept === 1 ? 'was' : 'were'} kept`
+        : '';
+    if (outcome.removed + outcome.trimmed === 0) {
+      this._modeAnnouncement = outcome.kept > 0 ? `Nothing cleared${kept}` : 'No conditional formats in the selection';
+      return false;
+    }
+    if (this._commitConditional(outcome.rules, 'user') !== 'applied') {
+      this._modeAnnouncement = 'Conditional format change cancelled';
+      return false;
+    }
+    const parts: string[] = [];
+    if (outcome.removed > 0) parts.push(`${count(outcome.removed)} removed`);
+    if (outcome.trimmed > 0) parts.push(`${count(outcome.trimmed)} trimmed`);
+    this._modeAnnouncement = `Conditional formats cleared from the selection: ${parts.join(', ')}${kept}`;
+    return true;
+  }
+
+  /**
+   * Open the conditional-format rule manager (what Alt+Shift+C does): a
+   * dialog that lists the rules in priority order and lets the user add,
+   * edit, reorder and delete them. In read-only mode it only shows them.
+   */
+  async openConditionalFormatManager(): Promise<boolean> {
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    this._closeFilterMenu(false);
+    this._closePasteSpecial(false);
+    this._cfManagerStatus = '';
+    this._cfManagerOpen = true;
+    if (!this._cfManagerCleanup) {
+      const onPointerDown = (e: PointerEvent) => {
+        const el = this.renderRoot.querySelector('y11n-conditional-format-dialog');
+        if (el && e.composedPath().includes(el)) return;
+        this.closeConditionalFormatManager(false);
+      };
+      document.addEventListener('pointerdown', onPointerDown);
+      this._cfManagerCleanup = () => document.removeEventListener('pointerdown', onPointerDown);
+    }
+    this._modeAnnouncement = '';
+    await this.updateComplete;
+    const dialog = this.renderRoot.querySelector<Y11nConditionalFormatDialog>('y11n-conditional-format-dialog');
+    await dialog?.updateComplete;
+    dialog?.focusInitial();
+    return true;
+  }
+
+  /**
+   * Close the rule manager.
+   *
+   * @param focusCell - Return focus to the active cell. Default: true
+   */
+  closeConditionalFormatManager(focusCell = true): void {
+    this._cfManagerCleanup?.();
+    this._cfManagerCleanup = null;
+    if (!this._cfManagerOpen) return;
+    this._cfManagerOpen = false;
+    if (focusCell) this.updateComplete.then(() => this._focusActiveCell());
+  }
+
   // ─── Format Internals ────────────────────────────────
 
   private _applyFormat(cellIds: string[], format: CellFormat, source: FormatChangeDetail['source']): void {
@@ -1325,13 +1626,17 @@ export class Y11nSpreadsheet extends LitElement {
     };
   }
 
-  /** Convert CellFormat to inline styles for styleMap */
-  private _getCellStyles(row: number, col: number): Record<string, string> {
+  /**
+   * Convert CellFormat to inline styles for styleMap. `conditional` is the
+   * style of the conditional-format rules that apply to the cell, merged over
+   * its own format for display only.
+   */
+  private _getCellStyles(row: number, col: number, conditional?: ConditionalFormatStyle): Record<string, string> {
     const cell = this._getCell(row, col);
-    if (!cell?.format) return {};
+    if (!cell?.format && !conditional) return {};
 
     const styles: Record<string, string> = {};
-    const fmt = cell.format;
+    const fmt: CellFormat = conditional ? { ...cell?.format, ...conditional } : cell!.format!;
 
     if (fmt.bold) styles['font-weight'] = 'bold';
     if (fmt.italic) styles['font-style'] = 'italic';
@@ -1362,6 +1667,197 @@ export class Y11nSpreadsheet extends LitElement {
     }
 
     return styles;
+  }
+
+  // ─── Conditional Format Internals ────────────────────
+
+  /** The value a cell is tested by: its number even when the display is formatted. */
+  private _cfValue(key: string): SortValue {
+    return sortValueOf(this._internalData.get(key), (cell) => this._sortNumber(key, cell));
+  }
+
+  /** Validate a rule from the API or the rule manager, giving it an id if it has none. */
+  private _normalizeCfRule(input: ConditionalFormatRuleInput, method: string): ConditionalFormatRule {
+    let id = input?.id;
+    if (id !== undefined && (typeof id !== 'string' || id === '')) {
+      throw new TypeError(`${method}: id must be a non-empty string`);
+    }
+    if (id === undefined) {
+      do {
+        id = `cf-${this._cfNextId++}`;
+      } while (this._cfRules.some((r) => r.id === id));
+    }
+    const rule = normalizeConditionalRule(input, id);
+    this._normalizeRange(rule.range, method);
+    return rule;
+  }
+
+  /** The rules with one moved to `index`, or null when there is no rule with that id. */
+  private _movedRules(id: string, index: number): ConditionalFormatRule[] | null {
+    const from = this._cfRules.findIndex((r) => r.id === id);
+    if (from === -1) return null;
+    const next = [...this._cfRules];
+    const [rule] = next.splice(from, 1);
+    next.splice(Math.max(0, Math.min(Math.trunc(index) || 0, next.length)), 0, rule);
+    return next;
+  }
+
+  private _setConditionalRules(rules: readonly ConditionalFormatRule[]): void {
+    this._cfRules = rules;
+    this._cfRevision++;
+    this._cf.setRules(rules);
+  }
+
+  /**
+   * Change the rules as one undoable step. User changes can be vetoed via
+   * `before-conditional-format-change`, whose detail describes the result.
+   */
+  private _commitConditional(
+    next: readonly ConditionalFormatRule[],
+    source: 'user' | 'programmatic'
+  ): 'applied' | 'unchanged' | 'cancelled' {
+    const before = this._cfRules;
+    if (conditionalRulesEqual(before, next)) return 'unchanged';
+
+    if (source === 'user') {
+      const event = new CustomEvent<ConditionalFormatChangeDetail>('before-conditional-format-change', {
+        detail: { rules: next.map(cloneConditionalRule), source },
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      const revision = this._cfRevision;
+      if (!this.dispatchEvent(event)) return 'cancelled';
+      // A listener changed the rules: `next` was built from stale ones
+      if (revision !== this._cfRevision) return 'cancelled';
+    }
+
+    const selection = this._snapshotSelection();
+    this._commitBatch(
+      // `operation` is never reported for these batches: they fire conditional-format-change, not data-change
+      {
+        deltas: [],
+        selectionBefore: selection,
+        selectionAfter: selection,
+        operation: 'format',
+        conditional: { before, after: next },
+      },
+      source
+    );
+    return 'applied';
+  }
+
+  private _applyConditionalBatch(batch: CommandBatch, side: 'before' | 'after', source: ChangeSource): void {
+    this._setConditionalRules(side === 'after' ? batch.conditional!.after : batch.conditional!.before);
+    if (source === 'undo' || source === 'redo') {
+      this._restoreSelection(side === 'after' ? batch.selectionAfter : batch.selectionBefore);
+    }
+    this.requestUpdate();
+    this._dispatchConditionalChange(source);
+  }
+
+  private _dispatchConditionalChange(source: ConditionalFormatChangeDetail['source']): void {
+    this.dispatchEvent(
+      new CustomEvent<ConditionalFormatChangeDetail>('conditional-format-change', {
+        detail: { rules: this._cfRules.map(cloneConditionalRule), source },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /** Report a change made in the rule manager inside it, where its user is. */
+  private _reportCfChange(result: ReturnType<Y11nSpreadsheet['_commitConditional']>, applied: string): void {
+    this._cfManagerStatus =
+      result === 'applied' ? applied : result === 'cancelled' ? 'Change cancelled' : 'Nothing changed';
+  }
+
+  private _handleCfSave(e: CustomEvent<ConditionalFormatSaveDetail>): void {
+    if (this.readOnly) return;
+    const { id, rule } = e.detail;
+    let next: ConditionalFormatRule[];
+    let saved: ConditionalFormatRule;
+    try {
+      if (id === null) {
+        saved = this._normalizeCfRule(rule, 'conditional format');
+        next = [saved, ...this._cfRules];
+      } else {
+        const i = this._cfRules.findIndex((r) => r.id === id);
+        if (i === -1) {
+          this._cfManagerStatus = 'That rule no longer exists';
+          return;
+        }
+        saved = this._normalizeCfRule({ ...rule, id }, 'conditional format');
+        next = [...this._cfRules];
+        next[i] = saved;
+      }
+    } catch (err) {
+      this._cfManagerStatus = (err as Error).message;
+      return;
+    }
+    const what = `${describeCondition(saved.condition)}, ${rangeToA1(saved.range)}`;
+    this._reportCfChange(
+      this._commitConditional(next, 'user'),
+      id === null ? `Rule added: ${what}` : `Rule saved: ${what}`
+    );
+  }
+
+  private _handleCfRemove(e: CustomEvent<{ id: string }>): void {
+    if (this.readOnly) return;
+    const rule = this._cfRules.find((r) => r.id === e.detail.id);
+    if (!rule) return;
+    this._reportCfChange(
+      this._commitConditional(this._cfRules.filter((r) => r !== rule), 'user'),
+      `Rule deleted: ${describeCondition(rule.condition)}, ${rangeToA1(rule.range)}`
+    );
+  }
+
+  private _handleCfMove(e: CustomEvent<ConditionalFormatMoveDetail>): void {
+    if (this.readOnly) return;
+    const next = this._movedRules(e.detail.id, e.detail.index);
+    if (!next) return;
+    const position = next.findIndex((r) => r.id === e.detail.id) + 1;
+    this._reportCfChange(
+      this._commitConditional(next, 'user'),
+      `Rule moved to position ${position} of ${next.length}`
+    );
+  }
+
+  /** Classes for a cell that conditional formats apply to. */
+  private _cfClasses(cf: ConditionalFormatResult): string {
+    const graphics = (cf.dataBar ? 1 : 0) + (cf.icon ? 1 : 0) + (cf.scale !== undefined ? 1 : 0);
+    // A highlight rule matched: forced-colors mode marks the cell, since it drops the fill
+    return cf.ruleIds.length > graphics ? 'cf-match cf-highlight' : 'cf-match';
+  }
+
+  /** Whether a data bar or icon replaces the value on screen (it stays in the accessible name). */
+  private _cfHidesValue(cf: ConditionalFormatResult): boolean {
+    return cf.dataBar?.showValue === false || cf.icon?.showValue === false;
+  }
+
+  /** The data bar, icon and forced-colors scale meter of a cell. All decorative: the label carries the meaning. */
+  private _renderCfGraphics(cf: ConditionalFormatResult) {
+    const bar = cf.dataBar;
+    const percent = (n: number) => `${Math.round(n * 1000) / 10}%`;
+    return html`
+      ${bar
+        ? html`<span
+            class="ls-cf-bar ${bar.negative ? 'negative' : ''}"
+            aria-hidden="true"
+            style=${styleMap({
+              left: percent(bar.start),
+              width: percent(bar.size),
+              ...(bar.color ? { 'background-color': bar.color } : {}),
+            })}
+          ></span>`
+        : nothing}
+      ${cf.scale !== undefined
+        ? html`<span class="ls-cf-meter" aria-hidden="true" style="width: ${percent(cf.scale)}"></span>`
+        : nothing}
+      ${cf.icon
+        ? html`<span class="ls-cf-icon" aria-hidden="true">${conditionalIcon(cf.icon.set, cf.icon.index)}</span>`
+        : nothing}
+    `;
   }
 
   // ─── Data Sync ──────────────────────────────────────
@@ -1450,11 +1946,15 @@ export class Y11nSpreadsheet extends LitElement {
   private _recalcAll(): void {
     this._formulaEngine.recalculate();
     this._reapplyNumberFormats();
+    this._cf.invalidate();
   }
 
   private _recalcAffected(changedKeys: string[]): void {
     const changed = this._formulaEngine.recalculateAffected(changedKeys);
     this._applyNumberFormatsToKeys(changed);
+    // Conditional formats follow the values: the written cells and every formula that changed with them
+    this._cf.invalidate(changedKeys);
+    this._cf.invalidate(changed);
   }
 
   /** Re-apply number formatting to all cells that have a numberFormat */
@@ -1673,9 +2173,9 @@ export class Y11nSpreadsheet extends LitElement {
     this.requestUpdate();
   }
 
-  /** Whether a batch only changes the view (column widths, the filter), not the data. */
+  /** Whether a batch only changes the view (column widths, the filter, conditional formats), not the data. */
   private _isViewBatch(batch: CommandBatch): boolean {
-    return !!batch.widths || (!!batch.filter && !batch.structure);
+    return !!batch.widths || ((!!batch.filter || !!batch.conditional) && !batch.structure);
   }
 
   private _applyBatch(batch: CommandBatch, source: ChangeSource): void {
@@ -1695,6 +2195,10 @@ export class Y11nSpreadsheet extends LitElement {
     }
     if (batch.filter) {
       this._applyFilterBatch(batch, 'after', source);
+      return;
+    }
+    if (batch.conditional) {
+      this._applyConditionalBatch(batch, 'after', source);
       return;
     }
     for (const delta of batch.deltas) {
@@ -1724,6 +2228,10 @@ export class Y11nSpreadsheet extends LitElement {
     }
     if (batch.filter) {
       this._applyFilterBatch(batch, 'before', 'undo');
+      return;
+    }
+    if (batch.conditional) {
+      this._applyConditionalBatch(batch, 'before', 'undo');
       return;
     }
     for (const delta of batch.deltas) {
@@ -1990,6 +2498,8 @@ export class Y11nSpreadsheet extends LitElement {
       },
     };
     if (this._filter) batch.filter = { before: this._filter, after: this._filterAfterStructureChange(change) };
+    const rulesAfter = adjustRulesForStructureChange(this._cfRules, change);
+    if (rulesAfter !== this._cfRules) batch.conditional = { before: this._cfRules, after: rulesAfter };
     this._commitBatch(batch, source);
 
     if (source === 'user') {
@@ -2141,6 +2651,9 @@ export class Y11nSpreadsheet extends LitElement {
       filterMoved = !this._filtersEqual(batch.filter.before, batch.filter.after);
       if (this._filterMenu) this._closeFilterMenu(false);
     }
+    if (batch.conditional) {
+      this._setConditionalRules(side === 'after' ? batch.conditional.after : batch.conditional.before);
+    }
     this._selection.setBounds(this.rows, this.cols);
     this._lastSyncedDataRef = this.data;
 
@@ -2160,6 +2673,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._dispatchStructureChange({ ...change, kind: applied.kind, source });
     if (frozen) this._dispatchFreezeChange({ ...frozen, source });
     if (filterMoved) this._dispatchFilterChange(this._filterDetail(this._filter, source));
+    if (batch.conditional) this._dispatchConditionalChange(source);
     if (movedWidths.length > 0) {
       // So hosts that save widths on column-resize see them move
       this.dispatchEvent(
@@ -4037,6 +4551,7 @@ export class Y11nSpreadsheet extends LitElement {
    * - Ctrl+Shift+1/3/4/5/`: number, date, currency, percent, general format
    * - Alt+Shift+S: announce the selection's Sum, Average and Count
    * - Ctrl+Alt+V: open Paste Special
+   * - Alt+Shift+C: open the conditional-format rule manager
    */
   private _handleQuickShortcut(e: KeyboardEvent, ctrl: boolean, shift: boolean): boolean {
     const alt = e.altKey;
@@ -4050,6 +4565,10 @@ export class Y11nSpreadsheet extends LitElement {
     }
     if (ctrl && alt && !shift && e.code === 'KeyV') {
       void this.openPasteSpecial();
+      return true;
+    }
+    if (alt && shift && !ctrl && e.code === 'KeyC') {
+      void this.openConditionalFormatManager();
       return true;
     }
     if (!ctrl || alt) return false;
@@ -4771,13 +5290,17 @@ export class Y11nSpreadsheet extends LitElement {
         this._mutationCount++;
         const end = Math.min(offset + Y11nSpreadsheet.PASTE_CHUNK_SIZE, deltas.length);
 
+        const written: string[] = [];
         for (let i = offset; i < end; i++) {
           const delta = deltas[i];
           this._applyRawValueByString(delta.id, delta.after);
           if ('formatAfter' in delta) {
             this._applyCellFormat(delta.id, delta.formatAfter);
           }
+          written.push(delta.id);
         }
+        // Frames drawn before the batch is finalized must not show stale conditional formats
+        this._cf.invalidate(written);
 
         offset = end;
 
@@ -5529,7 +6052,9 @@ export class Y11nSpreadsheet extends LitElement {
 
   // ─── Render ─────────────────────────────────────────
 
-  static styles = css`
+  static styles = [
+    conditionalIconStyles,
+    css`
     :host {
       display: block;
       height: 100%;
@@ -5739,6 +6264,14 @@ export class Y11nSpreadsheet extends LitElement {
 
     .ls-cell[aria-selected="true"] {
       background: var(--_selection-bg);
+    }
+
+    /*
+     * A cell with a fill of its own (a format or a conditional format) sets
+     * its background inline, which hides the selection tint: lay it over the fill
+     */
+    .ls-cell.has-fill[aria-selected='true'] {
+      box-shadow: inset 0 0 0 100vmax var(--_selection-bg);
     }
 
     .ls-cell.active-cell {
@@ -6064,6 +6597,71 @@ export class Y11nSpreadsheet extends LitElement {
       outline-offset: 1px;
     }
 
+    /*
+     * Conditional formats. Bars and icons are decorative (the cell's hidden
+     * label says what they mean); forced-colors mode drops fills, so there
+     * highlighted cells get an edge marker and scales and bars a meter line.
+     */
+    .ls-cf-bar {
+      position: absolute;
+      top: 3px;
+      bottom: 3px;
+      z-index: -1;
+      border-radius: 1px;
+      background-color: var(--ls-data-bar-color, #8fb8ea);
+      pointer-events: none;
+    }
+
+    .ls-cf-bar.negative {
+      background-color: var(--ls-data-bar-negative-color, #f0a1a1);
+    }
+
+    .ls-cf-icon {
+      display: inline-flex;
+      flex: 0 0 auto;
+      margin-right: 4px;
+    }
+
+    .ls-cf-meter {
+      display: none;
+    }
+
+    @media (forced-colors: active) {
+      .ls-cell.cf-highlight::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 3px;
+        background: Highlight;
+        forced-color-adjust: none;
+      }
+
+      .ls-cf-bar,
+      .ls-cf-meter {
+        display: block;
+        position: absolute;
+        top: auto;
+        bottom: 1px;
+        height: 3px;
+        z-index: 0;
+        border-radius: 0;
+        background: CanvasText;
+        forced-color-adjust: none;
+        pointer-events: none;
+      }
+
+      .ls-cf-meter {
+        left: 0;
+      }
+
+      /* Negative bars are dashed, so the sign survives without color */
+      .ls-cf-bar.negative {
+        background: repeating-linear-gradient(90deg, CanvasText 0 2px, transparent 2px 4px);
+      }
+    }
+
     /* Visually hidden live region for screen reader announcements */
     .sr-only {
       position: absolute;
@@ -6075,7 +6673,8 @@ export class Y11nSpreadsheet extends LitElement {
       clip: rect(0, 0, 0, 0);
       border: 0;
     }
-  `;
+  `,
+  ];
 
   protected render() {
     this._renderedCellSize = this._cellSize;
@@ -6122,6 +6721,20 @@ export class Y11nSpreadsheet extends LitElement {
           ${this._findOpen ? this._renderFindBar() : nothing}
           ${this._filterMenu && this._filter ? this._renderFilterMenu(this._filterMenu, this._filter) : nothing}
           ${this._pasteSpecial ? this._renderPasteSpecial(this._pasteSpecial) : nothing}
+          ${this._cfManagerOpen
+            ? html`<y11n-conditional-format-dialog
+                .rules=${this._cfRules}
+                .selection=${this._selection.range}
+                .rows=${this.rows}
+                .cols=${this.cols}
+                .readOnly=${this.readOnly}
+                .status=${this._cfManagerStatus}
+                @cf-save="${this._handleCfSave}"
+                @cf-remove="${this._handleCfRemove}"
+                @cf-move="${this._handleCfMove}"
+                @cf-close="${() => this.closeConditionalFormatManager(true)}"
+              ></y11n-conditional-format-dialog>`
+            : nothing}
 
           <div
             class="ls-grid"
@@ -6409,7 +7022,8 @@ export class Y11nSpreadsheet extends LitElement {
       c >= preview.start.col &&
       c <= preview.end.col;
 
-    const cellStyles = this._getCellStyles(row, c);
+    const cf = this._cf.resultFor(row, c);
+    const cellStyles = this._getCellStyles(row, c, cf?.format);
     if (row < this._frozenRowCount) cellStyles.top = this._stickyTop(row);
     if (c < this._frozenColCount) cellStyles.left = this._stickyLeft(c);
     const filterHeader = this._isFilterHeader(row, c);
@@ -6417,7 +7031,7 @@ export class Y11nSpreadsheet extends LitElement {
 
     return html`
       <div
-        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''} ${filterHeader ? 'filter-header' : ''} ${this._frozenClasses(row, c)}"
+        class="ls-cell ${isActive ? 'active-cell' : ''} ${isRefTarget ? 'ref-highlight' : ''} ${locked ? 'read-only-cell' : ''} ${inFillPreview ? 'fill-preview' : ''} ${filterHeader ? 'filter-header' : ''} ${cf ? this._cfClasses(cf) : ''} ${cellStyles['background-color'] ? 'has-fill' : ''} ${this._frozenClasses(row, c)}"
         role="gridcell"
         aria-colindex="${c + 2}"
         aria-selected="${isSelected}"
@@ -6433,7 +7047,9 @@ export class Y11nSpreadsheet extends LitElement {
         @pointerdown="${this._handleCellPointerDown}"
         @dblclick="${this._handleCellDblClick}"
       >
-        <span class="cell-text">${display}</span>
+        ${cf ? this._renderCfGraphics(cf) : nothing}
+        <span class="cell-text ${cf && this._cfHidesValue(cf) ? 'sr-only' : ''}">${display}</span>
+        ${cf && cf.labels.length > 0 ? html`<span class="sr-only ls-cf-label">, ${cf.labels.join(', ')}</span>` : nothing}
         ${filterHeader
           ? html`<span
               class="ls-filter-button ${filtered ? 'filtered' : ''}"
@@ -6495,6 +7111,8 @@ export class Y11nSpreadsheet extends LitElement {
     const ref = `${colToLetter(activeCell.col)}${activeCell.row + 1}`;
     const display = this._getCellDisplay(activeCell.row, activeCell.col);
     let base = display ? `${ref}: ${display}` : ref;
+    const cf = this._cf.resultFor(activeCell.row, activeCell.col);
+    if (cf && cf.labels.length > 0) base += `, ${cf.labels.join(', ')}`;
     if (this._isFilterHeader(activeCell.row, activeCell.col)) {
       base += this._filter!.criteria.has(activeCell.col)
         ? ', filtered. Alt+Down for filter options'
