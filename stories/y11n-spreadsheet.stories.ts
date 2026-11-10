@@ -1360,3 +1360,115 @@ Press **Alt+Shift+C** to open the rule manager: add, edit, reorder and delete ru
     },
   },
 };
+
+export const DynamicArrays: StoryObj = {
+  name: 'Dynamic Arrays',
+  render: () => {
+    const rows: string[][] = [
+      ['Product', 'Region', 'Units', '', 'Unique regions', '', 'North, by units', ''],
+      ['Apples', 'North', '120', '', '=UNIQUE(B2:B8)', '', '=SORT(FILTER(A2:C8,B2:B8="North"),3,-1)', '', ''],
+      ['Pears', 'South', '80', '', '', '', '', '', ''],
+      ['Plums', 'North', '45', '', '', '', '', '', ''],
+      ['Cherries', 'East', '200', '', '', '', '', '', ''],
+      ['Grapes', 'North', '150', '', 'Units x 2', '', '', '', ''],
+      ['Melons', 'South', '60', '', '=TRANSPOSE(C2:C4*2)', '', '', '', ''],
+      ['Kiwis', 'East', '30', '', '', '', '', '', ''],
+      ['', '', '', '', '', '', '', '', ''],
+      ['Total', '', '=SUM(C:C)', '', 'Blocked', '', 'Count of the spill', ''],
+      ['', '', '', '', '=SEQUENCE(3)', '', '=ROWS(G2#)', ''],
+      ['', '', '', '', 'in the way', '', '', ''],
+    ];
+    return html`<y11n-spreadsheet .rows=${20} .cols=${10} .data=${gridFromRows(rows)}></y11n-spreadsheet>`;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `A formula whose result is an array **spills** into the cells below and to the right of it. \`E2\` lists the regions with \`UNIQUE\`, \`G2\` filters and sorts three columns at once, and \`E7\` multiplies a range and lays the result out in a row.
+
+Move onto a spilled value: the range is outlined, the formula bar shows the formula it comes from greyed out, and a screen reader hears "spilled from G2". Type into a cell of the range and the formula turns into \`#SPILL!\` until the cell is cleared again, as \`E11\` shows. \`G2#\` refers to everything \`G2\` spills, and \`C:C\` to the whole column.`,
+      },
+    },
+  },
+};
+
+export const ListsInCells: StoryObj = {
+  name: 'Lists and Arrays in Cells',
+  render: () => {
+    const rows: string[][] = [
+      ['Project', 'Owners', 'Milestones', 'Owned by Bob?', 'Owners', 'Has both'],
+      ['Website', '={{"Ann";"Bob"}}', '={TEXTSPLIT("Design,Build,Launch",",")}', '=HAS(B2,"Bob")', '=COUNTA(B2)', '=HASALL(B2,{"Ann";"Bob"})'],
+      ['Mobile app', '={{"Bob";"Cy";"Di"}}', '={TEXTSPLIT("Spec,Beta",",")}', '=HAS(B3,"Bob")', '=COUNTA(B3)', '=HASALL(B3,{"Ann";"Bob"})'],
+      ['Data import', '={{"Ann"}}', '={TEXTSPLIT("Plan",",")}', '=HAS(B4,"Bob")', '=COUNTA(B4)', '=HASALL(B4,{"Ann";"Bob"})'],
+      ['', '', '', '', '', ''],
+      ['Everyone', '=UNIQUE(FLATTEN(B2:B4))', '', 'All milestones', '=FLATTEN(C2:C4,"")', ''],
+    ];
+    const setUp = (element?: Element) => {
+      const el = element as Y11nSpreadsheet | undefined;
+      if (el && !el.dataset.ready) {
+        el.dataset.ready = 'true';
+        el.updateComplete.then(() => {
+          el.setColumnWidths({ 1: 130, 2: 170, 3: 120 });
+          el.setFilter({ start: { row: 0, col: 0 }, end: { row: 3, col: 5 } });
+        });
+      }
+    };
+    return html`<y11n-spreadsheet .rows=${16} .cols=${8} .data=${gridFromRows(rows)} ${ref(setUp)}></y11n-spreadsheet>`;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `A cell can hold **several values**. The **Owners** column holds lists: select a cell with comma-separated text and press **Ctrl+J** to turn it into a list (and again to turn it back), or press F2 on a list to edit its items. The **Milestones** column keeps the result of a formula in one cell by wrapping it in braces: \`={TEXTSPLIT(...)}\`.
+
+Press **Alt+Down** on such a cell (or click its icon) to see the values; a screen reader hears "list of 3 items". Formulas work on the items: \`HAS\`, \`HASANY\` and \`HASALL\` test for them, \`COUNTA\` counts them, and \`FLATTEN\` lays nested arrays out in the grid. Open the filter of the **Owners** column (Alt+Down on the header): it lists the people, not the combinations.`,
+      },
+    },
+  },
+};
+
+export const MultipleSheets: StoryObj = {
+  name: 'Multiple Sheets and Names',
+  render: () => {
+    const summary: string[][] = [
+      ['Region', 'Sales', 'With tax'],
+      ['North', '=SUMIF(Orders!A:A,A2,Orders!C:C)', '=B2*(1+tax)'],
+      ['South', '=SUMIF(Orders!A:A,A3,Orders!C:C)', '=B3*(1+tax)'],
+      ['East', '=SUMIF(Orders!A:A,A4,Orders!C:C)', '=B4*(1+tax)'],
+      ['Total', '=SUM(B2:B4)', '=withTax(B5)'],
+      ['', '', ''],
+      ['Orders', '=ROWS(orders)', ''],
+    ];
+    const orders: string[][] = [
+      ['Region', 'Product', 'Amount'],
+      ['North', 'Apples', '120'],
+      ['South', 'Pears', '80'],
+      ['North', 'Plums', '45'],
+      ['East', 'Cherries', '200'],
+      ['South', 'Melons', '60'],
+    ];
+    const setUp = (element?: Element) => {
+      const el = element as Y11nSpreadsheet | undefined;
+      if (el && !el.dataset.ready) {
+        el.dataset.ready = 'true';
+        el.updateComplete.then(() => {
+          el.renameSheet('Sheet1', 'Summary');
+          el.addSheet('Orders', { data: gridFromRows(orders) });
+          el.defineName('tax', '=0.19');
+          el.defineName('orders', '=Orders!A2:C6');
+          el.defineName('withTax', '=LAMBDA(amount, amount * (1 + tax))');
+        });
+      }
+    };
+    return html`<y11n-spreadsheet sheet-tabs .rows=${20} .cols=${8} .data=${gridFromRows(summary)} ${ref(setUp)}></y11n-spreadsheet>`;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: `A workbook with two sheets. **Summary** adds up the **Orders** sheet with sheet-qualified references (\`Orders!A:A\`) and uses three defined names: \`tax\` (a constant), \`orders\` (a range on the other sheet) and \`withTax\` (a LAMBDA called like a function).
+
+The sheet tabs under the grid are a tab list: arrow keys move between sheets, **F2** renames, **Delete** deletes (after a confirmation) and **Ctrl+Shift+Left/Right** reorders; the menu at the end has the same actions. From the grid, **Ctrl+PageDown / PageUp** (or Alt+PageDown / PageUp) switch sheets. Change an amount on Orders and come back: the summary has followed. Undo works across sheets and shows the sheet it changes.
+
+The **Name Box** at the left of the formula bar goes to what you type (\`Orders!B3\`, \`orders\`; **Ctrl+G** moves to it) and names the selection when you type a new name. **Ctrl+F3** opens the name manager. While typing a formula, click the other sheet's tab and then a cell to put a reference to it into the formula.`,
+      },
+    },
+  },
+};

@@ -85,6 +85,36 @@ export interface CellData {
    * The flag moves with the cell when rows or columns are inserted or deleted.
    */
   readOnly?: boolean;
+  /**
+   * Computed, like `displayValue`: set on a formula cell whose array result
+   * spills into neighbouring cells, giving the size of the spilled range
+   * (the cell itself is its top-left corner).
+   */
+  spill?: { rows: number; cols: number };
+  /**
+   * Computed: set on a cell that shows a value spilled by another cell's
+   * formula, giving that cell's key. Such a cell has an empty `rawValue`;
+   * writing a value into it blocks the spill (`#SPILL!`).
+   */
+  spilledFrom?: string;
+  /**
+   * Computed: set when the cell holds several values (a list, or an array
+   * kept in one cell with `={...}`). `displayValue` is their text form.
+   */
+  array?: CellArray;
+}
+
+/** One value of a `CellArray`: a scalar (`null` for blank, error codes as text) or a nested array. */
+export type CellArrayItem = string | number | boolean | null | CellArray;
+
+/**
+ * Several values held by one cell, row-major. A list is a single column
+ * (`cols: 1`). Items can themselves be arrays.
+ */
+export interface CellArray {
+  rows: number;
+  cols: number;
+  values: CellArrayItem[];
 }
 
 /**
@@ -113,6 +143,32 @@ export interface FormulaContext {
   getCellValue: (ref: string) => unknown;
   /** Retrieve a flat array of values for a rectangular range (e.g. "A1", "B5"). */
   getRangeValues: (start: string, end: string) => unknown[];
+  /** The cell whose formula is being evaluated (0-based), when there is one */
+  cell?: CellCoord;
+  /** Name of the sheet the formula is on */
+  sheet?: string;
+}
+
+/**
+ * How a formula function wants one argument. Arguments beyond the listed
+ * kinds use the last one.
+ *
+ * - `'number'` / `'text'` / `'value'`: a single value. Given an array or a
+ *   multi-cell range, the function is called once per element and the
+ *   results form an array (which spills). A blank cell arrives as `0`,
+ *   `''` or `undefined` respectively; `'value'` also receives an error in
+ *   the argument as its code (`'#N/A'`) instead of failing the call.
+ * - `'array'`: passed as is, a `RangeValue` for ranges and arrays (default).
+ * - `'reference'`: the reference itself (`RefValue`), not its values.
+ */
+export type FormulaArgumentKind = 'number' | 'text' | 'value' | 'array' | 'reference';
+
+/** Options for `registerFunction()`. */
+export interface FormulaFunctionOptions {
+  /** How each argument is passed. Default: every argument is `'array'` */
+  args?: FormulaArgumentKind[];
+  /** The result changes without its inputs changing (like NOW), so it is never cached */
+  volatile?: boolean;
 }
 
 /**
@@ -502,6 +558,73 @@ export interface ConditionalFormatChangeDetail {
   rules: ConditionalFormatRule[];
   /** What triggered the change */
   source: 'user' | 'undo' | 'redo' | 'programmatic';
+}
+
+/** Options for `addSheet()`. */
+export interface AddSheetOptions {
+  /** The sheet's cells. Default: empty */
+  data?: GridData;
+  /** Grid size. Default: the size of the sheet being shown */
+  rows?: number;
+  cols?: number;
+  /** Position among the sheets (0 = first). Default: last */
+  index?: number;
+  /** Show the new sheet. Default: false */
+  activate?: boolean;
+}
+
+/** Detail for the `sheet-change` event, fired after another sheet is shown. */
+export interface SheetChangeDetail {
+  /** Name of the sheet now shown */
+  sheet: string;
+  /** Name of the sheet shown before */
+  previous: string;
+  /** What triggered the change (undo/redo show the sheet they change) */
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
+}
+
+/**
+ * Detail for `sheets-change` (after a sheet was added, removed, renamed or
+ * moved) and the cancelable `before-sheets-change` (before a user does so,
+ * describing the result).
+ */
+export interface SheetsChangeDetail {
+  /** Names of all sheets in tab order (for `before-sheets-change`: as they will be) */
+  sheets: string[];
+  kind: 'add' | 'remove' | 'rename' | 'move';
+  /** The sheet that was added, removed, renamed (its new name) or moved */
+  sheet: string;
+  /** For `rename`: the old name */
+  previous?: string;
+  /** What triggered the change */
+  source: 'user' | 'programmatic';
+}
+
+/** A defined name: a name formulas can use for a range, a constant or a LAMBDA. */
+export interface DefinedName {
+  name: string;
+  /** What the name stands for, as a formula (`=A1:A10`, `=0.19`, `=LAMBDA(x, x * 2)`) */
+  refersTo: string;
+  /** Sheet that references without a sheet name in `refersTo` point to */
+  sheet: string;
+}
+
+/** Detail for the `names-change` event, fired after the defined names change. */
+export interface NamesChangeDetail {
+  /** All defined names */
+  names: DefinedName[];
+  /** What triggered the change */
+  source: 'user' | 'undo' | 'redo' | 'programmatic';
+}
+
+/** Detail for the `list-change` event, fired when cells are turned into lists or lists into text. */
+export interface ListConversionDetail {
+  /** Cell keys that were converted */
+  cellIds: string[];
+  /** True when text became lists, false when lists became text */
+  toList: boolean;
+  /** What triggered the conversion */
+  source: 'user' | 'programmatic';
 }
 
 /**

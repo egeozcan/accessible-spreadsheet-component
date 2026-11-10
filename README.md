@@ -22,10 +22,15 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 - CSV/TSV import and export
 - Copy/cut/paste with HTML and TSV clipboard formats
 - Undo/redo with Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)
-- Formula engine with 80+ built-in functions and custom function support
-- Arrow key cell reference insertion during formula editing
+- Formula engine with more than 100 built-in functions and custom function support
+- Dynamic arrays: a formula whose result is an array spills into the cells below and to the right of it (`=A1:A3*2`, `FILTER`, `SORT`, `UNIQUE`, `SEQUENCE`), with `#SPILL!`, `A1#` and `@`
+- Lists and arrays in cells: several values in one cell (Ctrl+J), a popup that shows them (Alt+Down), filtering by item, and `HAS` / `HASANY` / `HASALL` / `FLATTEN`
+- Multiple sheets with accessible sheet tabs and cross-sheet references (`=Sheet2!A1`, `=SUM(Data!A:A)`)
+- Defined names for ranges, constants and functions (`=SUM(sales)`, `=double(4)`), with a Name Box to go to a cell, range or name and to name the selection (Ctrl+G), and a name manager dialog (Ctrl+F3)
+- `LET` and `LAMBDA`, with `MAP`, `REDUCE`, `BYROW` and `BYCOL`
+- References picked with the arrow keys or the mouse while typing a formula, on other sheets too
 - Virtual rendering for large datasets (1000+ rows)
-- Dual-mode formula bar (raw / formatted)
+- Dual-mode formula bar (raw / formatted) with a Name Box
 - Read-only mode
 - CSS custom properties for theming
 - Shadow DOM encapsulation
@@ -87,13 +92,19 @@ sheet.setData(data);
 | `validateCell` | - | `(cellId, value) => string \| null \| undefined` | - | Validates user-entered values; return a message to reject one (see [Validation and edit control](#validation-and-edit-control)) |
 | `rawInput` | `raw-input` | `boolean` | `false` | Store typed values exactly as entered, without recognising percentages, currency, dates and times (see [Typed input](#typed-input)) |
 | `hideStatusBar` | `hide-status-bar` | `boolean` | `false` | Hide the status bar under the grid |
+| `sheetTabs` | `sheet-tabs` | `boolean` | `false` | Show the sheet tabs even with a single sheet, so users can add sheets. With more than one sheet the tabs always show (see [Multiple sheets](#multiple-sheets)) |
+| `sheets` | - | `string[]` (read-only) | `['Sheet1']` | Names of the sheets, in tab order |
+| `activeSheet` | - | `string` | `'Sheet1'` | Name of the sheet being shown. Assign a sheet's name to show it |
+
+With several sheets, `rows`, `cols`, `data`, `frozenRows` and `frozenCols` are those of the sheet being shown.
 
 ### Methods
 
 ```js
-sheet.getData()          // Returns a copy of the grid data
+sheet.getData()          // Returns a copy of the grid data (of the sheet being shown)
 sheet.setData(data)      // Replaces grid data (clears undo/redo)
 sheet.registerFunction('DOUBLE', (ctx, val) => Number(val) * 2)
+sheet.registerFunction('NET', (ctx, gross) => gross / 1.19, { args: ['number'] }) // called once per element of a range
 
 // Formatting
 sheet.setCellFormat('0:0', { bold: true, verticalAlign: 'top', wrap: true })
@@ -165,6 +176,40 @@ sheet.applyConditionalFormatPreset('top10')                // a one-step rule on
 sheet.clearSelectionConditionalFormats()                   // clear the selection's rules, as the user
 sheet.openConditionalFormatManager()                       // the rule manager dialog (Alt+Shift+C)
 
+// Sheets (not undoable)
+sheet.sheets                                  // ['Sheet1']
+sheet.addSheet()                              // 'Sheet2': the next free name is the default
+sheet.addSheet('Orders', { data: orders, rows: 200, cols: 8, index: 0, activate: true }) // every option is optional
+sheet.activeSheet                             // 'Orders'
+sheet.activateSheet('Sheet1')                 // or: sheet.activeSheet = 'Sheet1'
+sheet.renameSheet('Sheet1', 'Summary')        // formulas that refer to it are rewritten
+sheet.moveSheet('Summary', 0)                 // make it the first tab
+sheet.getSheetData('Orders')                  // like getData(), for any sheet
+sheet.setSheetData('Orders', data)            // like setData(), for any sheet
+sheet.removeSheet('Sheet2')
+
+// Defined names (workbook-wide; not undoable)
+sheet.defineName('tax', '=0.19')                                  // a constant: =B2*(1+tax)
+sheet.defineName('sales', '=Orders!C2:C60')                       // a range: =SUM(sales)
+sheet.defineName('withTax', '=LAMBDA(amount, amount * (1 + tax))') // a function: =withTax(B5)
+sheet.defineName('prices', '=B2:B60', 'Orders')                   // third argument: the sheet B2:B60 is on
+sheet.getNames()                              // [{ name, refersTo, sheet }], to save
+sheet.setNames(savedNames)                    // replace all names
+sheet.removeName('tax')                       // true if it existed; formulas that use it show #NAME?
+sheet.goTo('sales')                           // select the cells of a name or reference, on their sheet: 'B5', 'A1:C3', 'Orders!A2'
+sheet.focusNameBox()                          // move the focus to the Name Box (Ctrl+G)
+sheet.openNameManager()                       // the name manager dialog (Ctrl+F3)
+sheet.closeNameManager()
+
+// Lists and arrays in cells
+const owners = { start: { row: 1, col: 1 }, end: { row: 9, col: 1 } };
+sheet.convertToList(owners)                   // "Ann, Bob" becomes a list of two values; returns the number of cells converted (undoable)
+sheet.convertListToText(owners)               // and back
+sheet.convertToList()                         // no argument: the selection
+sheet.getCellValues('1:1')                    // { rows: 2, cols: 1, values: ['Ann', 'Bob'] }, or null for a cell with a single value
+sheet.showCellValues('1:1')                   // open the popup with the cell's values (Alt+Down or Alt+Shift+V); no argument: the active cell
+sheet.closeCellValues()
+
 // Find
 sheet.findCells('total')                      // ['5:0', ...] in reading order
 sheet.findCells('SUM', { formulas: true, matchCase: true })
@@ -220,7 +265,7 @@ Ctrl+Shift+V pastes values: formulas copied in this grid paste as the values the
 
 ### Filters
 
-A filter hides the rows of a table whose cells don't match. The table's first row is its header row: it is never hidden, and each of its cells gets a filter button. For each filtered column, a row stays visible only if the column displays one of the column's values, compared as shown on screen (number formats included; `''` matches blank cells). Filtered columns show a funnel icon and the table's row numbers turn blue.
+A filter hides the rows of a table whose cells don't match. The table's first row is its header row: it is never hidden, and each of its cells gets a filter button. For each filtered column, a row stays visible only if the column displays one of the column's values, compared as shown on screen (number formats included; `''` matches blank cells). A cell that holds [several values](#lists-and-arrays-in-cells) matches when one of its items is among them. Filtered columns show a funnel icon and the table's row numbers turn blue.
 
 On a header cell, Alt+Down (or a click on its button) opens the filter menu, a dialog with Sort A to Z / Z to A, Clear filter, a search box and a checklist of the column's values. The list holds the values of the rows that pass the other columns' filters, sorted like `sort()` with (Blanks) last. Arrow keys move through it, Space checks a value, and Enter applies (OK). Searching checks every match, and OK then keeps only the checked matches, as in Excel. Escape or a click outside closes the menu without changes. Ctrl+Shift+L adds a filter to the selection, or to the table around the active cell (removing it if there is one), and Ctrl+Alt+L reapplies it.
 
@@ -292,6 +337,158 @@ Rules move with their cells when rows or columns are inserted or deleted: ranges
 
 Each rule covers one rectangle. Clearing rules from a range removes the rules inside it and trims those it cuts across a whole edge; a rule that would no longer be one rectangle is left as it is.
 
+### Dynamic arrays
+
+A formula whose result is an array spills: its values fill the cells below and to the right of the formula's cell. Operators and single-value functions work element by element on ranges and arrays, so `=A1:A3*2`, `=UPPER(A1:A3)` and `=IF(A1:A3>1, "yes", "no")` each give three values. The array functions (`FILTER`, `SORT`, `UNIQUE`, `SEQUENCE` and the others listed under [Formula engine](#formula-engine)) return arrays of any size.
+
+```js
+import { cellKey } from 'y11n-spreadsheet';
+
+const cell = (rawValue) => ({ rawValue, displayValue: rawValue, type: 'text' });
+const data = new Map();
+['North', 'South', 'North', 'East'].forEach((region, row) => data.set(cellKey(row, 0), cell(region)));
+data.set('0:2', cell('=UNIQUE(A1:A4)')); // C1 spills North, South, East into C1:C3
+data.set('0:4', cell('=ROWS(C1#)'));     // E1: 3
+sheet.setData(data);
+
+sheet.getData().get('0:2') // { rawValue: '=UNIQUE(A1:A4)', displayValue: 'North', type: 'text', spill: { rows: 3, cols: 1 } }
+sheet.getData().get('1:2') // { rawValue: '', displayValue: 'South', type: 'text', spilledFrom: '0:2' }
+```
+
+A formula shows `#SPILL!` and spills nothing when a cell in the way holds a value, or when the result would leave the grid. Clearing the cell lets the spill through. Typing into a spilled cell blocks the spill in the same way.
+
+`C1#` refers to everything `C1` spills, whatever its size (`=SUM(C1#)`). `@` picks one value from a range: the one on the formula's own row or column (`=@A1:A9` in `C4` is the value of `A4`).
+
+Spilled values are computed, not stored. In `getData()` the formula's cell has `spill` (the size of the range it fills), and the cells that show its values have an empty `rawValue` and `spilledFrom` (the key of the formula's cell). `setData()` ignores spilled values in the data it is given, so the result of `getData()` can be passed back as it is. Sorting and inserting or deleting rows and columns move the stored cells only, and the formula spills again where it lands. Copying a spilled cell copies its value. CSV export of display values, filters, the status bar and number formats treat spilled values like any others.
+
+**Accessibility.** On a spilled value the active cell is announced with "spilled from C1", on the formula's cell with "spills to C3", and on a formula showing `#SPILL!` with the reason: "the cells the result would fill are not empty" or "the result does not fit on the sheet". While the active cell is in a spill range, the range is outlined (`--ls-spill-border`), and on a spilled value the formula bar shows the formula it comes from greyed out.
+
+### Lists and arrays in cells
+
+A cell can hold several values, as in [Excel](https://techcommunity.microsoft.com/blog/excelblog/excel-now-supports-multiple-values-in-a-single-cell/4549756). There are two kinds: a list, whose values the user types, and an array, which a formula keeps in its cell instead of spilling.
+
+**Lists.** Ctrl+J turns the comma-separated text of the selected cells into lists: `Ann, Bob` becomes two values. When the selection has lists and no text left to convert, it turns the lists back into text. On an empty cell it opens the editor for a new list, and in the editor it commits what was typed as a list. Formula cells are left alone. Like other edits, the conversion skips read-only cells and rows hidden by a filter, and is one undo step.
+
+A list is edited as its items: Enter or F2 on a list shows `Ann, Bob, "Smith, J"`. Items are separated by commas; double quotes keep a comma inside an item, or keep a number as text (`"007"`). Numbers and `TRUE` / `FALSE` become values, and empty items are dropped. Comma-separated text typed right below a list becomes a list too (not with `raw-input`).
+
+A list is stored as a formula, `={{"Ann";"Bob"}}`, in the cell's `rawValue`, so undo, copy, export and `setData()` need nothing new. `listToFormula()` and `listItemsOf()` convert between items and that formula:
+
+```js
+import { listToFormula } from 'y11n-spreadsheet';
+
+const cell = (rawValue) => ({ rawValue, displayValue: '', type: 'text' });
+sheet.setData(new Map([
+  ['0:0', cell('Project')],  ['0:1', cell('Owners')],                         ['0:2', cell('Owned by Bob?')],
+  ['1:0', cell('Website')],  ['1:1', cell(listToFormula(['Ann', 'Bob']))],    ['1:2', cell('=HAS(B2, "Bob")')],
+  ['2:0', cell('App')],      ['2:1', cell('={{"Bob";"Cy";"Di"}}')],           ['2:2', cell('=HAS(B3, "Bob")')],
+]));
+
+sheet.getCellValues('1:1')   // { rows: 2, cols: 1, values: ['Ann', 'Bob'] }
+sheet.getData().get('1:1')   // { rawValue: '={{"Ann";"Bob"}}', displayValue: 'Ann, Bob', type: 'text', array: { ... } }
+```
+
+**Arrays in cells.** Wrapping a formula in braces keeps a result that would spill in one cell: `={FILTER(A2:A9, B2:B9="x")}`. Arrays nest: `={{1,2,3};{4,5,6}}` fills two cells with an array of three values each, and `=TEXTSPLIT(A1:A3, ",")` gives one array per text.
+
+**In formulas.** A reference to a cell with several values gives all of them: `=B2` spills them, and `=SUM(B2)`, `=COUNTA(B2)` and `=B2*2` work on the items. Four functions are made for these cells:
+
+| Function | Result |
+|----------|--------|
+| `HAS(array, value)` | Whether the value is one of the items, at any depth of nesting (text is compared ignoring case) |
+| `HASANY(array, values)` | Whether at least one of the values is among the items |
+| `HASALL(array, values)` | Whether every one of the values is among the items |
+| `FLATTEN(array, [pad_value], [levels])` | Lays nested arrays out as a table, e.g. `=UNIQUE(FLATTEN(B2:B4))` for everyone in three lists. Shorter arrays are padded with `pad_value` (default `#N/A`); `levels` is how many levels of nesting to remove (default: all) |
+
+**Filters** list and match the individual items instead of the whole text: the filter menu of a column of lists shows each item once, and a row stays visible when one of its items is kept. `sheet.setColumnFilter(1, ['Bob'])` keeps the rows whose list has Bob in it.
+
+**Display and the values popup.** The cell shows its values as text (`Ann, Bob`; the rows of a table are separated by `; `, and nested arrays are in braces) next to an icon. `CellData.array` has them as data: `{ rows, cols, values }`, with `values` row by row, `null` for a blank and a nested `{ rows, cols, values }` for an array inside the array. Alt+Down on the cell, a click on its icon or `showCellValues()` opens a popup with the values. Alt+Shift+V opens it too, and is the key to use on a filter header cell, where Alt+Down opens the filter menu. The popup shows a numbered list, or a table for an array with several rows and columns (up to 200 rows and 20 columns). A nested array is a button that opens it; Back or Backspace returns, and Escape or a click outside closes the popup.
+
+**Accessibility.** The cell's accessible name and the active-cell announcement say what the cell holds, "list of 3 items" or "array of 2 rows and 3 columns", and the announcement names the key that shows the values: "Alt+Down to show the values", or "Alt+Shift+V to show the values" on a filter header cell. The popup is a dialog labelled with the cell ("Values in B2").
+
+`list-change` (`{ cellIds, toList, source }`) fires when cells are converted with Ctrl+J, `convertToList()` or `convertListToText()`. Typing or editing a list is an edit like any other (`before-change`, `cell-change`).
+
+### Multiple sheets
+
+A workbook has one or more sheets, and starts with one named `Sheet1`. Formulas refer to cells on another sheet with the sheet's name and `!`: `=Sheet2!A1`, `=SUM(Data!A:A)`, and with quotes when the name needs them, `='My sheet'!A1:B2`. A reference to a sheet that doesn't exist is `#REF!`.
+
+```js
+const cell = (rawValue) => ({ rawValue, displayValue: rawValue, type: 'text' });
+
+sheet.setData(new Map([
+  ['0:0', cell('North')],
+  ['0:1', cell('=SUMIF(Orders!A:A, A1, Orders!C:C)')],
+]));
+sheet.renameSheet('Sheet1', 'Summary');
+sheet.addSheet('Orders', {
+  data: new Map([
+    ['0:0', cell('North')], ['0:2', cell('120')],
+    ['1:0', cell('South')], ['1:2', cell('80')],
+    ['2:0', cell('North')], ['2:2', cell('45')],
+  ]),
+});
+
+sheet.sheets                    // ['Summary', 'Orders']
+sheet.activeSheet               // 'Summary'; B1 shows 165
+sheet.activateSheet('Orders');  // show the other sheet
+```
+
+**What is per sheet.** Each sheet has its own data, size, selection, scroll position, column widths, frozen panes, filter and conditional formats. `data`, `rows`, `cols`, the selection and every method that takes cell keys or ranges work on the sheet being shown; `getSheetData(name)` and `setSheetData(name, data)` reach the other sheets. Defined names, custom functions and the undo history belong to the whole workbook. `addSheet(name, options)` takes the new sheet's `data`, `rows` and `cols` (default: the size of the sheet being shown), its `index` among the tabs (default: last) and `activate` to show it.
+
+**Sheet tabs.** The tabs (`<y11n-sheet-tabs>`) appear under the grid when there is more than one sheet, or always with the `sheet-tabs` attribute, which lets users add the second sheet. They are a tab list: Left / Right and Home / End move between the tabs and show each sheet as they go. F2 or a double-click renames a sheet in place (Enter commits, Escape cancels, and a name that isn't allowed shows why), Delete asks for confirmation and then deletes the sheet, and Ctrl+Shift+Left / Right moves it. A tab can also be dragged to another position: with the mouse once it has moved a little sideways, with a finger or pen after resting on it briefly. A line shows where the tab will land, and Escape during the drag puts it back. The `+` button adds a sheet, and the Sheet options menu has Rename, Delete, Move left and Move right for the active sheet. From the grid, Ctrl+PageDown / PageUp show the next / previous sheet; Alt+PageDown / PageUp do the same, since browsers keep Ctrl+PageDown / PageUp for their own tabs. In read-only mode the tabs switch sheets but don't add, rename, delete or move them.
+
+**References to another sheet while typing.** With a formula open, a click on another sheet's tab shows that sheet without ending the edit, and so do Ctrl+PageDown / PageUp and Alt+PageDown / PageUp in the editor. Cells picked there, with a click, a drag or the arrow keys, are written with the sheet's name: `=A1+Orders!B3`, `=A1+'My data'!B2`. Meanwhile the formula stays in view in a strip at the bottom of the grid, and the announcement says which cell is being edited. Enter commits and Escape cancels, and both show the edited cell's sheet again. With anything other than a formula in the editor, a click on a tab commits the edit first, and the sheet keys do nothing.
+
+**Sheet names** have 1 to 31 characters, none of `: \ / ? * [ ]`, no space or apostrophe at either end, and are unique ignoring case. `addSheet()` and `renameSheet()` throw a `RangeError` for any other name, as every sheet method does for a sheet that doesn't exist. `validateSheetName(name, otherNames)` is exported and returns what is wrong with a name, or `null`.
+
+**Undo.** Undo and redo cover all sheets: undoing a change made on another sheet shows that sheet first. Adding, removing, renaming and moving sheets are not undoable. Removing a sheet, or replacing its data with `setSheetData()`, takes the changes made on it out of the undo history.
+
+**Keeping references right.** Inserting or deleting rows and columns rewrites the references to that sheet on every sheet, and in defined names. Renaming a sheet rewrites the formulas, defined names and conditional formats that refer to it, and the undo history. Removing a sheet keeps the text of the formulas that refer to it: they show `#REF!` until a sheet of that name exists again. The last sheet can't be removed.
+
+**Events.** `sheet-change` (`{ sheet, previous, source }`) fires after another sheet is shown, including when undo or redo shows the sheet it changes. `sheets-change` (`{ sheets, kind, sheet, previous?, source }`, with `kind` one of `'add'`, `'remove'`, `'rename'`, `'move'`) fires after the list of sheets changes. Changes users make from the tabs fire the cancelable `before-sheets-change` first, with the same detail describing the result:
+
+```js
+sheet.addEventListener('before-sheets-change', (e) => {
+  if (e.detail.kind === 'remove' && e.detail.sheet === 'Summary') e.preventDefault();
+});
+```
+
+To save a workbook, store `getSheetData(name)` for each of `sheet.sheets`, plus `getNames()`. `getColumnWidths()`, `getFilter()` and `getConditionalFormats()` return those of the sheet being shown.
+
+### Defined names
+
+A defined name is a name that formulas can use for a range, a constant or a function.
+
+```js
+sheet.defineName('sales', '=B2:B60');
+sheet.defineName('tax', '=0.19');
+sheet.defineName('withTax', '=LAMBDA(amount, amount * (1 + tax))');
+// In cells: =SUM(sales), =B2*(1+tax), =withTax(B5)
+```
+
+A name is made of letters, digits, `_` and `.`, doesn't start with a digit, and can't look like a cell reference (`A1`) or be `TRUE` or `FALSE`; `defineName()` throws a `RangeError` otherwise. Names are not case-sensitive and belong to the whole workbook; defining an existing name replaces it. The leading `=` of `refersTo` is optional. References without a sheet name point to the sheet given as the third argument (default: the sheet being shown). A name that is not defined is `#NAME?`.
+
+The references a name holds move when rows or columns are inserted or deleted (and move back on undo), and follow a renamed sheet. Defining, changing and removing names is not undoable, whether it is done from code or by the user, and names survive `setData()`. `names-change` (`{ names, source }`) fires after every change, including when rows or columns move a name's references and when a sheet a name is based on or refers to is renamed or removed: save the names with `getNames()` and restore them with `setNames()`. A name whose sheet was removed has `sheet: ''`: it keeps working as a constant or with sheet-qualified references, its references without a sheet name are `#REF!`, and `setNames()` restores it like that instead of basing it on another sheet.
+
+**Name Box.** The box at the left of the formula bar shows the active cell's reference, or a name when the selection is exactly that name's cells. It is an input. Type a cell (`C5`), a range (`A1:C3`), a reference to another sheet (`Orders!A2`) or a name that stands for cells, and press Enter: those cells are selected, on their sheet, and the focus returns to the grid. Type a name that doesn't exist yet to name the selection: it is defined as an absolute reference with the sheet's name (`=Sheet1!$A$1:$A$2`), and the new name is announced. Other text changes nothing and is announced as not valid; a name for a constant or a LAMBDA has no cells to go to. The box suggests the defined names, Escape returns to the grid, and Ctrl+G or `focusNameBox()` moves the focus to the box.
+
+`goTo(reference)` does from code what typing in the Name Box and pressing Enter does for a reference or a name. It returns `false` when the text is neither, when the name doesn't stand for cells, or when the cells are outside the grid.
+
+```js
+sheet.goTo('Orders!A2');  // shows the Orders sheet and selects A2
+sheet.goTo('sales');      // selects B2:B60
+sheet.goTo('tax');        // false: a constant has no cells
+```
+
+**Name manager.** Ctrl+F3 or `openNameManager()` opens a dialog that lists the names in alphabetical order, each with what it refers to, its sheet, and Go to, Edit and Delete buttons. New name opens a form with three fields: Name, Refers to (it starts as the selection, such as `=Sheet1!$A$1:$A$2`) and Sheet (the sheet that references without a sheet name point to). Enter saves, and a name or formula that isn't valid is explained after its field (and announced). Renaming a name rewrites the formulas that use it on every sheet, so `=SUM(sales)` becomes `=SUM(revenue)`. A rename that would change what a formula means is refused as a whole, with the reason shown in the dialog: when a formula that uses the name has a `LET` or `LAMBDA` variable of the old or the new name, or calls the name and the new name is a function (`double` to `SUM`). Delete asks for confirmation, and formulas that used the name then show `#NAME?`. Go to closes the dialog and selects the name's cells. Every change is announced inside the dialog ("Name added: sales"). Escape goes back from the form to the list and then closes the dialog; a click outside or `closeNameManager()` closes it too.
+
+**Changes by users.** Naming the selection in the Name Box and every change in the name manager fire the cancelable `before-names-change` first (`{ names, source: 'user' }`, with the names as they will be). They are refused in read-only mode, where the name manager still lists the names and goes to them. `defineName()`, `removeName()` and `setNames()` are not restricted and don't fire it.
+
+```js
+// Keep users from removing or renaming `tax`
+sheet.addEventListener('before-names-change', (e) => {
+  if (!e.detail.names.some((n) => n.name === 'tax')) e.preventDefault();
+});
+```
+
 ### Cell formats
 
 | Property | Type | Description |
@@ -350,6 +547,26 @@ sheet.addEventListener('conditional-format-change', (e) => {
   const { rules, source } = e.detail; // all rules, in priority order
   localStorage.setItem('rules', JSON.stringify(rules));
 });
+
+// Cells were turned into lists, or lists into text (Ctrl+J, convertToList(), convertListToText())
+sheet.addEventListener('list-change', (e) => {
+  const { cellIds, toList, source } = e.detail; // toList: false when lists became text
+});
+
+// Another sheet is shown (also when undo/redo shows the sheet it changes)
+sheet.addEventListener('sheet-change', (e) => {
+  const { sheet: name, previous, source } = e.detail; // sheet names
+});
+
+// A sheet was added, removed, renamed or moved
+sheet.addEventListener('sheets-change', (e) => {
+  const { sheets, kind, sheet: name, previous, source } = e.detail; // kind: 'add' | 'remove' | 'rename' | 'move'; previous: the old name of a renamed sheet
+});
+
+// The defined names changed: from code, by the user (Name Box, name manager), or when inserted or deleted rows/columns move their references
+sheet.addEventListener('names-change', (e) => {
+  const { names, source } = e.detail; // names: [{ name, refersTo, sheet }]
+});
 ```
 
 ### Validation and edit control
@@ -393,6 +610,16 @@ sheet.addEventListener('before-column-resize', (e) => {
 sheet.addEventListener('before-sort', (e) => {
   if (e.detail.range.start.col === 0) e.preventDefault();
 });
+
+// Veto a sheet being added, deleted, renamed or moved from the sheet tabs; same detail as sheets-change, describing the result
+sheet.addEventListener('before-sheets-change', (e) => {
+  if (e.detail.kind === 'remove') e.preventDefault();
+});
+
+// Veto a change to the defined names made in the Name Box or the name manager; detail: { names, source: 'user' }, names as they will be
+sheet.addEventListener('before-names-change', (e) => {
+  if (e.detail.names.length > 50) e.preventDefault();
+});
 ```
 
 When Enter or Tab commits a rejected value in the inline editor, the editor stays open, shows the message below the cell (`part="validation-message"`, linked with `aria-describedby`) and announces it. If focus moves away instead, the edit is discarded. A rejected formula-bar entry is not applied and the message is announced. For paste, fill and Ctrl+Enter, rejected and read-only cells are skipped and the rest is applied; the count is announced.
@@ -401,11 +628,13 @@ When Enter or Tab commits a rejected value in the inline editor, the editor stay
 
 ### Formula engine
 
-Formulas start with `=`. Supported syntax:
+Formulas start with `=`. A formula is parsed once into a syntax tree and evaluated from it. The engine records the cells and ranges each formula reads, so a change recalculates only the formulas it can reach; a large range counts as one dependency, and its values are read once per recalculation. Supported syntax:
 
-**Operators**: `+`, `-`, `*`, `/`, `&` (concat), `=`, `<>`, `<`, `>`, `<=`, `>=`
+**Operators**: `+`, `-`, `*`, `/`, `^`, `%` (after a value: `50%`), `&` (concat), `=`, `<>`, `<`, `>`, `<=`, `>=`, `:` (range), `@` (one value of a range), `#` (what a cell spills: `A1#`). As in Excel, `^` is left-associative and `-2^2` is 4.
 
-**Cell references**: `A1`, `B2:D10` (ranges)
+**Values**: numbers (`1.5`, `1e3`), text in double quotes, `TRUE` / `FALSE`, and array literals (`{1,2;3,4}`: commas between columns, semicolons between rows; the elements can be expressions).
+
+**References**: cells (`A1`, `$A$1`), ranges (`B2:D10`), whole columns and rows (`A:A`, `$A:$C`, `1:1`), references to other sheets (`Sheet2!A1`, `'My sheet'!A1:B2`, `Data!A:A`), and [defined names](#defined-names). A whole-column reference is as tall as the grid (`=ROWS(A:A)` is the number of rows) and is read up to the last row that holds anything on any sheet, values and spilled results alike, so `A:A` and `Other!A:A` pair up in `SUMIFS` or `XLOOKUP`. A formula's own spilled results don't count for what it reads: `=A:A*2` gives one result per row of data, wherever it is entered. Two such formulas that each read the other's results can't settle and one of them shows `#SPILL!`.
 
 **Built-in functions**:
 
@@ -414,15 +643,33 @@ Formulas start with `=`. Supported syntax:
 | Aggregates | `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `PRODUCT`, `MEDIAN`, `SUMPRODUCT` |
 | Statistics | `STDEV`, `STDEV.S`, `STDEV.P`, `VAR`, `VAR.S`, `VAR.P` |
 | Conditional aggregates | `SUMIF`, `COUNTIF`, `AVERAGEIF`, `SUMIFS`, `COUNTIFS`, `AVERAGEIFS` |
-| Logic | `IF`, `IFS`, `IFERROR`, `AND`, `OR`, `NOT` |
-| Lookup | `VLOOKUP`, `HLOOKUP`, `XLOOKUP`, `INDEX`, `MATCH` |
+| Logic | `IF`, `IFS`, `IFERROR`, `IFNA`, `AND`, `OR`, `NOT`, `TRUE`, `FALSE` |
+| Lookup | `VLOOKUP`, `HLOOKUP`, `XLOOKUP`, `INDEX`, `MATCH`, `XMATCH` |
+| References | `ROW`, `COLUMN`, `ROWS`, `COLUMNS`, `OFFSET`, `INDIRECT`, `ADDRESS` |
+| Dynamic arrays | `FILTER`, `SORT`, `SORTBY`, `UNIQUE`, `SEQUENCE`, `TRANSPOSE`, `VSTACK`, `HSTACK`, `TAKE`, `DROP`, `CHOOSECOLS`, `CHOOSEROWS`, `TOCOL`, `TOROW` |
+| Several values in a cell | `HAS`, `HASANY`, `HASALL`, `FLATTEN` |
+| Variables and functions | `LET`, `LAMBDA`, `MAP`, `REDUCE`, `BYROW`, `BYCOL` |
 | Math | `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `INT`, `MOD`, `POWER`, `SQRT`, `CEILING`, `FLOOR` |
-| Text | `CONCAT`, `TEXTJOIN`, `UPPER`, `LOWER`, `LEN`, `TRIM`, `LEFT`, `RIGHT`, `MID`, `SUBSTITUTE`, `FIND`, `TEXT`, `VALUE` |
+| Text | `CONCAT`, `TEXTJOIN`, `TEXTSPLIT`, `UPPER`, `LOWER`, `LEN`, `TRIM`, `LEFT`, `RIGHT`, `MID`, `SUBSTITUTE`, `FIND`, `TEXT`, `VALUE` |
 | Date | `DATE`, `TODAY`, `NOW`, `YEAR`, `MONTH`, `DAY`, `WEEKDAY`, `EDATE`, `EOMONTH` |
 | Financial | `PMT`, `FV`, `PV`, `NPV` |
-| Information | `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISLOGICAL`, `ISERROR`, `ISERR`, `ISNA` |
+| Information | `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISLOGICAL`, `ISERROR`, `ISERR`, `ISNA`, `NA` |
 
-Omitted arguments use their defaults, e.g. `=XLOOKUP(75, A1:A9, B1:B9, , -1)`. Criteria in `SUMIF`/`COUNTIF`/`AVERAGEIF` and the `*IFS` functions accept operators (`">5"`, `"<>x"`) and wildcards (`*`, `?`, `~` to escape). `XLOOKUP` supports match modes `0`, `-1`, `1` (not wildcard mode `2`) and search modes `1`/`-1`; it returns a single value (no spilling).
+The functions take their arguments in Excel's order. Omitted arguments use their defaults, e.g. `=XLOOKUP(75, A1:A9, B1:B9, , -1)`. Criteria in `SUMIF`/`COUNTIF`/`AVERAGEIF` and the `*IFS` functions accept operators (`">5"`, `"<>x"`) and wildcards (`*`, `?`, `~` to escape). `XLOOKUP` supports match modes `0`, `-1`, `1` (not wildcard mode `2`) and search modes `1`/`-1`, as does `XMATCH`. `XLOOKUP` returns a single value, or the whole matching row (or column) when the return range has several columns (or rows).
+
+**Arrays.** Operators and single-value functions work element by element on ranges and arrays, and a result that is an array spills (see [Dynamic arrays](#dynamic-arrays)): `=A1:A3*2`, `=IF(A1:A3>1, "yes", "no")`, `=SUMPRODUCT((A1:A3>1)*A1:A3)`. `HAS`, `HASANY`, `HASALL` and `FLATTEN` are described under [Lists and arrays in cells](#lists-and-arrays-in-cells).
+
+**References as values.** `INDEX` returns a reference when it is given one, so `=SUM(A1:INDEX(A1:A9, 3))` adds up `A1:A3`, and a row or column index of `0` gives the whole column or row. `OFFSET` and `INDIRECT` return references too. `ROW()` and `COLUMN()` without an argument are the row and column of the formula's own cell; `ROW`, `COLUMN`, `ROWS` and `COLUMNS` also take a range. `ADDRESS` writes and `INDIRECT` reads `A1`-style references only.
+
+**LET and LAMBDA.** `LET` names intermediate values: `=LET(net, B2-C2, net*net)`. `LAMBDA` makes a function, which can be called on the spot (`=LAMBDA(x, x*2)(4)`), bound by `LET`, stored as a defined name (`=double(4)`), or passed to `MAP`, `REDUCE`, `BYROW` and `BYCOL`:
+
+```
+=MAP(A1:A3, LAMBDA(v, v*2))
+=REDUCE(0, A1:A3, LAMBDA(total, v, total+v))
+=BYROW(A1:C3, LAMBDA(row, SUM(row)))
+```
+
+**Errors and blanks.** A name or function that is not defined is `#NAME?`. A formula that can't be parsed is `#ERROR!`. `#SPILL!` and `#CALC!` (for example a `FILTER` that keeps nothing) come with arrays. A blank cell is `""` to `&` and equal to both `0` and `""`. Aggregates skip a blank cell, whether it is in a range or given on its own: `=COUNT(A1)` and `=COUNTA(A1)` are 0 for an empty `A1`. Error text typed into a cell (`#N/A`) is an error to the formulas that read it, `AND` and `OR` over a range that holds an error give that error, and a result too large for a number is `#NUM!` (`=2^1024`).
 
 **Custom functions**:
 
@@ -433,7 +680,33 @@ sheet.registerFunction('TAX', (ctx, amount, rate) => {
 // Use in cells: =TAX(B1, 0.2)
 ```
 
-The `ctx` argument provides `getCellValue(ref)` and `getRangeValues(start, end)` for reading other cells.
+The `ctx` argument provides `getCellValue(ref)` and `getRangeValues(start, end)` for reading other cells, `cell` (the `{ row, col }` of the formula's cell, 0-based) and `sheet` (the name of the formula's sheet).
+
+`registerFunction(name, fn, options)` takes two options. `args` says how each argument is passed, and `volatile: true` recalculates the function on every change, like `NOW`.
+
+```js
+// 'number' arguments make the function work element by element:
+// =NET(B2, 0.19) is one value, =NET(B2:B9, 0.19) spills eight
+sheet.registerFunction('NET', (ctx, gross, rate) => gross / (1 + rate), { args: ['number', 'number'] });
+
+sheet.registerFunction('ROLL', () => 1 + Math.floor(Math.random() * 6), { volatile: true });
+```
+
+| `args` entry | The function receives |
+|--------------|-----------------------|
+| `'number'`, `'text'`, `'value'` | A single value. Given an array or a range of several cells, the function is called once per element and the results form an array. A blank cell arrives as `0`, `''` or `undefined` respectively. `'value'` also receives an error in the argument as its code (`'#N/A'`) instead of failing the call |
+| `'array'` (default) | The argument as it is: a `RangeValue` (`{ values, rows, cols }`, row by row) for ranges and arrays |
+| `'reference'` | The reference itself, a `RefValue` (`top`, `left`, `bottom`, `right`, 0-based; `rows`, `cols`; `sheet.name`), not its values |
+
+Arguments beyond the listed kinds use the last one.
+
+A function can return a JavaScript array, which spills like any other array result: an array of arrays is a table of rows, and a flat array is a column.
+
+```js
+// =MULTIPLES(3, 4) spills 3, 6, 9, 12 down a column
+sheet.registerFunction('MULTIPLES', (ctx, n, count) =>
+  Array.from({ length: Number(count) }, (_, i) => Number(n) * (i + 1)));
+```
 
 ### Theming
 
@@ -473,7 +746,8 @@ y11n-spreadsheet {
 | `--ls-frozen-line-color` | `#9aa0a6` | Line below frozen rows and right of frozen columns |
 | `--ls-editor-shadow` | `0 2px 6px rgba(0,0,0,0.2)` | Editor drop shadow |
 | `--ls-formula-bar-bg` | `#f8fafc` | Formula bar background |
-| `--ls-formula-ref-bg` | `#fff` | Formula bar input background |
+| `--ls-formula-ref-bg` | `#fff` | Name Box background |
+| `--ls-name-box-width` | `9em` | Width of the Name Box |
 | `--ls-formula-mode-active-bg` | `#dbeafe` | Active mode toggle background |
 | `--ls-ref-highlight-border` | `#1a73e8` | Reference highlight border |
 | `--ls-ref-highlight-bg` | `rgba(26, 115, 232, 0.15)` | Reference highlight fill |
@@ -488,6 +762,16 @@ y11n-spreadsheet {
 | `--ls-filtered-row-header-color` | `#1a73e8` | Row numbers of a filtered table |
 | `--ls-filter-menu-bg` | `#fff` | Filter menu background |
 | `--ls-data-bar-color` / `--ls-data-bar-negative-color` | `#8fb8ea` / `#f0a1a1` | Conditional-format data bars without a color of their own, for positive / negative numbers |
+| `--ls-spill-border` | `#1a73e8` | Outline of the spill range the active cell is in |
+| `--ls-array-icon-color` / `--ls-array-icon-hover-bg` | `#5f6368` / `rgba(0, 0, 0, 0.08)` | Icon of a cell that holds several values, and its background when hovered |
+| `--ls-sheet-bar-bg` / `--ls-sheet-bar-height` | `--ls-header-bg` / `30px` | Sheet tab bar |
+| `--ls-sheet-tab-color` / `--ls-sheet-tab-active-color` | `--ls-text-color` | Text of a sheet tab / of the active one |
+| `--ls-sheet-tab-active-bg` | `--ls-cell-bg` | Background of the active sheet tab |
+| `--ls-sheet-tab-accent` | `#1a73e8` | Line above the active sheet tab, and the border of the rename field |
+| `--ls-sheet-tab-hover-bg` | 10% of the text color | Hovered sheet tabs, buttons and menu items |
+| `--ls-sheet-tab-max-width` | `160px` | Widest a sheet tab gets; longer names are cut with an ellipsis |
+| `--ls-sheet-delete-bg` / `--ls-sheet-delete-color` | `#c5221f` / `#fff` | Delete button of the sheet delete confirmation |
+| `--ls-name-delete-bg` / `--ls-name-delete-color` | `--ls-sheet-delete-bg` / `--ls-sheet-delete-color` | Delete button of the name manager's delete confirmation |
 | `--ls-find-bg` | `#fff` | Find bar background |
 | `--ls-find-status-color` | `#555` | Find bar match count |
 | `--ls-status-bg` / `--ls-status-color` | `#f8fafc` / `#555` | Status bar under the grid |
@@ -535,7 +819,12 @@ y11n-spreadsheet::part(editor) {
 | Alt + Shift + 0 | Fit the selected columns to their content |
 | Alt + Shift + Up / Down | Sort ascending / descending by the active cell's column: the selection, or the table around the active cell (on macOS use Option) |
 | Ctrl/Cmd + Shift + L | Add a filter to the selection or the table around the active cell; remove the filter |
-| Alt + Down | On a filter header cell: open its filter menu (on macOS use Option) |
+| Alt + Down | On a filter header cell: open its filter menu. On a cell that holds several values: show them (on macOS use Option) |
+| Alt + Shift + V | Show the values of a cell that holds several, also on a filter header cell (on macOS use Option) |
+| Ctrl/Cmd + J | Turn the comma-separated text of the selected cells into lists, or lists back into text; on an empty cell, start a new list. While editing: commit what was typed as a list |
+| Ctrl/Cmd + PageDown / PageUp (or Alt + PageDown / PageUp) | Show the next / previous sheet. While typing a formula: show it without ending the edit, to pick a reference there |
+| Ctrl/Cmd + G | Go to the Name Box. There: type a cell, a range or a name and press Enter to select it, or a new name to name the selection; Escape returns to the grid |
+| Ctrl/Cmd + F3 | Open the name manager. In it: Enter saves the form, Escape goes back from the form to the list and then closes the dialog |
 | Ctrl + Alt + L | Reapply the filter, after edits (on macOS use Ctrl+Option) |
 | Alt + Shift + C | Open the conditional-format rule manager (on macOS use Option) |
 | Ctrl/Cmd + F | Find. In the find bar: Enter / Shift+Enter (or F3 / Shift+F3) next / previous match, Escape closes |
@@ -546,7 +835,19 @@ y11n-spreadsheet::part(editor) {
 | Ctrl+Shift+Z / Ctrl+Y | Redo |
 | Any printable character | Start editing with that character |
 
-During formula editing, arrow keys insert cell references instead of navigating.
+During formula editing, arrow keys insert cell references instead of navigating. The mouse does the same where a reference fits, which is right after `=`, an operator, `(`, `,` or `:`: a click on a cell puts its reference into the formula, and a drag puts a range (`=SUM(` and a drag from A1 to B2 gives `=SUM(A1:B2`). Typing then goes on after the reference. Anywhere else in a formula, and in any other edit, a click on a cell commits the edit. To pick cells on another sheet, see [Multiple sheets](#multiple-sheets).
+
+On a sheet tab:
+
+| Key | Action |
+|-----|--------|
+| Left / Right | Go to the previous / next tab and show its sheet (wraps around) |
+| Home / End | Go to the first / last tab and show its sheet |
+| F2 | Rename the sheet in place (Enter commits, Escape cancels) |
+| Delete, Backspace | Delete the sheet, after a confirmation |
+| Ctrl/Cmd + Shift + Left / Right | Move the sheet one place left / right |
+
+A sheet tab can also be dragged to another position; Escape during the drag puts it back.
 
 Drag the right border of a column header to resize the column (Escape during the drag cancels it); with whole columns selected, all of them get the new width. Double-click the border to fit the column to its content.
 
@@ -558,12 +859,16 @@ All types are exported for TypeScript consumers:
 
 ```ts
 import type {
-  CellData,          // { rawValue, displayValue, type, style? }
+  CellData,          // { rawValue, displayValue, type, format?, readOnly?, spill?, spilledFrom?, array? }
+  CellArray,         // { rows, cols, values: CellArrayItem[] }: the values of a cell that holds several, row by row
+  CellArrayItem,     // string | number | boolean | null | CellArray
   CellCoord,         // { row, col }
   GridData,          // Map<string, CellData>
   SelectionRange,    // { start: CellCoord, end: CellCoord }
-  FormulaContext,    // { getCellValue, getRangeValues }
+  FormulaContext,    // { getCellValue, getRangeValues, cell?, sheet? }
   FormulaFunction,   // (ctx: FormulaContext, ...args: unknown[]) => unknown
+  FormulaFunctionOptions, // { args?: FormulaArgumentKind[], volatile? }
+  FormulaArgumentKind,    // 'number' | 'text' | 'value' | 'array' | 'reference'
   CellChangeDetail,
   SelectionChangeDetail,
   DataChangeDetail,
@@ -590,6 +895,13 @@ import type {
   ConditionalThreshold,         // { type: 'min' | 'max' | 'number' | 'percent' | 'percentile', value? }
   ConditionalColorStop,         // ConditionalThreshold & { color }
   ConditionalIconSetName,       // 'arrows3' | 'arrows5' | 'shapes3' | 'symbols3' | 'bars5'
+  AddSheetOptions,       // { data?, rows?, cols?, index?, activate? }
+  SheetChangeDetail,     // { sheet, previous, source }
+  SheetsChangeDetail,    // { sheets, kind: 'add' | 'remove' | 'rename' | 'move', sheet, previous?, source }
+  DefinedName,           // { name, refersTo, sheet }
+  NamesChangeDetail,     // { names: DefinedName[], source }
+  ListConversionDetail,  // { cellIds, toList, source }
+  ListItem,              // string | number | boolean
   CellValidator,
 } from 'y11n-spreadsheet';
 ```
@@ -616,6 +928,37 @@ import { adjustFormulaForStructureChange } from 'y11n-spreadsheet';
 
 adjustFormulaForStructureChange('=SUM(A1:A3)', { axis: 'row', kind: 'insert', index: 1, count: 1 })
 // '=SUM(A1:A4)'
+
+// With several sheets, the third argument names the formula's sheet and the sheet that changed
+adjustFormulaForStructureChange('=SUM(Data!A1:A3)+A2', { axis: 'row', kind: 'insert', index: 1, count: 1 },
+  { formulaSheet: 'Summary', changedSheet: 'Data' })
+// '=SUM(Data!A1:A4)+A2'
+```
+
+Helpers for lists, sheet names and formula text:
+
+```ts
+import { listToFormula, listItemsOf, listToText, parseListText } from 'y11n-spreadsheet';
+
+listToFormula(['Ann', 'Bob', 3])          // '={{"Ann";"Bob";3}}', the rawValue of a list
+listItemsOf('={{"Ann";"Bob";3}}')         // ['Ann', 'Bob', 3]; null for a value that isn't a list
+listToText(['Ann', 'Smith, J', '007'])    // 'Ann, "Smith, J", "007"', the text a list is edited as
+parseListText('Ann, Bob, "Smith, J", 3')  // ['Ann', 'Bob', 'Smith, J', 3]
+
+import { validateSheetName, isValidName, renameSheetInFormula, renameNameInFormula } from 'y11n-spreadsheet';
+
+validateSheetName('a/b', [])              // 'A sheet name cannot contain : \ / ? * [ or ]'
+validateSheetName('Data', ['Summary'])    // null: the name is fine
+isValidName('tax')                        // true: usable as a defined name ('A1' is not)
+renameSheetInFormula('=Data!A1', 'Data', 'My data') // "='My data'!A1"
+renameNameInFormula('=SUM(sales)&"sales"', 'sales', 'revenue') // '=SUM(revenue)&"sales"': text in quotes is left alone
+
+import { parseFormula, tokenizeFormula, mapFormulaReferences, formatReference } from 'y11n-spreadsheet';
+
+parseFormula('A1+2')                      // the syntax tree (FormulaNode) of a formula, given without its '='
+tokenizeFormula('Data!A1+2')              // its tokens (FormulaToken[]), with offsets and parsed references
+mapFormulaReferences('=Data!A1+B2', (ref, text) => text.sheet + '$' + formatReference(ref))
+// '=Data!$A1+$B2': rewrite every reference, leaving the rest of the formula as written
 ```
 
 ## Exports
@@ -628,10 +971,42 @@ import { SelectionManager } from 'y11n-spreadsheet';
 import { ClipboardManager } from 'y11n-spreadsheet';
 import { Y11nFormulaBar } from 'y11n-spreadsheet';
 import { Y11nFormatToolbar, Y11nConditionalFormatDialog } from 'y11n-spreadsheet';
+import { Y11nSheetTabs, Y11nNameManager } from 'y11n-spreadsheet';
 
 // Conditional formatting without the component: validate rules and evaluate them over your own data
 import { ConditionalFormatEvaluator, normalizeConditionalRule, describeCondition } from 'y11n-spreadsheet';
+
+// The values formulas compute with: arrays, references and LAMBDA functions
+import { RangeValue, RefValue, LambdaValue } from 'y11n-spreadsheet';
 ```
+
+`FormulaEngine` works without the component, on one or more `GridData` maps:
+
+```ts
+const engine = new FormulaEngine();        // starts with one sheet, 'Sheet1'
+engine.setData(data);                      // the cells of the active sheet
+engine.setSheetSize(100, 26);              // bounds spills and whole-column references
+engine.addSheet('Data', otherData);
+engine.defineName('tax', '=0.19');
+engine.recalculate();                      // computes displayValue and type, and spills arrays into the maps
+engine.changes                             // Map of sheet name → keys of the cells the last recalculation changed
+engine.spillRange('0:2')                   // { rows: 3, cols: 1 }, or null when the cell doesn't spill
+engine.blockedSpill('0:6')                 // for a formula showing #SPILL!: the size its result needs; null otherwise
+engine.referenceOf('Data!A1:C3')           // { sheet: 'Data', start: { row: 0, col: 0 }, end: { row: 2, col: 2 } }
+engine.referenceOf('tax')                  // null: not a reference, or a name that doesn't stand for cells
+
+engine.evaluate('=SUM(A1:A3)')             // { displayValue: '6', type: 'number' }
+engine.evaluateValue('=SUM(A1:A3)')        // 6: the value instead of its text
+engine.evaluateValue('=A1:A3*2')           // a RangeValue: { values: [2, 4, 6], rows: 3, cols: 1 }
+engine.evaluateValue('=1/0')               // '#DIV/0!'
+engine.evaluateCommitted('=A1>0')          // against the results of the last recalculation: precedents are not computed again
+```
+
+`setData()`, `updateData()`, `recalculateAffected()`, `evaluate()` and `evaluateValue()` take a sheet name as an optional argument (default: the active sheet, set with `setActiveSheet()`). `<y11n-sheet-tabs>` holds no sheets itself: give it `sheets` (`[{ id, name }]`) and `activeId`, and apply the `sheet-select`, `sheet-add`, `sheet-rename`, `sheet-remove` and `sheet-move` events it fires (their detail types are exported as `SheetSelectDetail`, `SheetRenameDetail`, `SheetRemoveDetail` and `SheetMoveDetail`).
+
+`<y11n-name-manager>` works the same way: give it `names` (`DefinedName[]`), `sheets` (the sheet names), `activeSheet`, `selectionRef` (what a new name refers to at first) and `status` (the outcome to announce), and apply its `name-save` (`NameSaveDetail`: `{ name, refersTo, sheet, previous? }`), `name-remove` and `name-go` (`{ name }`) and `name-close` events.
+
+The Name Box is part of `<y11n-formula-bar>`: set `selectionLabel` to show a name instead of `cellRef`, and `names` for its suggestions. It fires `name-box-commit` (`NameBoxCommitDetail`: `{ value }`) on Enter and `name-box-cancel` on Escape; `resetNameBox()` shows the selection again and `focusNameBox()` focuses the box. In the formula bar's shadow root the Name Box is `input.name-box` and the formula input is `input.formula-input`.
 
 ---
 
@@ -679,18 +1054,25 @@ src/
   types.ts                          # Types & coordinate utilities
   y11n-spreadsheet.ts               # Main component
   components/
-    y11n-formula-bar.ts             # Formula bar sub-component
+    y11n-formula-bar.ts             # Formula bar sub-component (Name Box, raw / formatted input)
     y11n-format-toolbar.ts          # Formatting toolbar (with the Conditional formatting menu)
     y11n-conditional-format-dialog.ts # Rule manager dialog
     conditional-icons.ts            # Icon-set icons (SVG)
+    y11n-sheet-tabs.ts              # Sheet tab bar (switch, add, rename, delete, reorder)
+    y11n-name-manager.ts            # Name manager dialog; holds no names, fires name-save/name-remove/name-go/name-close
   controllers/
     selection-manager.ts            # Selection state (Lit ReactiveController)
     clipboard-manager.ts            # Clipboard operations (TSV + HTML formats)
   engine/
-    formula-engine.ts               # Recursive descent formula parser
+    formula-engine.ts               # Formula evaluator: arrays and spilling, sheets, names, dependency tracking
+    parser.ts                       # Formula tokenizer and parser (text to syntax tree)
+    values.ts                       # Value types (RangeValue, RefValue, LambdaValue) and coercions
+    functions.ts                    # Built-in functions
   utils/
     delimited.ts                    # CSV/TSV parsing and serialization
     references.ts                   # Formula reference rewriting for row/column insert/delete
+    list.ts                         # Lists in cells: conversion between items, list text and the stored formula
+    sheet-names.ts                  # Sheet name rules
     conditional-format.ts           # Conditional-format rule validation and evaluation
     input-parse.ts                  # Recognises typed percentages, currency, dates and times
     series.ts                       # Fill-handle series (numbers, dates, day/month names, numbered text)
