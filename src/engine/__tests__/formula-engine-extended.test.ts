@@ -226,8 +226,9 @@ describe('FormulaEngine – extended functions', () => {
       expect(engine.evaluate('=XLOOKUP("apple", A1:A3, B1:B2)')).toEqual(err('#VALUE!'));
     });
 
-    it('unsupported wildcard mode is #VALUE!', () => {
-      expect(engine.evaluate('=XLOOKUP("a*", A1:A3, B1:B3, "", 2)')).toEqual(err('#VALUE!'));
+    it('match mode 2 matches with wildcards', () => {
+      expect(engine.evaluate('=XLOOKUP("a*", A1:A3, B1:B3, "", 2)').type).not.toBe('error');
+      expect(engine.evaluate('=XLOOKUP("a*", A1:A3, B1:B3, "", 3)')).toEqual(err('#VALUE!'));
     });
   });
 

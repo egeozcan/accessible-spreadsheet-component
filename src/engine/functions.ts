@@ -4,6 +4,14 @@
  * `formula-engine.ts`.
  */
 import { type FormulaContext, dateSerialToDate, dateToSerial } from '../types.js';
+import { registerMathBuiltins } from './functions-math.js';
+import { registerStatsBuiltins } from './functions-stats.js';
+import { registerDistributionsBuiltins } from './functions-distributions.js';
+import { registerTextBuiltins } from './functions-text.js';
+import { registerDatetimeBuiltins } from './functions-datetime.js';
+import { registerFinancialBuiltins } from './functions-financial.js';
+import { registerLogicalInfoBuiltins } from './functions-logical-info.js';
+import { parseDateText } from './functions-datetime.js';
 import {
   RangeValue,
   flattenDeep,
@@ -51,8 +59,7 @@ export interface Registrar {
  * incomparable (NaN), so they never match.
  */
 function lookupCompare(a: unknown, b: unknown): number {
-  const isNum = (v: unknown) =>
-    typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v)));
+  const isNum = (v: unknown) => typeof v === 'number';
   if (a === undefined || b === undefined) return NaN;
   if (isNum(a) && isNum(b)) return Number(a) - Number(b);
   if (isNum(a) || isNum(b) || typeof a === 'boolean' || typeof b === 'boolean') return NaN;
@@ -76,12 +83,27 @@ function approximateMatch(values: unknown[], lookup: unknown): number {
   return match;
 }
 
+/** The number a criterion operand stands for: 5, 1e3, 10%, $1,000, 1/1/2025, 14:30; NaN for plain text. */
+function criterionNumber(target: string): number {
+  const plain = Number(target);
+  if (!isNaN(plain) || target.trim() === '') return plain;
+  try {
+    return parseNumberText(target.trim());
+  } catch {
+    const parsed = parseDateText(target.trim());
+    return parsed ? (parsed.date ?? 0) + (parsed.time ?? 0) : NaN;
+  }
+}
+
 /**
  * Helper to check if a value matches a criteria string.
  * Supports operator prefixes: <>, >=, <=, >, <, =
  * Without operator prefix, does exact match (case-insensitive for strings).
  */
-function matchesCriteria(value: unknown, criteria: string): boolean {
+export function matchesCriteria(value: unknown, criteria: string): boolean {
+  // "=" matches only a truly empty cell, "<>" anything that is not (a "" result is not empty)
+  if (criteria === '=') return value === undefined;
+  if (criteria === '<>') return value !== undefined;
   let op = '=';
   let target = criteria;
 
@@ -105,15 +127,27 @@ function matchesCriteria(value: unknown, criteria: string): boolean {
     target = criteria.substring(1);
   }
 
-  const numTarget = Number(target);
+  // A logical criterion matches logical cells only, never the text "TRUE"
+  if (op === '=' || op === '<>') {
+    const word = target.trim().toLowerCase();
+    if (word === 'true' || word === 'false') {
+      const same = typeof value === 'boolean' && value === (word === 'true');
+      return op === '=' ? same : !same;
+    }
+  }
+
+  const numTarget = criterionNumber(target);
   const numValue = Number(value);
   const targetNumeric = !isNaN(numTarget) && target.trim() !== '';
-  const valueNumeric = !isNaN(numValue) && String(value).trim() !== '';
+  // A logical is not a number for criteria: COUNTIF(range, 1) does not count TRUE
+  const valueNumeric = typeof value !== 'boolean' && !isNaN(numValue) && String(value).trim() !== '';
   const bothNumeric = targetNumeric && valueNumeric;
 
-  // Relational operators only compare like with like (Excel: ">5" never matches text)
-  if (op !== '=' && op !== '<>' && targetNumeric !== valueNumeric) {
-    return false;
+  // Relational operators only compare like with like: a number criterion matches number cells
+  // only (numeric text and logicals are skipped), a text criterion matches text cells only
+  const relational = op !== '=' && op !== '<>';
+  if (relational) {
+    if (targetNumeric ? typeof value !== 'number' : typeof value !== 'string' || isErrorCode(value)) return false;
   }
 
   const valLower = String(value).toLowerCase();
@@ -133,7 +167,9 @@ function matchesCriteria(value: unknown, criteria: string): boolean {
       if (wildcard) return wildcardMatch();
       return valLower === targetLower;
     case '<>':
-      if (bothNumeric) return numValue !== numTarget;
+      // Numeric text counts as different from the number it spells, unlike in equality
+      if (targetNumeric && !bothNumeric) return true;
+      if (bothNumeric) return typeof value === 'number' ? numValue !== numTarget : true;
       if (wildcard) return !wildcardMatch();
       return valLower !== targetLower;
     case '>':
@@ -149,15 +185,20 @@ function matchesCriteria(value: unknown, criteria: string): boolean {
   }
 }
 
-type WildcardToken = { kind: 'lit'; ch: string } | { kind: 'any' } | { kind: 'star' };
+export type WildcardToken = { kind: 'lit'; ch: string } | { kind: 'any' } | { kind: 'star' };
 
 /**
  * Compile an Excel wildcard pattern (`*` any run, `?` one character, `~`
  * escapes the next `*`, `?` or `~`) into tokens for `wildcardMatches`.
  * Returns null when the pattern has no wildcard syntax at all.
  */
-function compileWildcard(pattern: string): WildcardToken[] | null {
+let lastPattern: string | undefined;
+let lastTokens: WildcardToken[] | null = null;
+
+export function compileWildcard(pattern: string): WildcardToken[] | null {
   if (!/[*?~]/.test(pattern)) return null;
+  // A lookup tests one pattern against many cells: compile it once
+  if (pattern === lastPattern) return lastTokens;
   const tokens: WildcardToken[] = [];
   // Split into code points before lowercasing each one, so characters whose
   // lowercase form is longer (e.g. "İ") still count as one for `?`.
@@ -175,44 +216,124 @@ function compileWildcard(pattern: string): WildcardToken[] | null {
       tokens.push({ kind: 'lit', ch: ch.toLowerCase() });
     }
   }
+  lastPattern = pattern;
+  lastTokens = tokens;
   return tokens;
 }
 
-/**
- * Case-insensitive whole-string wildcard match. Greedy matching that
- * backtracks only to the most recent star, so the worst case is
- * O(pattern × text) — unlike a RegExp, which can backtrack exponentially
- * on patterns such as "*a*a*a*b".
- */
-function wildcardMatches(tokens: WildcardToken[], value: string): boolean {
-  const text = [...value];
-  let p = 0;
-  let t = 0;
-  let starP = -1;
-  let starT = 0;
-  while (t < text.length) {
-    const tok = tokens[p];
-    if (tok && (tok.kind === 'any' || (tok.kind === 'lit' && tok.ch === text[t].toLowerCase()))) {
-      p++;
-      t++;
-    } else if (tok && tok.kind === 'star') {
-      starP = p++;
-      starT = t;
-    } else if (starP !== -1) {
-      p = starP + 1;
-      t = ++starT;
-    } else {
-      return false;
-    }
+/** A run of literals and `?` between stars: `null` stands for "any one character". */
+export type WildSegment = Array<string | null>;
+
+/** The star-separated segments of a wildcard pattern (empty ones left out) and whether it starts or ends with a star. */
+type SegmentedPattern = { segments: WildSegment[]; leading: boolean; trailing: boolean };
+const segmented = new WeakMap<WildcardToken[], SegmentedPattern>();
+
+export function wildcardSegments(tokens: WildcardToken[]): SegmentedPattern {
+  const cached = segmented.get(tokens);
+  if (cached) return cached;
+  const segments: WildSegment[] = [[]];
+  for (const tok of tokens) {
+    if (tok.kind === 'star') segments.push([]);
+    else segments[segments.length - 1].push(tok.kind === 'any' ? null : tok.ch);
   }
-  while (tokens[p]?.kind === 'star') p++;
-  return p === tokens.length;
+  const result = {
+    segments: segments.filter((seg) => seg.length > 0),
+    leading: tokens.length > 0 && tokens[0].kind === 'star',
+    trailing: tokens.length > 0 && tokens[tokens.length - 1].kind === 'star',
+  };
+  segmented.set(tokens, result);
+  return result;
 }
 
-/** Criteria match that also handles empty cells (which only match "" or "="). */
-function cellMatchesCriteria(value: unknown, criteria: string): boolean {
-  if (value === undefined) return criteria === '' || criteria === '=';
+/** Whether `seg` matches `text` exactly at `at`. */
+export function segmentAt(seg: WildSegment, text: string[], at: number): boolean {
+  if (at < 0 || at + seg.length > text.length) return false;
+  for (let k = 0; k < seg.length; k++) if (seg[k] !== null && seg[k] !== text[at + k]) return false;
+  return true;
+}
+
+/**
+ * Leftmost position >= `start` where `seg` matches and ends by `limit`, or -1. A segment of
+ * plain characters is searched with Knuth-Morris-Pratt (linear); one with `?` tries each position.
+ */
+export function findSegment(seg: WildSegment, text: string[], start: number, limit = text.length): number {
+  const m = seg.length;
+  if (seg.includes(null)) {
+    // Segments with `?` are tried position by position; cap the work so one formula cannot stall the sheet
+    if ((limit - start) * m > 10_000_000) throw new Error('#VALUE!');
+    for (let at = start; at + m <= limit; at++) if (segmentAt(seg, text, at)) return at;
+    return -1;
+  }
+  const fail = new Array<number>(m).fill(0);
+  for (let i = 1, k = 0; i < m; i++) {
+    while (k > 0 && seg[i] !== seg[k]) k = fail[k - 1];
+    if (seg[i] === seg[k]) k++;
+    fail[i] = k;
+  }
+  for (let i = start, k = 0; i < limit; i++) {
+    while (k > 0 && text[i] !== seg[k]) k = fail[k - 1];
+    if (text[i] === seg[k]) k++;
+    if (k === m) return i - m + 1;
+  }
+  return -1;
+}
+
+/**
+ * Case-insensitive whole-string wildcard match. The pattern's segments between stars are placed
+ * leftmost-first (the first anchored at the start and the last at the end unless the pattern
+ * starts or ends with a star), each found with a linear search, so the cost stays O(pattern +
+ * text) for plain segments — unlike a RegExp, which can backtrack exponentially on "*a*a*a*b".
+ */
+export function wildcardMatches(tokens: WildcardToken[], value: string): boolean {
+  const { segments, leading, trailing } = wildcardSegments(tokens);
+  // Too short to hold every segment: no match, without looking at the text
+  let needed = 0;
+  for (const seg of segments) needed += seg.length;
+  if (value.length < needed && [...value].length < needed) return false;
+  const text = [...value].map((c) => c.toLowerCase());
+  if (segments.length === 0) return tokens.length > 0 || text.length === 0; // only stars, or empty
+  if (!leading && !trailing && segments.length === 1) {
+    return segments[0].length === text.length && segmentAt(segments[0], text, 0);
+  }
+  let pos = 0;
+  let from = 0;
+  let until = segments.length;
+  let end = text.length;
+  if (!leading) {
+    if (!segmentAt(segments[0], text, 0)) return false;
+    pos = segments[0].length;
+    from = 1;
+  }
+  if (!trailing) {
+    const last = segments[segments.length - 1];
+    end = text.length - last.length;
+    if (end < pos || !segmentAt(last, text, end)) return false;
+    until -= 1;
+  }
+  for (let k = from; k < until; k++) {
+    const at = findSegment(segments[k], text, pos, end);
+    if (at < 0) return false;
+    pos = at + segments[k].length;
+  }
+  return true;
+}
+
+/** Criteria match that also handles empty cells: they match "", "=" and "<>x" (not equal to x), nothing else. */
+export function cellMatchesCriteria(value: unknown, criteria: string): boolean {
+  if (value === undefined) return criteria === '' || criteria === '=' || (criteria.startsWith('<>') && criteria.length > 2);
   return matchesCriteria(value, criteria);
+}
+
+/** The values of `other` placed on the shape of `range` from its top-left cell (blank outside `other`); `range` itself if there is no `other`. */
+function alignedTo(range: unknown, other: unknown): unknown[] {
+  if (other === undefined) return toValueList(range);
+  const [rows, cols] = rangeShape(range);
+  const source = asArray(other);
+  const out: unknown[] = new Array(rows * cols);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) out[r * cols + c] = r < source.rows && c < source.cols ? source.get(r, c) : undefined;
+  }
+  return out;
 }
 
 /** [rows, cols] of a range argument; arrays are a column, scalars 1×1. */
@@ -258,8 +379,40 @@ function matchAllCriteria(pairs: unknown[], shapeOf: unknown): boolean[] {
   return mask;
 }
 
+/** Number text as VALUE reads it: 12, -3.5e2, 1,000, $1,000, 12%; anything else throws. */
+export function parseNumberText(text: string): number {
+  // A leading currency symbol: $1,000 and -$5 are numbers
+  let str = text;
+  // Accounting negatives: (1,234.56)
+  let negative = false;
+  if (/^\(.*\)$/.test(str)) {
+    negative = true;
+    str = str.slice(1, -1).trim();
+  }
+  str = str.replace(/^([+-]?)\s*\$\s*/, '$1');
+  let percent = false;
+  if (str.endsWith('%')) {
+    percent = true;
+    str = str.slice(0, -1).trim();
+  }
+  // Thousands separators must group in threes: 1,000 and 12,345,678.9 are numbers, 1,00 is not
+  if (str.includes(',')) {
+    if (!/^[+-]?\d{1,3}(,\d{3})+(\.\d*)?$/.test(str)) throw new Error('#VALUE!');
+    str = str.replace(/,/g, '');
+  }
+  if (!/^[+-]?(\d+(\.\d*)?|\.\d+)(e[+-]?\d+)?$/i.test(str)) throw new Error('#VALUE!');
+  const num = Number(str);
+  return (negative ? -1 : 1) * (percent ? num / 100 : num);
+}
+
+/** The most cells an array result may have; larger ones are #NUM!. Checked before allocating. */
+export const MAX_ARRAY_CELLS = 10_000_000;
+export function checkArraySize(rows: number, cols: number): void {
+  if (!(rows * cols <= MAX_ARRAY_CELLS)) throw new Error('#NUM!');
+}
+
 /** Numbers (or numeric strings) among flattened aggregate arguments; text and booleans are skipped. */
-function numericArgs(args: unknown[]): number[] {
+export function numericArgs(args: unknown[]): number[] {
   const nums: number[] = [];
   for (const v of args) {
     if (typeof v === 'number') nums.push(v);
@@ -286,13 +439,24 @@ function serialArg(v: unknown): Date {
   return dateSerialToDate(Math.floor(serial));
 }
 
-/** Exact match as the classic lookups do it: numbers by value, everything else as text ignoring case. */
-function looseEquals(cell: unknown, lookup: unknown): boolean {
-  const numLookup = Number(lookup);
-  const numCell = Number(cell);
-  const bothNum =
-    !isNaN(numLookup) && !isNaN(numCell) && String(lookup).trim() !== '' && String(cell).trim() !== '';
-  return bothNum ? numLookup === numCell : String(cell).toLowerCase() === String(lookup).toLowerCase();
+/**
+ * Exact match as the lookups do it: numbers by value, text ignoring case (with
+ * the * ? ~ wildcards when `wildcards`), booleans with booleans. Values of
+ * different kinds never match ("2" is not 2, TRUE is not 1).
+ */
+function looseEquals(cell: unknown, lookup: unknown, wildcards = true): boolean {
+  if (typeof cell === 'number' || typeof lookup === 'number') {
+    return typeof cell === 'number' && typeof lookup === 'number' && cell === lookup;
+  }
+  if (typeof cell === 'boolean' || typeof lookup === 'boolean') return cell === lookup;
+  if (cell === undefined || lookup === undefined) return cell === lookup;
+  const c = String(cell);
+  const l = String(lookup);
+  if (wildcards) {
+    const tokens = compileWildcard(l);
+    if (tokens) return !isErrorCode(c) && wildcardMatches(tokens, c);
+  }
+  return c.toLowerCase() === l.toLowerCase();
 }
 
 /**
@@ -469,6 +633,13 @@ function splitText(text: string, delimiters: string[], ignoreCase: boolean): str
 
 export function registerPureBuiltins(reg: Registrar): void {
   const { def, agg } = reg;
+  registerMathBuiltins(reg);
+  registerStatsBuiltins(reg);
+  registerDistributionsBuiltins(reg);
+  registerTextBuiltins(reg);
+  registerDatetimeBuiltins(reg);
+  registerFinancialBuiltins(reg);
+  registerLogicalInfoBuiltins(reg);
 
   // ─── Aggregates ─────────────────────────────────────
 
@@ -616,15 +787,16 @@ export function registerPureBuiltins(reg: Registrar): void {
   def('SUMIF', 'ana', (_ctx, range, criteria, sumRange?) => {
     const criteriaStr = String(criteria);
     const rangeArr = toValueList(range);
-    const sumArr: unknown[] | undefined =
-      sumRange instanceof RangeValue ? sumRange.values : Array.isArray(sumRange) ? sumRange : undefined;
+    // The sum range lines up with the range cell by cell from its top-left corner (a smaller one reads as blank here)
+    const sumArr = alignedTo(range, sumRange);
 
     let total = 0;
     for (let i = 0; i < rangeArr.length; i++) {
-      const val = rangeArr[i];
-      if (cellMatchesCriteria(val, criteriaStr)) {
-        total += Number(sumArr ? sumArr[i] : val) || 0;
-      }
+      if (!cellMatchesCriteria(rangeArr[i], criteriaStr)) continue;
+      const v = sumArr[i];
+      // An error in a summed cell is the result; text (even numeric-looking) and logicals are skipped
+      if (isErrorCode(v)) throw new Error(v);
+      if (typeof v === 'number') total += v;
     }
     return total;
   });
@@ -641,19 +813,17 @@ export function registerPureBuiltins(reg: Registrar): void {
   def('AVERAGEIF', 'ana', (_ctx, range, criteria, avgRange?) => {
     const criteriaStr = String(criteria);
     const rangeArr = toValueList(range);
-    const avgArr: unknown[] | undefined =
-      avgRange instanceof RangeValue ? avgRange.values : Array.isArray(avgRange) ? avgRange : undefined;
+    const avgArr = alignedTo(range, avgRange);
 
     let total = 0;
     let count = 0;
     for (let i = 0; i < rangeArr.length; i++) {
-      const val = rangeArr[i];
-      if (val !== undefined && matchesCriteria(val, criteriaStr)) {
-        const numVal = avgArr ? Number(avgArr[i]) : Number(val);
-        if (!isNaN(numVal)) {
-          total += numVal;
-          count++;
-        }
+      if (!cellMatchesCriteria(rangeArr[i], criteriaStr)) continue;
+      const v = avgArr[i];
+      if (isErrorCode(v)) throw new Error(v);
+      if (typeof v === 'number') {
+        total += v;
+        count++;
       }
     }
     if (count === 0) throw new Error('#DIV/0!');
@@ -701,7 +871,9 @@ export function registerPureBuiltins(reg: Registrar): void {
 
   // ─── Lookup ─────────────────────────────────────────
 
-  def('XLOOKUP', 'naaxnn', (_ctx, lookupValue, lookupRange, returnRange, ifNotFound?, matchMode?, searchMode?) => {
+  def('XLOOKUP', 'vaaxnn', (_ctx, lookupValue, lookupRange, returnRange, ifNotFound?, matchMode?, searchMode?) => {
+    if (isErrorCode(lookupValue)) throw new Error(lookupValue);
+    // a blank lookup value stays blank: it matches blank entries only, never 0
     if (!(lookupRange instanceof RangeValue) || !(returnRange instanceof RangeValue)) {
       throw new Error('#VALUE!');
     }
@@ -713,9 +885,9 @@ export function registerPureBuiltins(reg: Registrar): void {
     }
 
     // 0 = exact, -1 = exact or next smaller, 1 = exact or next larger.
-    // Wildcard matching (2) is not supported.
+    // 2 = exact with wildcards.
     const mode = matchMode === undefined ? 0 : Math.trunc(Number(matchMode));
-    if (mode !== 0 && mode !== -1 && mode !== 1) throw new Error('#VALUE!');
+    if (mode !== 0 && mode !== -1 && mode !== 1 && mode !== 2) throw new Error('#VALUE!');
     // 1 / 2 = first to last, -1 / -2 = last to first (binary search modes
     // give the same answer on sorted data, so they search linearly).
     const search = searchMode === undefined ? 1 : Math.trunc(Number(searchMode));
@@ -725,6 +897,22 @@ export function registerPureBuiltins(reg: Registrar): void {
     for (let step = 0; step < keys.length; step++) {
       const i = search < 0 ? keys.length - 1 - step : step;
       const key = keys[i];
+      if (lookupValue === undefined) {
+        if (key === undefined) {
+          best = i;
+          break;
+        }
+        // No blank entry: "exact or next smaller" falls back to the largest number (a blank sorts last)
+        if (mode === -1 && typeof key === 'number' && (best === -1 || key > (keys[best] as number))) best = i;
+        continue;
+      }
+      if (mode === 2) {
+        if (looseEquals(key, lookupValue)) {
+          best = i;
+          break;
+        }
+        continue;
+      }
       // lookupCompare orders numbers and text only; booleans match exactly
       if (typeof lookupValue === 'boolean' || typeof key === 'boolean') {
         if (key === lookupValue) {
@@ -759,53 +947,69 @@ export function registerPureBuiltins(reg: Registrar): void {
     return returnRange.rows === 1 ? returnRange.get(0, best) : RangeValue.column(returnRange.getCol(best));
   });
 
-  def('VLOOKUP', 'nann', (_ctx, lookupValue, tableRange, colIndex, exactMatch?) => {
+  def('VLOOKUP', 'vann', (_ctx, lookupValue, tableRange, colIndex, exactMatch?) => {
+    if (isErrorCode(lookupValue)) throw new Error(lookupValue);
+    if (lookupValue === undefined) lookupValue = 0; // the classic lookups read a blank lookup value as 0
     if (!(tableRange instanceof RangeValue)) {
       throw new Error('#VALUE!');
     }
     const colIdx = Math.trunc(Number(colIndex));
-    if (colIdx < 1 || colIdx > tableRange.cols) {
-      throw new Error('#REF!');
-    }
+    if (colIdx < 1) throw new Error('#VALUE!');
+    const tooFar = colIdx > tableRange.cols; // #REF!, but only once a match is found
     // Excel convention: omitted or TRUE/1 = approximate match, FALSE/0 = exact match
     const isExact = exactMatch === false || exactMatch === 0;
 
     const firstCol = tableRange.getCol(0);
     if (isExact) {
       for (let r = 0; r < firstCol.length; r++) {
-        if (looseEquals(firstCol[r], lookupValue)) return tableRange.get(r, colIdx - 1);
+        if (looseEquals(firstCol[r], lookupValue)) {
+          if (tooFar) throw new Error('#REF!');
+          return tableRange.get(r, colIdx - 1);
+        }
       }
     } else {
       // Approximate match: largest value <= lookupValue (data assumed sorted ascending)
       const r = approximateMatch(firstCol, lookupValue);
-      if (r !== -1) return tableRange.get(r, colIdx - 1);
+      if (r !== -1) {
+        if (tooFar) throw new Error('#REF!');
+        return tableRange.get(r, colIdx - 1);
+      }
     }
     throw new Error('#N/A');
   });
 
-  def('HLOOKUP', 'nann', (_ctx, lookupValue, tableRange, rowIndex, exactMatch?) => {
+  def('HLOOKUP', 'vann', (_ctx, lookupValue, tableRange, rowIndex, exactMatch?) => {
+    if (isErrorCode(lookupValue)) throw new Error(lookupValue);
+    if (lookupValue === undefined) lookupValue = 0; // the classic lookups read a blank lookup value as 0
     if (!(tableRange instanceof RangeValue)) {
       throw new Error('#VALUE!');
     }
     const rowIdx = Math.trunc(Number(rowIndex));
-    if (rowIdx < 1 || rowIdx > tableRange.rows) {
-      throw new Error('#REF!');
-    }
+    if (rowIdx < 1) throw new Error('#VALUE!');
+    const tooFar = rowIdx > tableRange.rows; // #REF!, but only once a match is found
     const isExact = exactMatch === false || exactMatch === 0;
 
     const firstRow = tableRange.getRow(0);
     if (isExact) {
       for (let c = 0; c < firstRow.length; c++) {
-        if (looseEquals(firstRow[c], lookupValue)) return tableRange.get(rowIdx - 1, c);
+        if (looseEquals(firstRow[c], lookupValue)) {
+          if (tooFar) throw new Error('#REF!');
+          return tableRange.get(rowIdx - 1, c);
+        }
       }
     } else {
       const c = approximateMatch(firstRow, lookupValue);
-      if (c !== -1) return tableRange.get(rowIdx - 1, c);
+      if (c !== -1) {
+        if (tooFar) throw new Error('#REF!');
+        return tableRange.get(rowIdx - 1, c);
+      }
     }
     throw new Error('#N/A');
   });
 
-  def('MATCH', 'nan', (_ctx, lookupValue, rangeArg, matchType?) => {
+  def('MATCH', 'van', (_ctx, lookupValue, rangeArg, matchType?) => {
+    if (isErrorCode(lookupValue)) throw new Error(lookupValue);
+    if (lookupValue === undefined) lookupValue = 0; // the classic lookups read a blank lookup value as 0
     let arr: unknown[];
     if (rangeArg instanceof RangeValue) {
       arr = rangeArg.values;
@@ -840,16 +1044,27 @@ export function registerPureBuiltins(reg: Registrar): void {
     }
   });
 
-  def('XMATCH', 'nann', (_ctx, lookupValue, lookupArray, matchMode?, searchMode?) => {
+  def('XMATCH', 'vann', (_ctx, lookupValue, lookupArray, matchMode?, searchMode?) => {
+    if (isErrorCode(lookupValue)) throw new Error(lookupValue);
+    // a blank lookup value stays blank: it matches blank entries only, never 0
     const keys = flattenDeep(lookupArray);
     const mode = intArg(matchMode, 0);
-    if (mode !== 0 && mode !== -1 && mode !== 1) throw new Error('#VALUE!');
+    if (mode !== 0 && mode !== -1 && mode !== 1 && mode !== 2) throw new Error('#VALUE!');
     const search = intArg(searchMode, 1);
     if (![1, -1, 2, -2].includes(search)) throw new Error('#VALUE!');
     let best = -1;
     for (let step = 0; step < keys.length; step++) {
       const i = search < 0 ? keys.length - 1 - step : step;
       const key = keys[i];
+      if (lookupValue === undefined) {
+        if (key === undefined) return i + 1;
+        if (mode === -1 && typeof key === 'number' && (best === -1 || key > (keys[best] as number))) best = i;
+        continue;
+      }
+      if (mode === 2) {
+        if (looseEquals(key, lookupValue)) return i + 1;
+        continue;
+      }
       if (typeof lookupValue === 'boolean' || typeof key === 'boolean') {
         if (key === lookupValue) return i + 1;
         continue;
@@ -987,17 +1202,24 @@ export function registerPureBuiltins(reg: Registrar): void {
 
   def('TEXTJOIN', 'tnb', (_ctx, delimiter, ignoreEmpty, ...texts) => {
     const parts: string[] = [];
+    const delim = toText(delimiter);
+    let size = 0;
+    const add = (text: string) => {
+      size += text.length + (parts.length > 0 ? delim.length : 0);
+      if (size > 32767) throw new Error('#VALUE!'); // Excel's cell text limit, checked before building the text
+      parts.push(text);
+    };
     for (const arg of texts) {
       for (const v of flattenDeep(arg)) {
         if (isErrorCode(v)) throw new Error(v);
         if (v === undefined || v === '') {
-          if (!ignoreEmpty) parts.push('');
+          if (!ignoreEmpty) add('');
         } else {
-          parts.push(toText(v));
+          add(toText(v));
         }
       }
     }
-    return parts.join(toText(delimiter));
+    return parts.join(delim);
   });
 
   def('LEFT', 'tn', (_ctx, text, n?) => {
@@ -1008,9 +1230,9 @@ export function registerPureBuiltins(reg: Registrar): void {
 
   def('RIGHT', 'tn', (_ctx, text, n?) => {
     const s = toText(text);
-    const count = n !== undefined ? Number(n) : 1;
+    const count = n !== undefined ? Math.trunc(Number(n)) : 1;
     if (!(count >= 0)) throw new Error('#VALUE!');
-    return s.substring(s.length - count);
+    return count === 0 ? '' : s.substring(s.length - count);
   });
 
   def('MID', 'tn', (_ctx, text, start, n) => {
@@ -1030,7 +1252,7 @@ export function registerPureBuiltins(reg: Registrar): void {
     if (old === '') return s;
 
     if (instance !== undefined) {
-      const nth = Number(instance);
+      const nth = Math.trunc(Number(instance));
       if (!(nth >= 1)) throw new Error('#VALUE!');
       let count = 0;
       let searchFrom = 0;
@@ -1053,7 +1275,7 @@ export function registerPureBuiltins(reg: Registrar): void {
     const s = toText(text);
     const searchStr = toText(search);
     const startNum = start !== undefined ? Number(start) : 1;
-    if (!(startNum >= 1)) throw new Error('#VALUE!');
+    if (!(startNum >= 1) || startNum - 1 > s.length) throw new Error('#VALUE!');
     const idx = s.indexOf(searchStr, startNum - 1);
     if (idx === -1) throw new Error('#VALUE!');
     return idx + 1; // 1-indexed
@@ -1085,10 +1307,18 @@ export function registerPureBuiltins(reg: Registrar): void {
   });
 
   def('VALUE', 'n', (_ctx, text) => {
-    if (typeof text === 'boolean') return text ? 1 : 0;
-    const num = Number(String(text));
-    if (isNaN(num)) throw new Error('#VALUE!');
-    return num;
+    if (typeof text === 'number') return text;
+    if (typeof text === 'boolean') throw new Error('#VALUE!');
+    const str = String(text).trim();
+    if (str === '') throw new Error('#VALUE!');
+    try {
+      return parseNumberText(str);
+    } catch {
+      // Not a number: a date or time text reads as its serial number
+      const parsed = parseDateText(str);
+      if (parsed) return (parsed.date ?? 0) + (parsed.time ?? 0);
+      throw new Error('#VALUE!');
+    }
   });
 
   /**
@@ -1111,6 +1341,7 @@ export function registerPureBuiltins(reg: Registrar): void {
     const rows = lines.filter((l) => l.length > 0 || !skipEmpty);
     if (rows.length === 0) throw new Error('#CALC!');
     const cols = Math.max(1, ...rows.map((l) => l.length));
+    checkArraySize(rows.length, cols);
     const pad = padWith === undefined ? '#N/A' : padWith;
     const values: unknown[] = [];
     for (const line of rows) {
@@ -1207,7 +1438,7 @@ export function registerPureBuiltins(reg: Registrar): void {
     const r = intArg(rows);
     const c = intArg(cols, 1);
     if (r < 1 || c < 1) throw new Error('#CALC!');
-    if (r * c > 10_000_000) throw new Error('#NUM!');
+    checkArraySize(r, c);
     const first = start === undefined ? 1 : toNumber(start);
     const by = step === undefined ? 1 : toNumber(step);
     const values = new Array<unknown>(r * c);

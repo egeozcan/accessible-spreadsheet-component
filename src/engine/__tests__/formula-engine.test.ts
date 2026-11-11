@@ -1086,12 +1086,12 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=VLOOKUP("apple", A1:B1, 5, FALSE)')).toEqual({ displayValue: '#REF!', type: 'error' });
     });
 
-    it('returns #REF! when column index is 0', () => {
+    it('returns #VALUE! when column index is 0', () => {
       const data = makeData({
         '0:0': 'apple', '0:1': '1',
       });
       engine.setData(data);
-      expect(engine.evaluate('=VLOOKUP("apple", A1:B1, 0, FALSE)')).toEqual({ displayValue: '#REF!', type: 'error' });
+      expect(engine.evaluate('=VLOOKUP("apple", A1:B1, 0, FALSE)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
     });
 
     it('approximate match (default) finds largest value <= lookup', () => {
@@ -1813,9 +1813,9 @@ describe('FormulaEngine', () => {
       expect(engine.evaluate('=VALUE(42)')).toEqual({ displayValue: '42', type: 'number' });
     });
 
-    it('converts TRUE to 1 and FALSE to 0', () => {
-      expect(engine.evaluate('=VALUE(TRUE)')).toEqual({ displayValue: '1', type: 'number' });
-      expect(engine.evaluate('=VALUE(FALSE)')).toEqual({ displayValue: '0', type: 'number' });
+    it('is #VALUE! for a boolean, as in Excel', () => {
+      expect(engine.evaluate('=VALUE(TRUE)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
+      expect(engine.evaluate('=VALUE(FALSE)')).toEqual({ displayValue: '#VALUE!', type: 'error' });
     });
   });
 

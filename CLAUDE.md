@@ -36,7 +36,8 @@ src/
   controllers/clipboard-manager.ts  # Copy/cut/paste via Clipboard API + TSV
   engine/parser.ts                  # Formula tokenizer + recursive descent parser (text -> AST)
   engine/values.ts                  # Value types: RangeValue (arrays), RefValue (references), LambdaValue; coercions
-  engine/functions.ts               # Built-in functions that only need their argument values
+  engine/functions.ts               # Built-in functions that only need their argument values (core, lookups, registrar); calls the domain files below
+  engine/functions-{math,stats,distributions,text,datetime,financial,logical-info}.ts  # The rest of the built-ins by domain, each `register…Builtins(reg)`
   engine/formula-engine.ts          # AST evaluator, special forms (IF, LET, LAMBDA, INDEX, OFFSET, ...), spill, dep graph, sheets, names
   utils/delimited.ts                # CSV/TSV parse + serialize (shared by clipboard and toCSV/fromCSV)
   utils/references.ts               # Rewrites formula refs (copy/fill shift, row/column insert/delete), on the tokenizer
@@ -90,6 +91,10 @@ src/
 - Playwright runs against the Vite dev server on port 5173
 - E2E tests use shadow DOM piercing via Lit's locator patterns
 - Run `npx playwright install` if browsers aren't installed
+
+## Conformance harness
+
+`src/engine/__tests__/conformance.test.ts` runs every `conformance/*.json` case `{f, e, src, grid?, skip?}` against a fresh engine on a default grid (documented in the test). `src` is `excel` (computed by Excel), `docs` (a Microsoft documentation example) or `expected` (author's knowledge, not yet checked against Excel). New functions get cases there; a `skip` records a known gap.
 
 ## Build output
 

@@ -844,12 +844,12 @@ describe('second review regressions', () => {
     const el = await createSpreadsheet({
       '0:0': '=LET(x,1,Sales+x)',
       '0:1': '=SUM(1,2)+Sum',
-      '0:2': '=Fact(5)',
+      '0:2': '=Fac(5)',
       '0:3': '=Sales*2',
     });
     el.defineName('Sales', '=10');
     el.defineName('Sum', '=100');
-    el.defineName('Fact', '=LAMBDA(n,IF(n<=1,1,n*Fact(n-1)))');
+    el.defineName('Fac', '=LAMBDA(n,IF(n<=1,1,n*Fac(n-1)))');
     await el.openNameManager();
     expect([display(el, '0:0'), display(el, '0:1'), display(el, '0:2')]).toEqual(['11', '103', '120']);
 
@@ -858,7 +858,7 @@ describe('second review regressions', () => {
     await el.updateComplete;
     const manager = shadow(el).querySelector('y11n-name-manager') as unknown as { status: string };
     expect(manager.status).toBe('Sales was not renamed to x: the formula in Sheet1!A1 would no longer mean the same');
-    expect(el.getNames().map((n) => n.name)).toEqual(['Sales', 'Sum', 'Fact']);
+    expect(el.getNames().map((n) => n.name)).toEqual(['Sales', 'Sum', 'Fac']);
     expect([raw(el, '0:0'), raw(el, '0:3'), display(el, '0:0')]).toEqual(['=LET(x,1,Sales+x)', '=Sales*2', '11']);
 
     // A name nothing binds is fine
@@ -873,9 +873,9 @@ describe('second review regressions', () => {
 
     fire(el, 'name-save', {
       name: 'Factorial',
-      refersTo: '=LAMBDA(n,IF(n<=1,1,n*Fact(n-1)))',
+      refersTo: '=LAMBDA(n,IF(n<=1,1,n*Fac(n-1)))',
       sheet: 'Sheet1',
-      previous: 'Fact',
+      previous: 'Fac',
     });
     await el.updateComplete;
     expect(raw(el, '0:2')).toBe('=Factorial(5)');
