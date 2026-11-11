@@ -153,7 +153,7 @@ test.describe('Toolbar connected to a grid', () => {
     await expect(menuItem(page, 'Unfreeze panes')).toBeDisabled();
     await menuItem(page, 'Freeze first row').click();
     expect(await frozen()).toEqual([1, 0]);
-    await expect(spreadsheet.shadow('[role="log"]')).toHaveText('Froze 1 row');
+    await expect(spreadsheet.shadow('[role="log"]')).toHaveText('Froze row 1');
 
     await spreadsheet.clickCell(2, 1);
     await control(page, 'Freeze panes').click();
@@ -273,5 +273,177 @@ test.describe('Toolbar connected to a grid', () => {
     expect(await page.evaluate(() => document.activeElement?.id)).not.toBe('tb');
     await page.keyboard.press('Shift+Tab');
     await expect(control(page, 'Filter')).toBeFocused();
+  });
+
+  /** The label of the toolbar control that has the focus, or null when the focus is elsewhere. */
+  const focusedControl = (page: Page) =>
+    page.evaluate(() => document.querySelector('#tb')?.shadowRoot?.activeElement?.getAttribute('aria-label') ?? null);
+
+  test('the focus stays on the control after it acts', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(1, 1);
+
+    for (const label of ['Bold', 'Italic', 'Increase decimals', 'Sort descending', 'Clear formatting', 'Undo', 'Undo', 'Redo']) {
+      await control(page, label).focus();
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(80);
+      expect(await focusedControl(page), label).toBe(label);
+    }
+
+    // Menus return to their button
+    await control(page, 'Insert rows or columns').focus();
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(80);
+    expect(await focusedControl(page)).toBe('Insert rows or columns');
+    expect(await sheetEval(page, (sheet) => sheet.rows)).toBe(51);
+
+    // Two toggles in a row from the keyboard
+    await spreadsheet.clickCell(0, 0);
+    await control(page, 'Bold').focus();
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    expect(await spreadsheet.getCellFormat('0:0')).toEqual({ bold: true, italic: true });
+    await expect(control(page, 'Italic')).toBeFocused();
+    await expect(control(page, 'Italic')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('a control that gets disabled hands the focus to its neighbor', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(1, 0);
+    await page.keyboard.type('Zed');
+    await page.keyboard.press('Enter');
+
+    await control(page, 'Undo').focus();
+    await page.keyboard.press('Enter');
+    await expect(control(page, 'Undo')).toBeDisabled();
+    await expect(control(page, 'Redo')).toBeFocused();
+
+    await control(page, 'Italic').focus();
+    await spreadsheet.setReadOnly(true);
+    expect(await focusedControl(page)).not.toBeNull();
+    await page.keyboard.press('End');
+    await expect(control(page, 'Name manager')).toBeFocused();
+  });
+
+  test('dialogs opened from the toolbar return the focus to it', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(1, 0);
+
+    for (const label of ['Name manager', 'Paste Special']) {
+      await control(page, label).focus();
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(150);
+      expect(await focusedControl(page), `${label} takes the focus`).toBeNull();
+      await page.keyboard.press('Escape');
+      await expect(control(page, label)).toBeFocused();
+    }
+
+    await control(page, 'Conditional formatting').focus();
+    await page.keyboard.press('ArrowUp'); // the last item: Manage rules
+    await page.keyboard.press('Enter');
+    await expect(spreadsheet.shadow('y11n-conditional-format-dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(control(page, 'Conditional formatting')).toBeFocused();
+
+    // Opened from the grid, they return to the cell as before
+    await spreadsheet.clickCell(1, 0);
+    await page.keyboard.press('Control+F3');
+    await expect(spreadsheet.shadow('y11n-name-manager')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(spreadsheet.cell(1, 0)).toBeFocused();
+  });
+
+  test('a color choice is one undo step', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(1, 0);
+    await page.evaluate(() => {
+      const input = document.querySelector('#tb')!.shadowRoot!.querySelector<HTMLInputElement>('[aria-label="Text color"]')!;
+      // A drag in the picker: many input events, then one change
+      for (const color of ['#110000', '#220000', '#330000']) {
+        input.value = color;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(await spreadsheet.getCellFormat('1:0')).toEqual({ textColor: '#330000' });
+    expect(await sheetEval(page, (sheet) => [sheet.undo(), sheet.undo()])).toEqual([true, false]);
+  });
+
+  test('freeze refuses what would not fit, like the keyboard shortcut', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await sheetEval(page, (sheet) => sheet.goTo('C40'));
+    await control(page, 'Freeze panes').click();
+    await menuItem(page, 'Freeze up to the active cell').click();
+    expect(await sheetEval(page, (sheet) => [sheet.frozenRows, sheet.frozenCols])).toEqual([0, 0]);
+    await expect(spreadsheet.shadow('[role="log"]')).toHaveText('Cannot freeze: the frozen area would not fit on screen');
+  });
+
+  test('reapply filter takes in new rows, as Ctrl+Alt+L does', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await sheetEval(page, (sheet) =>
+      sheet.setFilter({ start: { row: 0, col: 0 }, end: { row: 3, col: 1 } }, [{ col: 0, values: ['Ann'] }])
+    );
+    await spreadsheet.clickCell(4, 0);
+    await page.keyboard.type('Dee');
+    await page.keyboard.press('Enter');
+    expect(await sheetEval(page, (sheet) => sheet.isRowHidden(4))).toBe(false);
+
+    await control(page, 'Reapply filter').click();
+    expect(await sheetEval(page, (sheet) => sheet.isRowHidden(4))).toBe(true);
+    await expect(spreadsheet.shadow('[role="log"]')).toContainText('1 of 4');
+  });
+
+  test('follows data that is loaded later and a grid that is replaced', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(0, 0);
+    await expect(control(page, 'Bold')).toHaveAttribute('aria-pressed', 'false');
+
+    await page.evaluate(() => {
+      const sheet = document.querySelector('y11n-spreadsheet') as any;
+      const data = sheet.getData();
+      data.get('0:0').format = { bold: true };
+      sheet.setData(data);
+    });
+    await expect(control(page, 'Bold')).toHaveAttribute('aria-pressed', 'true');
+
+    await page.evaluate(() => {
+      const old = document.querySelector('y11n-spreadsheet')!;
+      const fresh = document.createElement('y11n-spreadsheet') as any;
+      fresh.id = old.id;
+      fresh.setData(new Map([['0:0', { rawValue: 'x', displayValue: 'x', type: 'text', format: { italic: true } }]]));
+      old.replaceWith(fresh);
+    });
+    await expect(control(page, 'Italic')).toHaveAttribute('aria-pressed', 'true');
+    await expect(control(page, 'Bold')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  test('a toolbar that comes before its grid finds it', async ({ page }) => {
+    await page.goto('/');
+    await page.evaluate(() => {
+      document.querySelector('y11n-spreadsheet')!.remove();
+      const toolbar = document.createElement('y11n-toolbar');
+      toolbar.id = 'tb';
+      toolbar.setAttribute('for', 'late');
+      document.body.append(toolbar);
+    });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => {
+      const sheet = document.createElement('y11n-spreadsheet') as any;
+      sheet.id = 'late';
+      sheet.readOnly = true;
+      sheet.style.height = '300px';
+      document.body.append(sheet);
+    });
+    await expect(control(page, 'Bold')).toBeDisabled();
+    await expect(control(page, 'Undo')).toBeDisabled();
   });
 });

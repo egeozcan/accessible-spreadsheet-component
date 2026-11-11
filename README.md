@@ -112,29 +112,34 @@ sheet.setCellFormat('0:0', { bold: true, verticalAlign: 'top', wrap: true })
 sheet.setRangeFormat({ start: { row: 1, col: 1 }, end: { row: 9, col: 1 } },
   { numberFormat: { type: 'date', datePattern: 'DD/MM/YYYY' } })
 
-// The selection, and what a user does to it. These back your own buttons (the toolbar uses them):
-// refused in read-only mode, read-only cells and rows hidden by the filter are left alone,
-// cancelable through the before-… events, undoable and announced
+// The selection, and what a user does to it. These back your own buttons (the toolbar uses them).
+// Each does what its keyboard shortcut does: those that change cells are refused in read-only mode,
+// leave read-only cells and rows hidden by the filter alone, go through the cancelable before-…
+// events, are one undo step and are announced
 sheet.getSelection()                  // { range: { start, end }, activeCell: { row, col } }
 sheet.getSelectionFormat()            // the format all selected cells share, e.g. { bold: true }
 sheet.formatSelection({ textAlign: 'center' })
 sheet.toggleFormat('bold')            // what Ctrl+B does; also 'italic', 'underline', 'strikethrough'
 sheet.clearSelectionFormat()
-sheet.changeDecimals(1)               // one more decimal place; -1 for one fewer
+sheet.changeDecimals(1)               // one more decimal place in each number's own format; -1 for one fewer
 sheet.insertRowsAtSelection('above')  // as many rows as the selection spans; or 'below'
 sheet.insertColumnsAtSelection('left') // or 'right'
 sheet.deleteSelectedRows()
 sheet.deleteSelectedColumns()
-sheet.autoFitSelectedColumns()        // what Alt+Shift+0 does
 sheet.autoSum()                       // what Alt+= does
 sheet.toggleLists()                   // what Ctrl+J does
-sheet.copy()                          // what Ctrl+C does
 sheet.cut()                           // what Ctrl+X does
+sheet.copy()                          // what Ctrl+C does (also in read-only mode, like the three below)
+sheet.autoFitSelectedColumns()        // what Alt+Shift+0 does
+sheet.freezePanesAsUser()             // what Alt+Shift+F freezes: up to the active cell. (1, 0): the first row; (0, 0): unfreeze.
+                                      // Unlike freezePanes() it refuses what would not leave room to scroll, and announces
+sheet.reapplyFilterAsUser()           // what Ctrl+Alt+L does: unlike reapplyFilter() it takes in rows added under the table,
+                                      // fires before-filter and announces the rows shown
 
 // Undo and redo
 sheet.undo()                          // true if a change was undone
 sheet.redo()
-sheet.canUndo                         // history-change fires when canUndo or canRedo change
+sheet.canUndo                         // history-change fires when canUndo or canRedo change, and when setData() starts a fresh history
 sheet.canRedo
 
 // A message for screen readers, through the grid's live region
@@ -564,7 +569,7 @@ A group name is a group of its own, with a separator on each side. An unknown na
 | Property | Attribute | Type | Default | Description |
 |----------|-----------|------|---------|-------------|
 | `target` | - | `Y11nSpreadsheet \| null` | `null` | The grid to act on and to follow |
-| `htmlFor` | `for` | `string` | `''` | The id of that grid, looked up in the toolbar's document or shadow root. `target` wins |
+| `htmlFor` | `for` | `string` | `''` | The id of that grid, looked up in the toolbar's document or shadow root. The grid may be added later or replaced by another with the same id. `target` wins |
 | `items` | `items` | `string \| ToolbarItemSpec[] \| null` | `null` | The controls to show; null for all of them |
 | `label` | `label` | `string` | `'Spreadsheet toolbar'` | The toolbar's accessible name. Give each toolbar its own when a page has several |
 | `readOnly` | `read-only` | `boolean` | `false` | Disables the controls that change cells |
@@ -575,7 +580,7 @@ With a target, the toolbar sets the properties below itself. Without one it show
 
 | Event | Detail | Fired by |
 |-------|--------|----------|
-| `format-action` | `{ action, value }` | The formatting controls. `action` is `bold`, `italic`, `underline`, `strikethrough` (`value`: the new state), `textColor`, `backgroundColor`, `textAlign`, `verticalAlign`, `wrap`, `fontSize`, `numberFormat` (`value`: the new value, so `{ [action]: value }` is a cell format; no `numberFormat` value means General) or `clearFormat` |
+| `format-action` | `{ action, value }` | The formatting controls (the color controls when a color is chosen, not while the picker is dragged). `action` is `bold`, `italic`, `underline`, `strikethrough` (`value`: the new state), `textColor`, `backgroundColor`, `textAlign`, `verticalAlign`, `wrap`, `fontSize`, `numberFormat` (`value`: the new value, so `{ [action]: value }` is a cell format; no `numberFormat` value means General) or `clearFormat` |
 | `conditional-format-action` | `{ action }` | The Conditional formatting menu: `duplicates`, `unique`, `aboveAverage`, `belowAverage`, `top10`, `bottom10`, `colorScale`, `dataBar`, `iconSet`, `clear` or `manage` |
 | `toolbar-action` | `{ action }` | Everything else: `undo`, `redo`, `cut`, `copy`, `paste`, `pasteSpecial`, `decreaseDecimals`, `increaseDecimals`, `insertRowAbove`, `insertRowBelow`, `insertColumnLeft`, `insertColumnRight`, `deleteRow`, `deleteColumn`, `autoFit`, `sortAscending`, `sortDescending`, `filter`, `reapplyFilter`, `list`, `autoSum`, `freeze`, `freezeFirstRow`, `freezeFirstColumn`, `unfreeze`, `find` or `names` |
 
@@ -588,11 +593,11 @@ toolbar.addEventListener('toolbar-action', (e) => {
 });
 ```
 
-What the toolbar does with a target is all public API: `toggleFormat()`, `formatSelection()` and `clearSelectionFormat()` for `format-action`; `applyConditionalFormatPreset()`, `clearSelectionConditionalFormats()` and `openConditionalFormatManager()` for `conditional-format-action`; and for `toolbar-action` the methods listed under "The selection, and what a user does to it" in [Methods](#methods), plus `sortSelection()`, `toggleFilter()`, `reapplyFilter()`, `freezePanes()`, `unfreezePanes()`, `paste()`, `openPasteSpecial()`, `openFind()` and `openNameManager()`. It reads the grid's state with `getSelectionFormat()`, `canUndo`, `canRedo`, `getFilter()`, `frozenRows`, `frozenCols` and `readOnly`.
+What the toolbar does with a target is all public API: `toggleFormat()`, `formatSelection()` and `clearSelectionFormat()` for `format-action`; `applyConditionalFormatPreset()`, `clearSelectionConditionalFormats()` and `openConditionalFormatManager()` for `conditional-format-action`; and for `toolbar-action` the methods listed under "The selection, and what a user does to it" in [Methods](#methods), plus `sortSelection()`, `toggleFilter()`, `paste()`, `openPasteSpecial()`, `openFind()` and `openNameManager()`. So a toolbar button does exactly what the keyboard shortcut in its tooltip does, with the same checks, cancelable events and announcements. It reads the grid's state with `getSelectionFormat()`, `canUndo`, `canRedo`, `getFilter()`, `frozenRows`, `frozenCols` and `readOnly`.
 
 **Read-only.** In read-only mode the controls that change cells are disabled. Copy, Fit column width, Filter, Reapply filter, Freeze panes, Find and the name manager stay available, as they do in a read-only grid.
 
-**Keyboard.** The toolbar is one Tab stop. Left and Right move between its controls (wrapping around), Home and End go to the first and last. Tab leaves it, and Shift+Tab comes back to the control it was left on. Down or Up on a menu button opens its menu at the first or last item; in a menu, Up and Down move, Enter chooses, Escape closes it and returns to the button. The buttons' tooltips name the grid's keyboard shortcut for the same action.
+**Keyboard.** The toolbar is one Tab stop. Left and Right move between its controls (wrapping around), Home and End go to the first and last. Tab leaves it, and Shift+Tab comes back to the control it was left on. The focus stays on a control after it acts, so Bold and then Italic, or Undo several times, work from the keyboard; a control that becomes disabled while it has the focus (Undo after the last step) hands it to its neighbor. A dialog opened from the toolbar returns the focus to its button when it closes. Down or Up on a menu button opens its menu at the first or last item; in a menu, Up and Down move, Enter chooses, Escape closes it and returns to the button. The buttons' tooltips name the grid's keyboard shortcut for the same action.
 
 **Theming.** The toolbar is outside the grid's shadow DOM, so it takes its own custom properties: set the ones it shares with the grid (`--ls-font-family`, `--ls-text-color`, `--ls-border-color`, `--ls-focus-ring`) on both elements or on a common ancestor, and see `--ls-toolbar-*` under [Theming](#theming).
 
@@ -609,7 +614,7 @@ sheet.addEventListener('selection-change', (e) => {
   console.log(e.detail.range); // { start: { row, col }, end: { row, col } }
 });
 
-// Undo or redo became available, or stopped being available
+// Undo or redo became available or stopped being available, or new data started a fresh history
 sheet.addEventListener('history-change', (e) => {
   undoButton.disabled = !e.detail.canUndo;
   redoButton.disabled = !e.detail.canRedo;

@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New properties `verticalAlign`, `wrap`, `numberFormat`, `canUndo`, `canRedo`, `filtered`, `frozen` and `label` (its accessible name); new CSS custom property `--ls-toolbar-input-bg`.
   - The toolbar is one Tab stop that remembers the control it was left on, color inputs and selects included.
 - Methods that do to the selection what a user does, to back your own buttons: `getSelection()`, `getSelectionFormat()`, `formatSelection()`, `clearSelectionFormat()`, `changeDecimals()`, `insertRowsAtSelection()`, `insertColumnsAtSelection()`, `deleteSelectedRows()`, `deleteSelectedColumns()`, `autoFitSelectedColumns()`, `autoSum()`, `toggleLists()`, `copy()` and `cut()`.
-- `undo()`, `redo()`, `canUndo`, `canRedo` and the `history-change` event.
+- `freezePanesAsUser()` and `reapplyFilterAsUser()`: what Alt+Shift+F and Ctrl+Alt+L do, with their checks, events and announcements, to back buttons.
+- `undo()`, `redo()`, `canUndo`, `canRedo` and the `history-change` event (also fired when `setData()` starts a fresh history).
 - `announce(message)`: a message for screen readers through the grid's live region.
 - Storybook: a Toolbar example group and reference page, and a toolbar with the fitting controls in most other examples.
 - A new formula engine: formulas are parsed once into an AST and then evaluated, instead of being evaluated while they are parsed. Everything below builds on it; existing formulas keep their results.
@@ -70,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `<y11n-toolbar>` shows all its controls by default, the new ones included. A toolbar that is wired by hand needs `items="font textAlign styles"` (the earlier set) or handlers for `toolbar-action`; or give it a `target` and drop the handlers.
 - In read-only mode the toolbar keeps the controls that a read-only grid still supports (copy, fit column width, filter, freeze panes, find, name manager) instead of disabling everything.
 - The toolbar's accessible name is "Spreadsheet toolbar" (was "Cell formatting"); set `label` to change it. Its Clear formatting button has an icon instead of ✘.
+- The toolbar's color controls fire `format-action` when a color is chosen (`change`), not on every step of a drag in the color picker, so a color is one undo step.
+- A change made while the keyboard focus is outside the grid (a toolbar button, a button of the page that calls `undo()` or `goTo()`) no longer moves the focus to the active cell. The rule manager, name manager and Paste Special return the focus to the outside control that opened them.
 - `computeSelectionFormat()` also reports `verticalAlign`, `wrap` and `numberFormat`.
 - The formula bar's cell reference is an `<input>` (the Name Box) instead of an `<output>`, and the formula input has the class `formula-input`: code that reached into the formula bar with `querySelector('input')` now finds the Name Box first.
 - A click on a cell while a formula is being typed, with the caret where a reference fits, picks that cell instead of committing the edit.

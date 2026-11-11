@@ -139,25 +139,52 @@ describe('selection and command methods', () => {
   });
 
   describe('changeDecimals', () => {
-    it('starts from what a cell without a number format shows', async () => {
+    it('starts from what a number without a format shows, cell by cell', async () => {
       sheet = await createSpreadsheet();
-      sheet.setData(data({ '0:0': '10.5', '1:0': '7' }));
-      sheet.goTo('A1:A2');
+      sheet.setData(data({ '0:0': '10.5', '1:0': '7', '2:0': 'text' }));
+      sheet.goTo('A1:A4');
       sheet.changeDecimals(1);
       expect(sheet.getCellFormat('0:0')?.numberFormat).toEqual({ type: 'number', decimals: 2 });
-      expect(sheet.getCellFormat('1:0')?.numberFormat).toEqual({ type: 'number', decimals: 2 });
-      expect(sheet.getData().get('1:0')?.displayValue).toBe('7.00');
+      expect(sheet.getCellFormat('1:0')?.numberFormat).toEqual({ type: 'number', decimals: 1 });
+      expect(sheet.getData().get('1:0')?.displayValue).toBe('7.0');
+      // Text and empty cells are left alone
+      expect(sheet.getCellFormat('2:0')).toBeUndefined();
+      expect(sheet.getCellFormat('3:0')).toBeUndefined();
       await sheet.updateComplete;
       expect(announcement(sheet)).toBe('2 decimal places');
+
+      // One undo step for the whole selection
+      sheet.undo();
+      expect(sheet.getCellFormat('0:0')).toBeUndefined();
+      expect(sheet.getCellFormat('1:0')).toBeUndefined();
     });
 
-    it('keeps the kind of format, and stops at zero', async () => {
+    it('keeps each cell\'s kind of format, and stops at zero', async () => {
       sheet = await createSpreadsheet();
-      sheet.setData(data({ '0:0': { rawValue: '0.5', format: { numberFormat: { type: 'percent', decimals: 1 } } } }));
+      const date = { type: 'date' as const, datePattern: 'YYYY-MM-DD' };
+      sheet.setData(
+        data({
+          '0:0': { rawValue: '0.5', format: { bold: true, numberFormat: { type: 'percent', decimals: 1 } } },
+          '0:1': { rawValue: '12', format: { numberFormat: { type: 'currency', decimals: 2 } } },
+          '0:2': { rawValue: '46000', format: { numberFormat: date } },
+        })
+      );
+      sheet.goTo('A1:C1');
+      sheet.changeDecimals(-1);
+      sheet.changeDecimals(-1);
+      expect(sheet.getCellFormat('0:0')).toEqual({ bold: true, numberFormat: { type: 'percent', decimals: 0 } });
+      expect(sheet.getCellFormat('0:1')?.numberFormat).toEqual({ type: 'currency', decimals: 0 });
+      expect(sheet.getCellFormat('0:2')?.numberFormat).toEqual(date);
+    });
+
+    it('says so when the selection has no numbers', async () => {
+      sheet = await createSpreadsheet();
+      sheet.setData(data({ '0:0': 'text' }));
       sheet.goTo('A1');
-      sheet.changeDecimals(-1);
-      sheet.changeDecimals(-1);
-      expect(sheet.getCellFormat('0:0')?.numberFormat).toEqual({ type: 'percent', decimals: 0 });
+      sheet.changeDecimals(1);
+      await sheet.updateComplete;
+      expect(announcement(sheet)).toBe('No numbers in the selection');
+      expect(sheet.canUndo).toBe(false);
     });
 
     it('leaves dates alone', async () => {
@@ -222,6 +249,16 @@ describe('selection and command methods', () => {
         { canUndo: true, canRedo: true },
         { canUndo: false, canRedo: false },
       ]);
+    });
+
+    it('history-change also fires when new data starts a fresh history', async () => {
+      sheet = await createSpreadsheet();
+      const handler = vi.fn();
+      sheet.addEventListener('history-change', handler);
+      sheet.setData(data({ '0:0': { rawValue: 'a', format: { bold: true } } }));
+      await sheet.updateComplete;
+      expect(handler).toHaveBeenCalledOnce();
+      expect(handler.mock.calls[0][0].detail).toEqual({ canUndo: false, canRedo: false });
     });
   });
 
@@ -310,6 +347,63 @@ describe('selection and command methods', () => {
       sheet.toggleLists();
       expect(sheet.getCellValues('0:0')).toBeNull();
       expect(raw(sheet, '0:0')).toBe('Ann, Bob');
+    });
+
+    it('freezePanesAsUser freezes as the user and announces it', async () => {
+      sheet = await createSpreadsheet();
+      const handler = vi.fn();
+      sheet.addEventListener('freeze-change', handler);
+      expect(sheet.freezePanesAsUser(1, 0)).toBe(true);
+      await sheet.updateComplete;
+      expect([sheet.frozenRows, sheet.frozenCols]).toEqual([1, 0]);
+      expect(handler.mock.calls[0][0].detail).toEqual({ rows: 1, cols: 0, source: 'user' });
+      expect(announcement(sheet)).toBe('Froze row 1');
+
+      sheet.goTo('C3');
+      sheet.freezePanesAsUser();
+      expect([sheet.frozenRows, sheet.frozenCols]).toEqual([2, 2]);
+
+      expect(sheet.freezePanesAsUser(0, 0)).toBe(true);
+      await sheet.updateComplete;
+      expect(announcement(sheet)).toBe('Panes unfrozen');
+      expect(sheet.freezePanesAsUser(0, 0)).toBe(false);
+      expect(() => sheet.freezePanesAsUser(-1)).toThrow(RangeError);
+    });
+
+    it('reapplyFilterAsUser takes in rows added under the table and can be cancelled', async () => {
+      sheet = await createSpreadsheet();
+      sheet.setData(data({ '0:0': 'Head', '1:0': 'a', '2:0': 'b', '3:0': 'a' }));
+      sheet.setFilter(range(0, 0, 3, 0), [{ col: 0, values: ['a'] }]);
+      const next = sheet.getData();
+      next.set('4:0', { rawValue: 'b', displayValue: 'b', type: 'text' });
+      sheet.setData(next);
+      expect(sheet.isRowHidden(4)).toBe(false);
+
+      const veto = (e: Event) => e.preventDefault();
+      sheet.addEventListener('before-filter', veto);
+      sheet.reapplyFilterAsUser();
+      expect(sheet.isRowHidden(4)).toBe(false);
+      sheet.removeEventListener('before-filter', veto);
+
+      sheet.reapplyFilterAsUser();
+      expect(sheet.isRowHidden(4)).toBe(true);
+      expect(sheet.getFilter()?.range.end.row).toBe(4);
+    });
+
+    it('changes made while the focus is outside the grid leave it there', async () => {
+      sheet = await createSpreadsheet();
+      sheet.setData(data({ '0:0': 'a' }));
+      const button = document.createElement('button');
+      document.body.append(button);
+      button.focus();
+      sheet.goTo('A1');
+      sheet.formatSelection({ bold: true });
+      sheet.undo();
+      sheet.insertRowsAtSelection();
+      await sheet.updateComplete;
+      await Promise.resolve();
+      expect(document.activeElement).toBe(button);
+      button.remove();
     });
 
     it('announce speaks through the live region', async () => {

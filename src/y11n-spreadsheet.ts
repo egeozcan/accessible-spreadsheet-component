@@ -652,7 +652,9 @@ export class Y11nSpreadsheet extends LitElement {
   private _undoStack: CommandBatch[] = [];
   private _redoStack: CommandBatch[] = [];
   /** What the last `history-change` reported: undo and redo available */
-  private _historyReported = '00';
+  private _historyReported = '00:0';
+  /** What had the focus, outside the grid, when a dialog was opened (see `_returnFocus`) */
+  private _dialogOpener: HTMLElement | null = null;
   private readonly _maxHistory = 100;
 
   /** Reference mode cursor position */
@@ -1197,6 +1199,27 @@ export class Y11nSpreadsheet extends LitElement {
     this._setFrozen(0, 0, 'programmatic');
   }
 
+  /**
+   * Freeze panes as a user action, to back a button: like `freezePanes()`,
+   * and without arguments what Alt+Shift+F freezes (the rows above and the
+   * columns left of the active cell), but refused when the frozen area would
+   * not leave room to scroll, announced to screen readers, and reported by
+   * `freeze-change` with `source: 'user'`. `freezePanesAsUser(0, 0)`
+   * unfreezes.
+   *
+   * @returns Whether the frozen panes changed
+   */
+  freezePanesAsUser(rows?: number, cols?: number): boolean {
+    if (this._endEditElsewhere()) return false;
+    const active = this._selection.activeCell;
+    const r = rows ?? active.row;
+    const c = cols ?? (rows === undefined ? active.col : 0);
+    if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0) {
+      throw new RangeError('freezePanesAsUser: rows and cols must be non-negative integers');
+    }
+    return this._freezeAsUser(r, c);
+  }
+
   // ─── Filter API ──────────────────────────────────────
 
   /**
@@ -1272,6 +1295,19 @@ export class Y11nSpreadsheet extends LitElement {
    */
   isRowHidden(row: number): boolean {
     return this._isRowHidden(row);
+  }
+
+  /**
+   * Reapply the filter as a user action, as Ctrl+Alt+L does, to back a
+   * button: unlike `reapplyFilter()` it takes in rows added under the table,
+   * fires the cancelable `before-filter`, and announces how many rows are
+   * shown. Allowed in read-only mode.
+   */
+  reapplyFilterAsUser(): void {
+    if (this._endEditElsewhere()) return;
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    this._reapplyUserFilter();
   }
 
   /**
@@ -1562,6 +1598,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._closePasteSpecial(false);
     this.closeConditionalFormatManager(false);
     this.closeCellValues(false);
+    this._dialogOpener = this._focusedOutside();
     this._nameManagerStatus = '';
     this._nameManagerOpen = true;
     if (!this._nameManagerCleanup) {
@@ -1591,7 +1628,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._nameManagerCleanup = null;
     if (!this._nameManagerOpen) return;
     this._nameManagerOpen = false;
-    if (focusCell) this.updateComplete.then(() => this._focusActiveCell());
+    if (focusCell) this._returnFocus();
   }
 
   /** Move the keyboard focus to the Name Box (what Ctrl+G does). */
@@ -2389,6 +2426,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (this._isEditing) this._commitEdit();
     this._closeFilterMenu(false);
     this.closeConditionalFormatManager(false);
+    this._dialogOpener = this._focusedOutside();
     this._pasteSpecial = { mode: 'all', transpose: false };
     if (!this._pasteSpecialCleanup) {
       const onPointerDown = (e: PointerEvent) => {
@@ -2556,25 +2594,15 @@ export class Y11nSpreadsheet extends LitElement {
     const { start, end } = this._selection.range;
     const rows = this._visibleRowsBetween(start.row, end.row);
     const area = rows.length * (end.col - start.col + 1);
+    // More cells than the sheet stores: some have no format, so nothing is shared
+    if (area > this._internalData.size) return {};
     const formats: CellFormat[] = [];
-    if (area <= this._internalData.size) {
-      for (const r of rows) {
-        for (let c = start.col; c <= end.col; c++) {
-          const format = this._internalData.get(cellKey(r, c))?.format;
-          // One unformatted cell: nothing is shared
-          if (!format) return {};
-          formats.push(format);
-        }
+    for (const r of rows) {
+      for (let c = start.col; c <= end.col; c++) {
+        const format = this._internalData.get(cellKey(r, c))?.format;
+        if (!format) return {};
+        formats.push(format);
       }
-    } else {
-      // A selection larger than the data (whole rows or columns): go by the cells that exist
-      for (const [key, cell] of this._internalData) {
-        if (!cell.format) continue;
-        const { row, col } = parseKey(key);
-        if (row < start.row || row > end.row || col < start.col || col > end.col) continue;
-        if (!this._isRowHidden(row)) formats.push(cell.format);
-      }
-      if (formats.length < area) return {};
     }
     const shared: CellFormat = {};
     const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
@@ -2597,41 +2625,65 @@ export class Y11nSpreadsheet extends LitElement {
    * @param format - Format properties to merge, e.g. `{ textAlign: 'center' }`
    */
   formatSelection(format: CellFormat): void {
-    if (this.readOnly || this._pasteInProgress) return;
+    if (this.readOnly || this._pasteInProgress || this._endEditElsewhere()) return;
     const { cellIds } = this._selectionCellsToFormat();
     if (cellIds.length > 0) this._applyFormat(cellIds, format, 'user');
   }
 
   /** Remove all formatting from the selected cells, as a user action (see `formatSelection()`). */
   clearSelectionFormat(): void {
-    if (this.readOnly || this._pasteInProgress) return;
+    if (this.readOnly || this._pasteInProgress || this._endEditElsewhere()) return;
     const { cellIds } = this._selectionCellsToFormat();
     if (cellIds.length > 0) this._clearFormat(cellIds, 'user');
   }
 
   /**
    * Show more or fewer decimal places in the selected cells, as a user
-   * action. Starts from the active cell's number format, or for a cell
-   * without one from the decimals its number shows, and gives the result to
-   * the whole selection. Dates are left alone.
+   * action. Every cell keeps its own kind of number format (currency stays
+   * currency); a number without a format starts from the decimals it shows.
+   * Dates, text and empty cells are left alone. One undo step.
    *
    * @param delta - Decimal places to add (negative: to remove)
    */
   changeDecimals(delta: number): void {
-    if (this.readOnly || this._pasteInProgress) return;
-    const { row, col } = this._selection.activeCell;
-    const cell = this._getCell(row, col);
-    const current = cell?.format?.numberFormat;
-    if (current?.type === 'date') {
-      this._modeAnnouncement = 'A date format has no decimal places';
+    if (this.readOnly || this._pasteInProgress || this._endEditElsewhere()) return;
+    const step = Math.trunc(delta);
+    const { cellIds, locked } = this._selectionCellsToFormat();
+    const selection = this._snapshotSelection();
+    const deltas: CellDelta[] = [];
+    const changed: string[] = [];
+    let shown: number | null = null;
+    const activeKey = this._getActiveCellKey();
+    for (const id of cellIds) {
+      const cell = this._internalData.get(id);
+      const current = cell?.format?.numberFormat;
+      if (current?.type === 'date') continue;
+      let decimals: number;
+      if (current) decimals = current.decimals ?? 2;
+      else if (cell?.type === 'number') decimals = /\.(\d+)/.exec(cell.displayValue)?.[1].length ?? 0;
+      else continue;
+      const next = Math.max(0, Math.min(10, decimals + step));
+      if (id === activeKey || shown === null) shown = next;
+      if (current && next === decimals) continue;
+      deltas.push({
+        id,
+        before: cell!.rawValue,
+        after: cell!.rawValue,
+        formatBefore: cell!.format ? { ...cell!.format } : undefined,
+        formatAfter: { ...cell!.format, numberFormat: { ...(current ?? { type: 'number' as const }), decimals: next } },
+      });
+      changed.push(id);
+    }
+    if (shown === null) {
+      if (locked === 0) this._modeAnnouncement = 'No numbers in the selection';
       return;
     }
-    const shown = cell?.type === 'number' ? /\.(\d+)/.exec(cell.displayValue)?.[1].length ?? 0 : 0;
-    const decimals = Math.max(0, Math.min(10, (current ? current.decimals ?? 2 : shown) + Math.trunc(delta)));
-    const { cellIds, locked } = this._selectionCellsToFormat();
-    if (cellIds.length === 0) return;
-    this._applyFormat(cellIds, { numberFormat: { ...(current ?? { type: 'number' }), decimals } }, 'user');
-    if (locked === 0) this._modeAnnouncement = decimals === 1 ? '1 decimal place' : `${decimals} decimal places`;
+    if (deltas.length > 0) {
+      this._executeUserBatch({ deltas, selectionBefore: selection, selectionAfter: selection, operation: 'format' });
+      const first = this._internalData.get(changed[0])?.format?.numberFormat;
+      this._dispatchFormatChange({ cellIds: changed, format: { numberFormat: first }, source: 'user' });
+    }
+    if (locked === 0) this._modeAnnouncement = shown === 1 ? '1 decimal place' : `${shown} decimal places`;
   }
 
   /**
@@ -2667,7 +2719,10 @@ export class Y11nSpreadsheet extends LitElement {
     };
   }
 
-  /** Whether there is a change to undo. `history-change` reports when this changes. */
+  /**
+   * Whether there is a change to undo. `history-change` reports when this or
+   * `canRedo` changes, and when new data (`setData()`) starts a fresh history.
+   */
   get canUndo(): boolean {
     return this._undoStack.length > 0;
   }
@@ -2683,6 +2738,7 @@ export class Y11nSpreadsheet extends LitElement {
    * @returns Whether a change was undone
    */
   undo(): boolean {
+    if (this._endEditElsewhere()) return false;
     return this._undo();
   }
 
@@ -2692,16 +2748,19 @@ export class Y11nSpreadsheet extends LitElement {
    * @returns Whether a change was redone
    */
   redo(): boolean {
+    if (this._endEditElsewhere()) return false;
     return this._redo();
   }
 
   /** Copy the selection to the clipboard, as Ctrl+C does. */
   async copy(): Promise<void> {
+    if (this._endEditElsewhere()) return;
     await this._handleCopy();
   }
 
   /** Cut the selection to the clipboard, as Ctrl+X does. Refused in read-only mode. */
   async cut(): Promise<void> {
+    if (this._endEditElsewhere()) return;
     await this._handleCut();
   }
 
@@ -2751,6 +2810,7 @@ export class Y11nSpreadsheet extends LitElement {
 
   /** Fit the selected columns to their content, as Alt+Shift+0 does. Works in read-only mode. */
   autoFitSelectedColumns(): void {
+    if (this._endEditElsewhere()) return;
     const { start, end } = this._selection.range;
     this._autoFitUserColumns(Array.from({ length: end.col - start.col + 1 }, (_, i) => start.col + i));
   }
@@ -2761,6 +2821,7 @@ export class Y11nSpreadsheet extends LitElement {
    * (or right of a single row). Refused in read-only mode.
    */
   autoSum(): void {
+    if (this._endEditElsewhere()) return;
     this._autoSum();
   }
 
@@ -2770,6 +2831,7 @@ export class Y11nSpreadsheet extends LitElement {
    * Refused in read-only mode.
    */
   toggleLists(): void {
+    if (this._endEditElsewhere()) return;
     this._toggleListsInSelection();
   }
 
@@ -2788,6 +2850,8 @@ export class Y11nSpreadsheet extends LitElement {
       this._modeAnnouncement = 'The spreadsheet is read-only';
       return false;
     }
+    // A formula open on another sheet: what is selected here is not what the edit is about
+    if (this._endEditElsewhere()) return false;
     this._syncPendingData();
     if (this._isEditing) this._commitEdit();
     const { start, end } = this._selection.range;
@@ -2803,7 +2867,8 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _reportHistory(): void {
     const detail: HistoryChangeDetail = { canUndo: this.canUndo, canRedo: this.canRedo };
-    const state = `${Number(detail.canUndo)}${Number(detail.canRedo)}`;
+    // The generation counts the times the data was replaced: a fresh history
+    const state = `${Number(detail.canUndo)}${Number(detail.canRedo)}:${this._dataGeneration}`;
     if (state === this._historyReported) return;
     this._historyReported = state;
     this.dispatchEvent(new CustomEvent<HistoryChangeDetail>('history-change', { detail, bubbles: true, composed: true }));
@@ -2986,6 +3051,7 @@ export class Y11nSpreadsheet extends LitElement {
     if (this._isEditing) this._commitEdit();
     this._closeFilterMenu(false);
     this._closePasteSpecial(false);
+    this._dialogOpener = this._focusedOutside();
     this._cfManagerStatus = '';
     this._cfManagerOpen = true;
     if (!this._cfManagerCleanup) {
@@ -3015,7 +3081,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._cfManagerCleanup = null;
     if (!this._cfManagerOpen) return;
     this._cfManagerOpen = false;
-    if (focusCell) this.updateComplete.then(() => this._focusActiveCell());
+    if (focusCell) this._returnFocus();
   }
 
   // ─── Format Internals ────────────────────────────────
@@ -3592,7 +3658,36 @@ export class Y11nSpreadsheet extends LitElement {
       this._selection.setSelection(cell, cell, null);
     }
     this._dispatchSelectionChange();
-    this.updateComplete.then(() => this._focusActiveCell());
+    // A change made from outside (a toolbar, the page's own buttons) leaves the focus there
+    if (!this._focusedOutside()) this.updateComplete.then(() => this._focusActiveCell());
+  }
+
+  /**
+   * The element that has the keyboard focus, if it is outside this component:
+   * a toolbar button, a control of the page. Null when the focus is in the
+   * grid (or one of its parts) or nowhere.
+   */
+  private _focusedOutside(): HTMLElement | null {
+    let active = document.activeElement as HTMLElement | null;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement as HTMLElement;
+    if (!active || active === document.body || active === document.documentElement) return null;
+    for (let node: Node | null = active; node; node = node.parentNode ?? (node as ShadowRoot).host ?? null) {
+      if (node === this) return null;
+    }
+    return active;
+  }
+
+  /**
+   * After a dialog closes: focus what opened it, if that was outside the grid
+   * (a toolbar button), otherwise the active cell.
+   */
+  private _returnFocus(): void {
+    const opener = this._dialogOpener;
+    this._dialogOpener = null;
+    this.updateComplete.then(() => {
+      if (opener?.isConnected) opener.focus();
+      else this._focusActiveCell();
+    });
   }
 
   private _buildCommandBatch(
@@ -5362,14 +5457,28 @@ export class Y11nSpreadsheet extends LitElement {
   /** Alt+Shift+F: unfreeze, or freeze the rows above and columns left of the active cell. */
   private _toggleFreeze(): void {
     if (this._frozenRowCount > 0 || this._frozenColCount > 0) {
-      this._setFrozen(0, 0, 'user');
-      this._modeAnnouncement = 'Panes unfrozen';
+      this._freezeAsUser(0, 0);
       return;
     }
     const { row, col } = this._selection.activeCell;
+    this._freezeAsUser(row, col);
+  }
+
+  /**
+   * Freeze `row` rows and `col` columns as the user (0, 0 unfreezes): refused
+   * when the frozen area would not leave room to scroll, and announced.
+   */
+  private _freezeAsUser(rows: number, cols: number): boolean {
+    const row = Math.max(0, Math.min(rows, this.rows - 1));
+    const col = Math.max(0, Math.min(cols, this.cols - 1));
     if (row === 0 && col === 0) {
-      this._modeAnnouncement = 'Nothing to freeze: move below or right of the rows and columns to keep in view';
-      return;
+      if (this._frozenRowCount === 0 && this._frozenColCount === 0) {
+        this._modeAnnouncement = 'Nothing to freeze: move below or right of the rows and columns to keep in view';
+        return false;
+      }
+      this._setFrozen(0, 0, 'user');
+      this._modeAnnouncement = 'Panes unfrozen';
+      return true;
     }
     const gridEl = this._grid;
     const h = this._cellSize.height;
@@ -5380,13 +5489,14 @@ export class Y11nSpreadsheet extends LitElement {
         this._colLeft(col) > gridEl.clientWidth - Y11nSpreadsheet.ROW_HEADER_WIDTH - this._colWidth(col))
     ) {
       this._modeAnnouncement = 'Cannot freeze: the frozen area would not fit on screen';
-      return;
+      return false;
     }
-    this._setFrozen(row, col, 'user');
+    const changed = this._setFrozen(row, col, 'user');
     const parts: string[] = [];
     if (row > 0) parts.push(row === 1 ? 'row 1' : `rows 1 to ${row}`);
     if (col > 0) parts.push(col === 1 ? 'column A' : `columns A to ${colToLetter(col - 1)}`);
     this._modeAnnouncement = `Froze ${parts.join(' and ')}`;
+    return changed;
   }
 
   /**
@@ -7245,7 +7355,7 @@ export class Y11nSpreadsheet extends LitElement {
     this._pasteSpecialCleanup = null;
     if (!this._pasteSpecial) return;
     this._pasteSpecial = null;
-    if (focusCell) this.updateComplete.then(() => this._focusActiveCell());
+    if (focusCell) this._returnFocus();
   }
 
   private _applyPasteSpecial(): void {

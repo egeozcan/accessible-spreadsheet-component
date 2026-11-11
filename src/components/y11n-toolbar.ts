@@ -229,6 +229,9 @@ const ICONS = {
   paste: svg`<path d="M5.5 3H4a1 1 0 0 0-1 1v9.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-1.5"/><rect x="5.5" y="1.5" width="5" height="3" rx="0.75"/>`,
   pasteSpecial: svg`<path d="M5.5 3H4a1 1 0 0 0-1 1v9.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-1.5"/><rect x="5.5" y="1.5" width="5" height="3" rx="0.75"/><path d="M5.5 8h5M5.5 11h3"/>`,
   wrap: svg`<path d="M2 3.5h12M2 8h9.75a2.25 2.25 0 0 1 0 4.5H8.5M2 12.5h3.5"/><path d="M10 11l-1.5 1.5L10 14"/>`,
+  left: svg`<path d="M2 4h12M2 8h8M2 12h10" stroke-width="1.75"/>`,
+  center: svg`<path d="M2 4h12M4 8h8M3 12h10" stroke-width="1.75"/>`,
+  right: svg`<path d="M2 4h12M6 8h8M4 12h10" stroke-width="1.75"/>`,
   top: svg`<path d="M2 2.5h12M8 13.5v-8M5.5 8L8 5.5 10.5 8"/>`,
   middle: svg`<path d="M2 8h12M8 1.5v4M6.5 4L8 5.5 9.5 4M8 14.5v-4M6.5 12L8 10.5 9.5 12"/>`,
   bottom: svg`<path d="M2 13.5h12M8 2.5v8M5.5 8L8 10.5 10.5 8"/>`,
@@ -357,6 +360,9 @@ export class Y11nToolbar extends LitElement {
 
   /** The control that Tab enters the toolbar on */
   private _tabStop = '';
+  private _focusedItem: string | null = null;
+  /** Watches for the grid named by `for` while it is not in the document yet */
+  private _targetWatch: MutationObserver | null = null;
   private _connected: Y11nSpreadsheet | null = null;
   private _disconnectTarget: (() => void) | null = null;
   private _syncQueued = false;
@@ -365,8 +371,6 @@ export class Y11nToolbar extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     this._attach();
-    // An element named by `for` may come later in the document
-    if (!this._connected && this.htmlFor) setTimeout(() => this._attach());
   }
 
   disconnectedCallback(): void {
@@ -377,16 +381,36 @@ export class Y11nToolbar extends LitElement {
 
   protected willUpdate(changed: Map<string, unknown>): void {
     if (changed.has('target') || changed.has('htmlFor')) this._attach();
+    // The control that has the focus, in case this update disables it
+    const focused = (this.renderRoot as ShadowRoot).activeElement as HTMLElement | null;
+    this._focusedItem = focused?.dataset?.item ?? null;
   }
 
   protected updated(): void {
+    const all = [...this.renderRoot.querySelectorAll<HTMLElement>('[data-item]')];
+    const enabled = (el: HTMLElement) => !el.matches(':disabled');
+
+    // A control that was disabled while it had the focus (Undo after the last
+    // step, anything when the grid turns read-only) hands the focus to its
+    // nearest neighbor, so the keyboard user is not dropped out of the toolbar
+    const lost = all.findIndex((el) => el.dataset.item === this._focusedItem && !enabled(el));
+    if (lost !== -1) {
+      const heir = all.slice(lost + 1).find(enabled) ?? all.slice(0, lost).reverse().find(enabled);
+      if (heir) {
+        this._tabStop = heir.dataset.item!;
+        heir.focus();
+      }
+    }
+    this._focusedItem = null;
+
     // One control is in the Tab order (the last one used, or the first);
     // the arrow keys move between them
-    const controls = this._controls();
+    const controls = all.filter(enabled);
     const stop = controls.find((el) => el.dataset.item === this._tabStop) ?? controls[0];
-    for (const el of this.renderRoot.querySelectorAll<HTMLElement>('[data-item]')) {
-      el.tabIndex = el === stop ? 0 : -1;
-    }
+    for (const el of all) el.tabIndex = el === stop ? 0 : -1;
+
+    // A menu whose button was disabled or removed is closed, not waiting to reopen
+    if (this._menu !== null && !this.renderRoot.querySelector('.menu')) this._closeMenu(false);
   }
 
   // ─── Styles ────────────────────────────────────────────
@@ -549,32 +573,6 @@ export class Y11nToolbar extends LitElement {
       gap: 0;
     }
 
-    .align-icon {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      width: 14px;
-    }
-
-    .align-icon span {
-      display: block;
-      height: 2px;
-      background: currentColor;
-      border-radius: 1px;
-    }
-
-    .align-left span:nth-child(1) { width: 100%; }
-    .align-left span:nth-child(2) { width: 70%; }
-    .align-left span:nth-child(3) { width: 85%; }
-
-    .align-center span:nth-child(1) { width: 100%; margin: 0 auto; }
-    .align-center span:nth-child(2) { width: 70%; margin: 0 auto; }
-    .align-center span:nth-child(3) { width: 85%; margin: 0 auto; }
-
-    .align-right span:nth-child(1) { width: 100%; margin-left: auto; }
-    .align-right span:nth-child(2) { width: 70%; margin-left: auto; }
-    .align-right span:nth-child(3) { width: 85%; margin-left: auto; }
-
     select {
       height: 28px;
       padding: 0 4px;
@@ -656,11 +654,18 @@ export class Y11nToolbar extends LitElement {
     }
 
     @media (forced-colors: active) {
-      button[aria-pressed='true'] {
+      button[aria-pressed='true'],
+      button[aria-pressed='true']:hover:not(:disabled) {
         forced-color-adjust: none;
         background: Highlight;
         border-color: Highlight;
         color: HighlightText;
+      }
+
+      /* The swatches show a color the user chose: keep it, with an outline that is always visible */
+      .color-swatch .indicator {
+        forced-color-adjust: none;
+        outline: 1px solid ButtonText;
       }
 
       button:disabled,
@@ -685,9 +690,26 @@ export class Y11nToolbar extends LitElement {
     return (root.getElementById?.(this.htmlFor) as Y11nSpreadsheet | null) ?? null;
   }
 
+  /**
+   * While the grid is named by `for`, watch the toolbar's document or shadow
+   * root: the grid may be added after the toolbar, or replaced by another
+   * element with the same id (as a framework's re-render does).
+   */
+  private _watchForTarget(byId: boolean): void {
+    if (!byId) {
+      this._targetWatch?.disconnect();
+      this._targetWatch = null;
+      return;
+    }
+    if (this._targetWatch || typeof MutationObserver === 'undefined') return;
+    this._targetWatch = new MutationObserver(() => this._attach());
+    this._targetWatch.observe(this.getRootNode(), { childList: true, subtree: true });
+  }
+
   /** Follow the target grid (or stop, when there is none or the toolbar left the document). */
   private _attach(): Y11nSpreadsheet | null {
     const next = this.isConnected ? this._findTarget() : null;
+    this._watchForTarget(this.isConnected && !this.target && this.htmlFor !== '');
     if (next === this._connected) return next;
     this._disconnectTarget?.();
     this._disconnectTarget = null;
@@ -722,8 +744,10 @@ export class Y11nToolbar extends LitElement {
     const grid = this._connected;
     if (!grid) return;
     if (typeof grid.getSelectionFormat !== 'function') {
-      // Named by `for` before <y11n-spreadsheet> was defined
-      void customElements.whenDefined(grid.localName).then(() => this._queueSync());
+      // Named by `for` before <y11n-spreadsheet> was defined (or not a grid at all)
+      if (grid.localName.includes('-')) {
+        void customElements.whenDefined(grid.localName).then(() => this._queueSync(), () => {});
+      }
       return;
     }
     const format = grid.getSelectionFormat();
@@ -838,8 +862,7 @@ export class Y11nToolbar extends LitElement {
         grid.toggleFilter();
         break;
       case 'reapplyFilter':
-        grid.reapplyFilter();
-        grid.announce('Filter reapplied');
+        grid.reapplyFilterAsUser();
         break;
       case 'list':
         grid.toggleLists();
@@ -847,27 +870,18 @@ export class Y11nToolbar extends LitElement {
       case 'autoSum':
         grid.autoSum();
         break;
-      case 'freeze': {
-        const { row, col } = grid.getSelection().activeCell;
-        if (row === 0 && col === 0) {
-          grid.announce('Nothing to freeze: move below or right of the rows and columns to keep in view');
-        } else {
-          grid.freezePanes(row, col);
-          this._announceFrozen(grid);
-        }
+      // The grid checks that the frozen area leaves room to scroll, and announces the outcome
+      case 'freeze':
+        grid.freezePanesAsUser();
         break;
-      }
       case 'freezeFirstRow':
-        grid.freezePanes(1, 0);
-        this._announceFrozen(grid);
+        grid.freezePanesAsUser(1, 0);
         break;
       case 'freezeFirstColumn':
-        grid.freezePanes(0, 1);
-        this._announceFrozen(grid);
+        grid.freezePanesAsUser(0, 1);
         break;
       case 'unfreeze':
-        grid.unfreezePanes();
-        grid.announce('Panes unfrozen');
+        grid.freezePanesAsUser(0, 0);
         break;
       case 'find':
         void grid.openFind();
@@ -877,14 +891,6 @@ export class Y11nToolbar extends LitElement {
         break;
     }
     this._queueSync();
-  }
-
-  private _announceFrozen(grid: Y11nSpreadsheet): void {
-    const { frozenRows: rows, frozenCols: cols } = grid;
-    const parts: string[] = [];
-    if (rows > 0) parts.push(rows === 1 ? '1 row' : `${rows} rows`);
-    if (cols > 0) parts.push(cols === 1 ? '1 column' : `${cols} columns`);
-    grid.announce(parts.length > 0 ? `Froze ${parts.join(' and ')}` : 'Nothing was frozen');
   }
 
   // ─── Keyboard Navigation ───────────────────────────────
@@ -975,6 +981,17 @@ export class Y11nToolbar extends LitElement {
     }
   }
 
+  /**
+   * The focus went somewhere outside the menu and its button: close it. A
+   * press on something that takes no focus has no `relatedTarget`; the
+   * pointerdown listener deals with those.
+   */
+  private _handleMenuFocusout(e: FocusEvent): void {
+    const next = e.relatedTarget as Node | null;
+    if (this._menu === null || !next || (e.currentTarget as HTMLElement).contains(next)) return;
+    this._closeMenu(false);
+  }
+
   private _handleMenuKeydown(e: KeyboardEvent): void {
     // Arrow keys move inside the menu here, not along the toolbar
     e.stopPropagation();
@@ -1007,7 +1024,7 @@ export class Y11nToolbar extends LitElement {
   ) {
     const open = this._menu === item && !disabled;
     return html`
-      <div class="menu-wrapper ${open ? 'open' : ''}">
+      <div class="menu-wrapper ${open ? 'open' : ''}" @focusout=${this._handleMenuFocusout}>
         <button
           class="menu-button"
           type="button"
@@ -1183,7 +1200,7 @@ export class Y11nToolbar extends LitElement {
             ?disabled=${d}
             aria-label="Text color"
             title="Text color"
-            @input=${(e: Event) => this._format('textColor', (e.target as HTMLInputElement).value)}
+            @change=${(e: Event) => this._format('textColor', (e.target as HTMLInputElement).value)}
           />
         </div>`;
       case 'backgroundColor':
@@ -1198,7 +1215,7 @@ export class Y11nToolbar extends LitElement {
             ?disabled=${d}
             aria-label="Background color"
             title="Background color"
-            @input=${(e: Event) => this._format('backgroundColor', (e.target as HTMLInputElement).value)}
+            @change=${(e: Event) => this._format('backgroundColor', (e.target as HTMLInputElement).value)}
           />
         </div>`;
 
@@ -1213,7 +1230,7 @@ export class Y11nToolbar extends LitElement {
               title="Align ${align}"
               ?disabled=${d}
               @click=${() => this._format('textAlign', align)}
-            ><span class="align-icon align-${align}" aria-hidden="true"><span></span><span></span><span></span></span></button>`
+            >${icon(align)}</button>`
           )}
         </div>`;
       case 'verticalAlign':
