@@ -1,6 +1,11 @@
 export { Y11nSpreadsheet } from './y11n-spreadsheet.js';
 export { Y11nFormulaBar } from './components/y11n-formula-bar.js';
-export { Y11nFormatToolbar, computeSelectionFormat } from './components/y11n-format-toolbar.js';
+export {
+  Y11nToolbar,
+  computeSelectionFormat,
+  TOOLBAR_GROUPS,
+  TOOLBAR_ITEMS,
+} from './components/y11n-toolbar.js';
 export { Y11nConditionalFormatDialog } from './components/y11n-conditional-format-dialog.js';
 export { Y11nNameManager } from './components/y11n-name-manager.js';
 export type { NameSaveDetail, NameRemoveDetail, NameGoDetail } from './components/y11n-name-manager.js';
@@ -20,7 +25,12 @@ export type {
   FormatActionDetail,
   ConditionalFormatActionDetail,
   ConditionalFormatMenuAction,
-} from './components/y11n-format-toolbar.js';
+  ToolbarAction,
+  ToolbarActionDetail,
+  ToolbarItem,
+  ToolbarGroup,
+  ToolbarItemSpec,
+} from './components/y11n-toolbar.js';
 export { FormulaEngine, RangeValue, RefValue, LambdaValue, isValidName, renameSheetInFormula } from './engine/formula-engine.js';
 export { parseFormula, tokenizeFormula, sheetPrefix } from './engine/parser.js';
 export type { Node as FormulaNode, Token as FormulaToken, RefInfo, RefEnd } from './engine/parser.js';
@@ -47,6 +57,8 @@ export type {
   NamesChangeDetail,
   CellChangeDetail,
   SelectionChangeDetail,
+  SelectionInfo,
+  HistoryChangeDetail,
   DataChangeDetail,
   FormatChangeDetail,
   NumberFormatType,

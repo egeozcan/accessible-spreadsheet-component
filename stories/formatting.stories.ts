@@ -3,8 +3,6 @@ import { example } from './support/example.js';
 import cellFormats from './examples/cell-formats.js';
 import formatApi from './examples/format-api.js';
 import conditionalFormatting from './examples/conditional-formatting.js';
-import formatToolbar from './examples/format-toolbar.js';
-import toolbarStates from './examples/toolbar-states.js';
 
 const meta: Meta = {
   title: 'Examples/Formatting',
@@ -12,7 +10,7 @@ const meta: Meta = {
   parameters: {
     docs: {
       description: {
-        component: `How cells look: formats stored with the cells, formats that follow the values (conditional formatting), and the optional toolbar element.`,
+        component: `How cells look: formats stored with the cells, and formats that follow the values (conditional formatting). The toolbar in these examples is the optional \`<y11n-toolbar>\` element (see Toolbar).`,
       },
     },
   },
@@ -36,16 +34,4 @@ export const ConditionalFormatting: StoryObj = {
   name: 'Conditional formatting',
   render: conditionalFormatting,
   parameters: example('conditional-formatting', { height: 360 }),
-};
-
-export const FormatToolbar: StoryObj = {
-  name: 'Format toolbar',
-  render: formatToolbar,
-  parameters: example('format-toolbar'),
-};
-
-export const ToolbarStates: StoryObj = {
-  name: 'Toolbar states',
-  render: toolbarStates,
-  parameters: example('toolbar-states', { height: 220 }),
 };

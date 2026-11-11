@@ -7,11 +7,13 @@
  * rows and turn blue.
  *
  * Try it: press Alt+Down on a header cell (or click its button) to open the
- * filter menu. Ctrl+Shift+L removes the filter, Ctrl+Z brings it back.
+ * filter menu. The toolbar's Filter button (Ctrl+Shift+L) removes the filter
+ * and Undo (Ctrl+Z) brings it back. Change a team and press Reapply filter.
  * Arrow keys, copy, paste, fill and Delete all skip the hidden rows.
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function filter() {
   const teams = ['Ops', 'Sales', 'Support'];
@@ -31,5 +33,9 @@ export default function filter() {
   // Setting a filter is an undo step, like changing one from the menu
   const table = { start: { row: 0, col: 0 }, end: { row: 60, col: 3 } };
   sheet.setFilter(table, [{ col: 1, values: ['Sales', 'Support'] }]);
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'filter reapplyFilter | sortAscending sortDescending | undo redo';
+  return stack(toolbar, sheet);
 }

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ClipboardManager } from '../controllers/clipboard-manager.js';
-import { computeSelectionFormat } from '../components/y11n-format-toolbar.js';
+import { computeSelectionFormat } from '../components/y11n-toolbar.js';
 import { formatsEqual } from '../types.js';
 import type { CellFormat, SelectionRange } from '../types.js';
 

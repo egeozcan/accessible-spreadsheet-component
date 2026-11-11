@@ -8,10 +8,14 @@
  * "Top score" is below a blank row, so it is not part of the table. Blank
  * scores sort last either way, and Ctrl+Z undoes a sort.
  *
- * Try it: click a cell in the Score column, then a button.
+ * The toolbar's two sort buttons call `sortSelection()`; the button under
+ * it calls `sort()` with two keys.
+ *
+ * Try it: click a cell in the Score column, then a sort button.
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function sorting() {
   const sheet = document.createElement('y11n-spreadsheet');
@@ -32,30 +36,20 @@ export default function sorting() {
 
   const table = { start: { row: 0, col: 0 }, end: { row: 5, col: 3 } };
 
-  const actions: Record<string, () => void> = {
-    'Sort A to Z': () => sheet.sortSelection('ascending'),
-    'Sort Z to A': () => sheet.sortSelection('descending'),
-    'By team, then score (high to low)': () => {
-      const keys = [{ col: 1 }, { col: 2, direction: 'descending' as const }];
-      sheet.sort(table, keys, { hasHeader: true });
-    },
-  };
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'sortAscending sortDescending | undo redo';
 
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = 'By team, then score (high to low)';
+  button.addEventListener('click', () => {
+    const keys = [{ col: 1 }, { col: 2, direction: 'descending' as const }];
+    sheet.sort(table, keys, { hasHeader: true });
+  });
   const buttons = document.createElement('div');
-  for (const [label, run] of Object.entries(actions)) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = label;
-    button.addEventListener('click', run);
-    buttons.append(button);
-  }
+  buttons.style.cssText = 'padding: 8px 12px;';
+  buttons.append(button);
 
-  // Layout: buttons above the grid
-  const page = document.createElement('div');
-  page.style.cssText = 'display: flex; flex-direction: column; height: 100%;';
-  buttons.style.cssText =
-    'display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px;';
-  sheet.style.cssText = 'flex: 1; min-height: 0;';
-  page.append(buttons, sheet);
-  return page;
+  return stack(toolbar, buttons, sheet);
 }

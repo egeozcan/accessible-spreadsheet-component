@@ -8,10 +8,11 @@
  *
  * Try it: switch to Orders with the tabs (or Ctrl+PageDown), change an
  * amount and come back. Type `orders` in the Name Box at the left of the
- * formula bar, or press Ctrl+F3 for the name manager.
+ * formula bar, or press Ctrl+F3 (the toolbar's button) for the name manager.
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function sheetsAndNames() {
   const sheet = document.createElement('y11n-spreadsheet');
@@ -47,5 +48,9 @@ export default function sheetsAndNames() {
   sheet.defineName('tax', '=0.19');
   sheet.defineName('orders', '=Orders!A2:C6');
   sheet.defineName('withTax', '=LAMBDA(amount, amount * (1 + tax))');
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'names find';
+  return stack(toolbar, sheet);
 }

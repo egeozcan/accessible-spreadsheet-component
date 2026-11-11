@@ -1,11 +1,11 @@
 import { test, expect } from './fixtures';
 
-test.describe('Format Toolbar', () => {
-  /** Inject a <y11n-format-toolbar> and wire it to the spreadsheet */
+test.describe('Toolbar', () => {
+  /** Inject a <y11n-toolbar> and wire it to the spreadsheet */
   async function setupToolbar(page: import('@playwright/test').Page) {
     await page.evaluate(() => {
       // Import the component (already registered via index.ts)
-      const toolbar = document.createElement('y11n-format-toolbar') as any;
+      const toolbar = document.createElement('y11n-toolbar') as any;
       toolbar.id = 'fmt-toolbar';
       const container = document.querySelector('.demo-container')!;
       container.insertBefore(toolbar, container.firstChild);

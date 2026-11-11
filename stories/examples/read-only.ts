@@ -2,12 +2,14 @@
  * `readOnly` (the `read-only` attribute in HTML) turns off every way of
  * changing the cells: typing, paste, fill, delete and formatting. Moving
  * around, selecting, copying, filtering and resizing columns still work.
+ * A toolbar follows its grid: what would change a cell is disabled.
  *
  * To lock only some cells, see "Validation and locked cells" under Editing
  * and Tables.
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function readOnly() {
   const sheet = document.createElement('y11n-spreadsheet');
@@ -23,5 +25,8 @@ export default function readOnly() {
       ['Margin (%)', '=ROUND(B4/B2*100, 1)', '=ROUND(C4/C2*100, 1)', '=ROUND(D4/D2*100, 1)', '=ROUND(E4/E2*100, 1)'],
     ])
   );
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  return stack(toolbar, sheet);
 }

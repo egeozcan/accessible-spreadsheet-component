@@ -6,10 +6,12 @@
  *
  * Try it: drag the right border of a column header, or double-click it to
  * fit the column to its content. Column B is too narrow here: select a cell
- * in it and press Alt+Shift+0 to fit, or Alt+Shift+Left / Right to resize.
+ * in it and press Alt+Shift+0 (or the toolbar's button) to fit, or
+ * Alt+Shift+Left / Right to resize.
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function columnWidths() {
   const sheet = document.createElement('y11n-spreadsheet');
@@ -33,5 +35,9 @@ export default function columnWidths() {
     // The place to save the layout, e.g. to localStorage
     console.log('column widths', sheet.getColumnWidths());
   });
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'autoFit | undo redo';
+  return stack(toolbar, sheet);
 }

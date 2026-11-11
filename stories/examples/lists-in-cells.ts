@@ -8,12 +8,14 @@
  * `FLATTEN` lays nested values out in the grid.
  *
  * Try it: press Alt+Down on a list to see its values, F2 to edit its items,
- * or select a cell with comma-separated text and press Ctrl+J. The filter on
- * the Owners header lists people, not combinations.
+ * or select a cell with comma-separated text and press Ctrl+J (the toolbar's
+ * List button). The filter on the Owners header lists people, not
+ * combinations.
  */
 import 'y11n-spreadsheet';
 import { listToFormula } from 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function listsInCells() {
   const sheet = document.createElement('y11n-spreadsheet');
@@ -53,5 +55,9 @@ export default function listsInCells() {
   );
   // Filter buttons on the table's header row, nothing hidden yet
   sheet.setFilter({ start: { row: 0, col: 0 }, end: { row: 3, col: 5 } });
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'list | filter | undo redo';
+  return stack(toolbar, sheet);
 }

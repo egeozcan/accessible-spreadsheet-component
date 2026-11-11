@@ -11,6 +11,8 @@ import {
   type FormulaFunction,
   type CellChangeDetail,
   type SelectionChangeDetail,
+  type SelectionInfo,
+  type HistoryChangeDetail,
   type DataChangeDetail,
   type FormatChangeDetail,
   type DataChangeOperation,
@@ -497,6 +499,7 @@ function currentTimeText(): string {
  *
  * @fires cell-change - When a single cell value is edited
  * @fires selection-change - When the selected range changes
+ * @fires history-change - When undo or redo becomes available or stops being available
  * @fires data-change - On bulk updates (paste, cut, clear, undo/redo)
  * @fires format-change - When cell formatting is modified
  * @fires cell-edit-start - Before the inline editor opens (cancelable)
@@ -648,6 +651,8 @@ export class Y11nSpreadsheet extends LitElement {
 
   private _undoStack: CommandBatch[] = [];
   private _redoStack: CommandBatch[] = [];
+  /** What the last `history-change` reported: undo and redo available */
+  private _historyReported = '00';
   private readonly _maxHistory = 100;
 
   /** Reference mode cursor position */
@@ -2006,6 +2011,7 @@ export class Y11nSpreadsheet extends LitElement {
   private _dropHistoryOf(sheetId: number): void {
     this._undoStack = this._undoStack.filter((b) => b.sheetId !== sheetId);
     this._redoStack = this._redoStack.filter((b) => b.sheetId !== sheetId);
+    this.requestUpdate();
   }
 
   private _addSheet(name: string, options: AddSheetOptions, source: 'user' | 'programmatic'): string {
@@ -2539,6 +2545,270 @@ export class Y11nSpreadsheet extends LitElement {
     this._applyFormat(cellIds, format, 'user');
   }
 
+  /**
+   * The format that the selected cells share: a property is set when every
+   * selected cell has the same value for it, and left out when they differ
+   * (or none has it). Rows hidden by the filter don't count, as they are
+   * left alone by formatting. Use it to show the state of formatting
+   * controls; `<y11n-toolbar>` does.
+   */
+  getSelectionFormat(): CellFormat {
+    const { start, end } = this._selection.range;
+    const rows = this._visibleRowsBetween(start.row, end.row);
+    const area = rows.length * (end.col - start.col + 1);
+    const formats: CellFormat[] = [];
+    if (area <= this._internalData.size) {
+      for (const r of rows) {
+        for (let c = start.col; c <= end.col; c++) {
+          const format = this._internalData.get(cellKey(r, c))?.format;
+          // One unformatted cell: nothing is shared
+          if (!format) return {};
+          formats.push(format);
+        }
+      }
+    } else {
+      // A selection larger than the data (whole rows or columns): go by the cells that exist
+      for (const [key, cell] of this._internalData) {
+        if (!cell.format) continue;
+        const { row, col } = parseKey(key);
+        if (row < start.row || row > end.row || col < start.col || col > end.col) continue;
+        if (!this._isRowHidden(row)) formats.push(cell.format);
+      }
+      if (formats.length < area) return {};
+    }
+    const shared: CellFormat = {};
+    const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
+    for (const prop of Object.keys(formats[0] ?? {}) as (keyof CellFormat)[]) {
+      const value = formats[0][prop];
+      if (value === undefined || value === false) continue;
+      if (formats.every((f) => same(f[prop], value))) {
+        (shared as Record<string, unknown>)[prop] = typeof value === 'object' ? { ...value } : value;
+      }
+    }
+    return shared;
+  }
+
+  /**
+   * Merge format properties into the selected cells, as a user action: like
+   * `toggleFormat()` it is refused in read-only mode, leaves read-only cells
+   * and rows hidden by the filter alone, goes through `before-change` and is
+   * one undo step. A property set to `undefined` is removed.
+   *
+   * @param format - Format properties to merge, e.g. `{ textAlign: 'center' }`
+   */
+  formatSelection(format: CellFormat): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const { cellIds } = this._selectionCellsToFormat();
+    if (cellIds.length > 0) this._applyFormat(cellIds, format, 'user');
+  }
+
+  /** Remove all formatting from the selected cells, as a user action (see `formatSelection()`). */
+  clearSelectionFormat(): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const { cellIds } = this._selectionCellsToFormat();
+    if (cellIds.length > 0) this._clearFormat(cellIds, 'user');
+  }
+
+  /**
+   * Show more or fewer decimal places in the selected cells, as a user
+   * action. Starts from the active cell's number format, or for a cell
+   * without one from the decimals its number shows, and gives the result to
+   * the whole selection. Dates are left alone.
+   *
+   * @param delta - Decimal places to add (negative: to remove)
+   */
+  changeDecimals(delta: number): void {
+    if (this.readOnly || this._pasteInProgress) return;
+    const { row, col } = this._selection.activeCell;
+    const cell = this._getCell(row, col);
+    const current = cell?.format?.numberFormat;
+    if (current?.type === 'date') {
+      this._modeAnnouncement = 'A date format has no decimal places';
+      return;
+    }
+    const shown = cell?.type === 'number' ? /\.(\d+)/.exec(cell.displayValue)?.[1].length ?? 0 : 0;
+    const decimals = Math.max(0, Math.min(10, (current ? current.decimals ?? 2 : shown) + Math.trunc(delta)));
+    const { cellIds, locked } = this._selectionCellsToFormat();
+    if (cellIds.length === 0) return;
+    this._applyFormat(cellIds, { numberFormat: { ...(current ?? { type: 'number' }), decimals } }, 'user');
+    if (locked === 0) this._modeAnnouncement = decimals === 1 ? '1 decimal place' : `${decimals} decimal places`;
+  }
+
+  /**
+   * The cells of the selection that a user format change applies to: not the
+   * read-only ones (announced) and not those on rows hidden by the filter.
+   */
+  private _selectionCellsToFormat(): { cellIds: string[]; locked: number } {
+    const range = this._selection.range;
+    const cellIds: string[] = [];
+    let locked = 0;
+    for (const r of this._visibleRowsBetween(range.start.row, range.end.row)) {
+      for (let c = range.start.col; c <= range.end.col; c++) {
+        const id = cellKey(r, c);
+        if (this._isCellLocked(id)) locked++;
+        else cellIds.push(id);
+      }
+    }
+    if (locked > 0) this._announceSkipped(locked, []);
+    return { cellIds, locked };
+  }
+
+  // ─── Selection and Command API ───────────────────────
+
+  /**
+   * The selected range and the active cell. `selection-change` reports the
+   * range as it changes.
+   */
+  getSelection(): SelectionInfo {
+    const { start, end } = this._selection.range;
+    return {
+      range: { start: { ...start }, end: { ...end } },
+      activeCell: { ...this._selection.activeCell },
+    };
+  }
+
+  /** Whether there is a change to undo. `history-change` reports when this changes. */
+  get canUndo(): boolean {
+    return this._undoStack.length > 0;
+  }
+
+  /** Whether there is an undone change to redo. */
+  get canRedo(): boolean {
+    return this._redoStack.length > 0;
+  }
+
+  /**
+   * Undo the last change, as Ctrl+Z does. Refused in read-only mode.
+   *
+   * @returns Whether a change was undone
+   */
+  undo(): boolean {
+    return this._undo();
+  }
+
+  /**
+   * Redo the change that was undone last, as Ctrl+Y does.
+   *
+   * @returns Whether a change was redone
+   */
+  redo(): boolean {
+    return this._redo();
+  }
+
+  /** Copy the selection to the clipboard, as Ctrl+C does. */
+  async copy(): Promise<void> {
+    await this._handleCopy();
+  }
+
+  /** Cut the selection to the clipboard, as Ctrl+X does. Refused in read-only mode. */
+  async cut(): Promise<void> {
+    await this._handleCut();
+  }
+
+  /**
+   * Insert as many rows as the selection spans, above or below it, as a user
+   * action: refused in read-only mode, fires the cancelable
+   * `before-structure-change`, undoable and announced. Unlike the keyboard
+   * shortcut it does not need whole rows selected.
+   *
+   * @param where - Default: `'above'`
+   * @returns Whether rows were inserted
+   */
+  insertRowsAtSelection(where: 'above' | 'below' = 'above'): boolean {
+    return this._changeStructureAtSelection('row', 'insert', where === 'below');
+  }
+
+  /**
+   * Insert as many columns as the selection spans, left or right of it, as a
+   * user action (see `insertRowsAtSelection()`).
+   *
+   * @param where - Default: `'left'`
+   * @returns Whether columns were inserted
+   */
+  insertColumnsAtSelection(where: 'left' | 'right' = 'left'): boolean {
+    return this._changeStructureAtSelection('col', 'insert', where === 'right');
+  }
+
+  /**
+   * Delete the rows the selection spans, as a user action (see
+   * `insertRowsAtSelection()`).
+   *
+   * @returns Whether rows were deleted
+   */
+  deleteSelectedRows(): boolean {
+    return this._changeStructureAtSelection('row', 'delete');
+  }
+
+  /**
+   * Delete the columns the selection spans, as a user action (see
+   * `insertRowsAtSelection()`).
+   *
+   * @returns Whether columns were deleted
+   */
+  deleteSelectedColumns(): boolean {
+    return this._changeStructureAtSelection('col', 'delete');
+  }
+
+  /** Fit the selected columns to their content, as Alt+Shift+0 does. Works in read-only mode. */
+  autoFitSelectedColumns(): void {
+    const { start, end } = this._selection.range;
+    this._autoFitUserColumns(Array.from({ length: end.col - start.col + 1 }, (_, i) => start.col + i));
+  }
+
+  /**
+   * AutoSum, as Alt+= does: on a single cell, start a SUM of the numbers
+   * above it (or to its left); on a range, write a SUM under each column
+   * (or right of a single row). Refused in read-only mode.
+   */
+  autoSum(): void {
+    this._autoSum();
+  }
+
+  /**
+   * Turn the comma-separated text of the selected cells into lists, or lists
+   * back into text, as Ctrl+J does. On an empty cell it starts a new list.
+   * Refused in read-only mode.
+   */
+  toggleLists(): void {
+    this._toggleListsInSelection();
+  }
+
+  /**
+   * Have screen readers announce a message, through the grid's own live
+   * region. For controls outside the grid that change it without a message
+   * of their own.
+   */
+  announce(message: string): void {
+    this._modeAnnouncement = message;
+  }
+
+  private _changeStructureAtSelection(axis: 'row' | 'col', kind: 'insert' | 'delete', after = false): boolean {
+    if (this._pasteInProgress) return false;
+    if (this.readOnly) {
+      this._modeAnnouncement = 'The spreadsheet is read-only';
+      return false;
+    }
+    this._syncPendingData();
+    if (this._isEditing) this._commitEdit();
+    const { start, end } = this._selection.range;
+    const first = axis === 'row' ? start.row : start.col;
+    const last = axis === 'row' ? end.row : end.col;
+    const count = last - first + 1;
+    if (kind === 'delete' && count >= (axis === 'row' ? this.rows : this.cols)) {
+      this._modeAnnouncement = `Cannot delete every ${axis === 'row' ? 'row' : 'column'}`;
+      return false;
+    }
+    return this._changeStructure({ axis, kind, index: kind === 'insert' && after ? last + 1 : first, count }, 'user');
+  }
+
+  private _reportHistory(): void {
+    const detail: HistoryChangeDetail = { canUndo: this.canUndo, canRedo: this.canRedo };
+    const state = `${Number(detail.canUndo)}${Number(detail.canRedo)}`;
+    if (state === this._historyReported) return;
+    this._historyReported = state;
+    this.dispatchEvent(new CustomEvent<HistoryChangeDetail>('history-change', { detail, bubbles: true, composed: true }));
+  }
+
   // ─── Conditional Format API ─────────────────────────
 
   /**
@@ -2651,7 +2921,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   /**
-   * Add a one-step rule to the selection, as the format toolbar's
+   * Add a one-step rule to the selection, as the toolbar's
    * Conditional formatting menu does: `'duplicates'`, `'unique'`,
    * `'aboveAverage'`, `'belowAverage'`, `'top10'`, `'bottom10'`,
    * `'colorScale'`, `'dataBar'` or `'iconSet'`. A user action: refused in
@@ -3416,6 +3686,8 @@ export class Y11nSpreadsheet extends LitElement {
     if (this._undoStack.length > this._maxHistory) {
       this._undoStack.shift();
     }
+    // `history-change` is fired from updated()
+    this.requestUpdate();
   }
 
   private _finalizeBatch(
@@ -5471,27 +5743,30 @@ export class Y11nSpreadsheet extends LitElement {
     this._autoFitUserColumns(this._columnsToResize(col));
   }
 
-  private _undo(): void {
-    if (this.readOnly || this._pasteInProgress) return;
+  private _undo(): boolean {
+    if (this.readOnly || this._pasteInProgress) return false;
 
     const batch = this._undoStack.pop();
-    if (!batch) return;
+    if (!batch) return false;
+    this.requestUpdate();
     // A change made on another sheet is undone there, in view
-    if (!this._showSheetOf(batch, 'undo')) return;
+    if (!this._showSheetOf(batch, 'undo')) return false;
 
     // Recorded before reverting, for the same reason as in _commitBatch: a
     // change a listener makes while it reverts clears the redo stack
     this._redoStack.push(batch);
     this._revertBatch(batch);
     this._dispatchFormatChangeForBatch(batch, 'undo');
+    return true;
   }
 
-  private _redo(): void {
-    if (this.readOnly || this._pasteInProgress) return;
+  private _redo(): boolean {
+    if (this.readOnly || this._pasteInProgress) return false;
 
     const batch = this._redoStack.pop();
-    if (!batch) return;
-    if (!this._showSheetOf(batch, 'redo')) return;
+    if (!batch) return false;
+    this.requestUpdate();
+    if (!this._showSheetOf(batch, 'redo')) return false;
 
     // Recorded before applying (see _commitBatch)
     this._undoStack.push(batch);
@@ -5500,6 +5775,7 @@ export class Y11nSpreadsheet extends LitElement {
     }
     this._applyBatch(batch, 'redo');
     this._dispatchFormatChangeForBatch(batch, 'redo');
+    return true;
   }
 
   /** Dispatch format-change for any batch that contains format deltas.
@@ -6340,17 +6616,7 @@ export class Y11nSpreadsheet extends LitElement {
   /** Ctrl+Shift+1/3/4/5/`: set (or, with undefined, remove) the selection's number format. */
   private _applyNumberFormatToSelection(numberFormat: NumberFormatOptions | undefined, label: string): void {
     if (this.readOnly || this._pasteInProgress) return;
-    const range = this._selection.range;
-    const cellIds: string[] = [];
-    let locked = 0;
-    for (const r of this._visibleRowsBetween(range.start.row, range.end.row)) {
-      for (let c = range.start.col; c <= range.end.col; c++) {
-        const id = cellKey(r, c);
-        if (this._isCellLocked(id)) locked++;
-        else cellIds.push(id);
-      }
-    }
-    if (locked > 0) this._announceSkipped(locked, []);
+    const { cellIds, locked } = this._selectionCellsToFormat();
     if (cellIds.length === 0) return;
     this._applyFormat(cellIds, { numberFormat }, 'user');
     if (locked === 0) this._modeAnnouncement = `${label} format`;
@@ -9160,6 +9426,7 @@ export class Y11nSpreadsheet extends LitElement {
   }
 
   protected updated(): void {
+    this._reportHistory();
     if (this._isEditing && this._editor) {
       this._editor.focus();
       if (this._refMode) {

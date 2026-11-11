@@ -4,9 +4,12 @@
  *
  * Try it: change a quantity or a price and the totals follow. Type `=` in an
  * empty cell and use the arrow keys or the mouse to pick the cells to refer to.
+ * Or select the cell under a column of numbers and press the toolbar's
+ * AutoSum button (Alt+=).
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function formulas() {
   const sheet = document.createElement('y11n-spreadsheet');
@@ -28,5 +31,9 @@ export default function formulas() {
       ['Highest price', '', '', '=MAX(C2:C6)'],
     ])
   );
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'autoSum | undo redo';
+  return stack(toolbar, sheet);
 }

@@ -3,7 +3,8 @@ import type { StoryObj } from '@storybook/web-components-vite';
 /** The text of every file in `stories/examples`, by path. */
 const files = import.meta.glob<string>('../examples/*.ts', { query: '?raw', import: 'default', eager: true });
 
-const HELPER = 'grid-from-rows';
+/** Files that examples import and that are not examples themselves */
+const HELPERS = ['grid-from-rows', 'stack'];
 
 function read(name: string): string {
   const text = files[`../examples/${name}.ts`];
@@ -16,8 +17,8 @@ function read(name: string): string {
  *
  * The Code panel and the "Show code" blocks get the file as it is, so what a
  * reader sees is what runs. The comment at the top of the file is the story's
- * description. A file that imports the `gridFromRows` helper gets the helper
- * appended, which keeps every listing complete enough to copy.
+ * description. A file that imports a helper (`gridFromRows`, `stack`) gets the
+ * helper appended, which keeps every listing complete enough to copy.
  *
  * @param name - File name without its extension
  * @param options - `height`: the height of the example on docs pages, in px
@@ -28,8 +29,10 @@ export function example(name: string, options: { height?: number } = {}): NonNul
   const description = comment ? comment[1].replace(/^ \* ?/gm, '') : '';
 
   let code = source;
-  if (source.includes(`./${HELPER}.js`)) {
-    code += `\n\n\n// ─── ${HELPER}.ts ${'─'.repeat(40)}\n\n${read(HELPER)}`;
+  for (const helper of HELPERS) {
+    if (source.includes(`./${helper}.js`)) {
+      code += `\n\n\n// ─── ${helper}.ts ${'─'.repeat(40)}\n\n${read(helper)}`;
+    }
   }
 
   return {
