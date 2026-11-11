@@ -423,8 +423,13 @@ export class Y11nToolbar extends LitElement {
     const stop = controls.find((el) => el.dataset.item === this._tabStop) ?? controls[0];
     for (const el of all) el.tabIndex = el === stop ? 0 : -1;
 
-    // A menu whose button was disabled or removed is closed, not waiting to reopen
-    if (this._menu !== null && !this.renderRoot.querySelector('.menu')) this._closeMenu(false);
+    // A menu whose button was disabled or removed is closed, not waiting to
+    // reopen (after this update: closing it starts another one)
+    if (this._menu !== null && !this.renderRoot.querySelector('.menu')) {
+      queueMicrotask(() => {
+        if (this._menu !== null && !this.renderRoot.querySelector('.menu')) this._closeMenu(false);
+      });
+    }
   }
 
   // ─── Styles ────────────────────────────────────────────
@@ -487,7 +492,8 @@ export class Y11nToolbar extends LitElement {
 
     button:disabled {
       opacity: 0.4;
-      cursor: not-allowed;
+      /* The press goes to the toolbar, which keeps it from moving the focus */
+      pointer-events: none;
     }
 
     button.bold-btn {
@@ -935,13 +941,15 @@ export class Y11nToolbar extends LitElement {
   }
 
   /**
-   * A button that is clicked does not take the focus: it stays in the grid
-   * (and in its editor, so an edit is not ended behind the user's back).
-   * Selects and color inputs need the focus to open.
+   * A press on the toolbar does not take the focus: it stays in the grid (and
+   * in its editor, so an edit is not ended behind the user's back). That goes
+   * for buttons, disabled ones (which let the press through to the toolbar)
+   * and the space between the controls. Selects and color inputs need the
+   * focus to open.
    */
   private _handleToolbarMousedown(e: MouseEvent): void {
     this._pointer = true;
-    if ((e.target as HTMLElement).closest?.('button')) e.preventDefault();
+    if (!(e.target as HTMLElement).closest?.('select, input')) e.preventDefault();
   }
 
   private _handleToolbarKeydown(e: KeyboardEvent): void {
@@ -994,7 +1002,11 @@ export class Y11nToolbar extends LitElement {
         const items = this._menuItems();
         if (items.includes((this.renderRoot as ShadowRoot).activeElement as HTMLElement)) return;
         const up = e.key === 'ArrowUp';
-        if (e.key !== 'Escape' && e.key !== 'ArrowDown' && !up) return;
+        if (e.key !== 'Escape' && e.key !== 'ArrowDown' && !up) {
+          // The user went on working elsewhere: the key is theirs, the menu goes
+          if (!['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) this._closeMenu(false);
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         this._pointer = false;

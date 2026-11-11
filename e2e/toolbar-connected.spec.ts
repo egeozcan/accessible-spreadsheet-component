@@ -505,6 +505,28 @@ test.describe('Toolbar connected to a grid', () => {
     await expect(menuItem(page, 'Insert row below')).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(control(page, 'Insert rows or columns')).toBeFocused();
+
+    // Any other key is for the grid, and closes the menu
+    await spreadsheet.clickCell(1, 0);
+    await control(page, 'Insert rows or columns').click();
+    await expect(menuItem(page, 'Insert row above')).toBeVisible();
+    await page.keyboard.press('ArrowRight');
+    await expect(page.locator('#tb').locator('[role="menu"]')).toHaveCount(0);
+    await expect(spreadsheet.cell(1, 1)).toBeFocused();
+  });
+
+  test('a click on a disabled button or between the controls leaves the focus in the grid', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(8, 2);
+    await expect(control(page, 'Undo')).toBeDisabled();
+    await control(page, 'Undo').click({ force: true });
+    await expect(spreadsheet.cell(8, 2)).toBeFocused();
+    await page.locator('#tb').locator('[role="toolbar"]').click({ position: { x: 2, y: 2 } });
+    await expect(spreadsheet.cell(8, 2)).toBeFocused();
+    await page.keyboard.type('k');
+    await page.keyboard.press('Enter');
+    await spreadsheet.waitForCellText(8, 2, 'k');
   });
 
   test('a click during an edit commits the edit and then acts', async ({ spreadsheet, page }) => {
