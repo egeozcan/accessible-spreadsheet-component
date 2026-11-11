@@ -446,4 +446,174 @@ test.describe('Toolbar connected to a grid', () => {
     await expect(control(page, 'Bold')).toBeDisabled();
     await expect(control(page, 'Undo')).toBeDisabled();
   });
+
+  test('a mouse click on a control leaves the keyboard in the grid', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(8, 1);
+
+    // Click Bold, go on typing
+    await control(page, 'Bold').click();
+    expect(await focusedControl(page)).toBeNull();
+    await expect(spreadsheet.cell(8, 1)).toBeFocused();
+    await page.keyboard.type('abc');
+    await page.keyboard.press('Enter');
+    await spreadsheet.waitForCellText(8, 1, 'abc');
+    expect(await spreadsheet.getCellFormat('8:1')).toEqual({ bold: true });
+
+    // A select needs the focus to open; it hands it back once a value is chosen
+    await spreadsheet.clickCell(1, 1);
+    await control(page, 'Number format').selectOption('percent');
+    await expect(spreadsheet.cell(1, 1)).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    expect(await sheetEval(page, (sheet) => sheet.getSelection().activeCell.row)).toBe(2);
+
+    // Also when the focus was in the toolbar before the click
+    await control(page, 'Italic').focus();
+    await control(page, 'Underline').click();
+    await expect(spreadsheet.cell(2, 1)).toBeFocused();
+    expect(await spreadsheet.getCellFormat('2:1')).toEqual({ underline: true });
+
+    // Dialogs opened with the mouse go back to the cell
+    await control(page, 'Name manager').click();
+    await expect(spreadsheet.shadow('y11n-name-manager')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(spreadsheet.cell(2, 1)).toBeFocused();
+  });
+
+  test('a menu opened with the mouse does not take the focus until a key is pressed', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(1, 0);
+
+    await control(page, 'Insert rows or columns').click();
+    await expect(menuItem(page, 'Insert row above')).toBeVisible();
+    await expect(spreadsheet.cell(1, 0)).toBeFocused();
+    await menuItem(page, 'Insert row above').click();
+    await expect(spreadsheet.cell(1, 0)).toBeFocused();
+    await spreadsheet.waitForCellText(2, 0, 'Cy');
+
+    await control(page, 'Insert rows or columns').click();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#tb').locator('[role="menu"]')).toHaveCount(0);
+    await expect(spreadsheet.cell(1, 0)).toBeFocused();
+
+    await control(page, 'Insert rows or columns').click();
+    await page.keyboard.press('ArrowDown');
+    await expect(menuItem(page, 'Insert row above')).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(menuItem(page, 'Insert row below')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(control(page, 'Insert rows or columns')).toBeFocused();
+  });
+
+  test('a click during an edit commits the edit and then acts', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.dblClickCell(1, 0);
+    await spreadsheet.typeInEditor('Zed');
+    await control(page, 'Bold').click();
+    await spreadsheet.waitForCellText(1, 0, 'Zed');
+    expect(await spreadsheet.getCellFormat('1:0')).toEqual({ bold: true });
+    expect(await spreadsheet.isEditorVisible()).toBe(false);
+    await expect(spreadsheet.cell(1, 0)).toBeFocused();
+  });
+
+  test('with a formula open on another sheet, a control ends the edit and does nothing else', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await sheetEval(page, (sheet) => {
+      sheet.addSheet('Second', { data: new Map([['0:0', { rawValue: 'other', displayValue: 'other', type: 'text' }]]) });
+    });
+    const tabs = page.locator('y11n-sheet-tabs');
+    const state = () =>
+      sheetEval(page, (sheet) => ({
+        rows: sheet.rows,
+        format: sheet.getCellFormat('8:0') ?? null,
+        filter: sheet.getFilter() !== null,
+        rules: sheet.getConditionalFormats().length,
+        shown: sheet.activeSheet,
+      }));
+
+    const actions: Array<() => Promise<void>> = [
+      () => control(page, 'Bold').click(),
+      () => control(page, 'Filter').click(),
+      async () => {
+        await control(page, 'Delete rows or columns').click();
+        await menuItem(page, 'Delete row').click();
+      },
+      async () => {
+        await control(page, 'Conditional formatting').click();
+        await menuItem(page, 'Data bars').click();
+      },
+    ];
+    for (const act of actions) {
+      await spreadsheet.clickCell(8, 0);
+      await page.keyboard.type('=');
+      await tabs.locator('[role="tab"]', { hasText: 'Second' }).click();
+      expect((await state()).shown).toBe('Second');
+      await act();
+      // The edit ended and its sheet is shown again; nothing else happened
+      expect(await state()).toEqual({ rows: 50, format: null, filter: false, rules: 0, shown: 'Sheet1' });
+      expect(await spreadsheet.isEditorVisible()).toBe(false);
+      expect(await sheetEval(page, (sheet) => sheet.getSheetData('Second').size)).toBe(1);
+    }
+  });
+
+  test('an edit ended by going to a control outside the grid leaves the focus there', async ({ spreadsheet, page }) => {
+    await spreadsheet.setData(DATA);
+    await page.evaluate(() => {
+      const input = document.createElement('input');
+      input.id = 'outside';
+      document.body.prepend(input);
+    });
+    await spreadsheet.dblClickCell(1, 0);
+    await spreadsheet.typeInEditor('Zed');
+    await page.locator('#outside').click();
+    await spreadsheet.waitForCellText(1, 0, 'Zed');
+    await page.waitForTimeout(100);
+    await expect(page.locator('#outside')).toBeFocused();
+  });
+
+  test('disabled while in use: a menu item hands on the focus, Redo hands it to Undo', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(1, 0);
+    await page.keyboard.type('Zed');
+    await page.keyboard.press('Enter');
+
+    await control(page, 'Undo').focus();
+    await page.keyboard.press('Enter');
+    await expect(control(page, 'Redo')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(control(page, 'Redo')).toBeDisabled();
+    await expect(control(page, 'Undo')).toBeFocused();
+
+    await control(page, 'Insert rows or columns').focus();
+    await page.keyboard.press('ArrowDown');
+    await expect(menuItem(page, 'Insert row above')).toBeFocused();
+    await spreadsheet.setReadOnly(true);
+    await expect(page.locator('#tb').locator('[role="menu"]')).toHaveCount(0);
+    expect(await focusedControl(page)).toBe('Fit column width');
+  });
+
+  test('for naming something that is not a grid only fires the events', async ({ spreadsheet, page }) => {
+    await spreadsheet.setData(DATA);
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.evaluate(() => {
+      const div = document.createElement('div');
+      div.id = 'notgrid';
+      const toolbar = document.createElement('y11n-toolbar');
+      toolbar.id = 'tb';
+      toolbar.setAttribute('for', 'notgrid');
+      toolbar.addEventListener('format-action', () => ((window as any).fired = true));
+      document.body.prepend(div, toolbar);
+    });
+    await control(page, 'Bold').click();
+    await control(page, 'Undo').click();
+    await page.waitForTimeout(100);
+    expect(await page.evaluate(() => (window as any).fired)).toBe(true);
+    expect(errors).toEqual([]);
+  });
 });

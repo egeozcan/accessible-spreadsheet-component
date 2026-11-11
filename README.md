@@ -115,7 +115,7 @@ sheet.setRangeFormat({ start: { row: 1, col: 1 }, end: { row: 9, col: 1 } },
 // The selection, and what a user does to it. These back your own buttons (the toolbar uses them).
 // Each does what its keyboard shortcut does: those that change cells are refused in read-only mode,
 // leave read-only cells and rows hidden by the filter alone, go through the cancelable before-…
-// events, are one undo step and are announced
+// events, are one undo step and are announced. An edit in progress is committed first
 sheet.getSelection()                  // { range: { start, end }, activeCell: { row, col } }
 sheet.getSelectionFormat()            // the format all selected cells share, e.g. { bold: true }
 sheet.formatSelection({ textAlign: 'center' })
@@ -144,6 +144,9 @@ sheet.canRedo
 
 // A message for screen readers, through the grid's live region
 sheet.announce('Saved')
+
+// Move the keyboard focus to the active cell (or to the editor while a cell is being edited)
+sheet.focus()
 
 // CSV / TSV
 sheet.toCSV()                                   // display values, A1 → last used cell
@@ -597,7 +600,9 @@ What the toolbar does with a target is all public API: `toggleFormat()`, `format
 
 **Read-only.** In read-only mode the controls that change cells are disabled. Copy, Fit column width, Filter, Reapply filter, Freeze panes, Find and the name manager stay available, as they do in a read-only grid.
 
-**Keyboard.** The toolbar is one Tab stop. Left and Right move between its controls (wrapping around), Home and End go to the first and last. Tab leaves it, and Shift+Tab comes back to the control it was left on. The focus stays on a control after it acts, so Bold and then Italic, or Undo several times, work from the keyboard; a control that becomes disabled while it has the focus (Undo after the last step) hands it to its neighbor. A dialog opened from the toolbar returns the focus to its button when it closes. Down or Up on a menu button opens its menu at the first or last item; in a menu, Up and Down move, Enter chooses, Escape closes it and returns to the button. The buttons' tooltips name the grid's keyboard shortcut for the same action.
+**Keyboard.** The toolbar is one Tab stop. Left and Right move between its controls (wrapping around), Home and End go to the first and last. Tab leaves it, and Shift+Tab comes back to the control it was left on. A control used from the keyboard (or by a screen reader) keeps the focus after it acts, so Bold and then Italic, or Undo several times, work; a control that becomes disabled while it has the focus (Undo after the last step) hands it to its neighbor, and a dialog opened this way returns the focus to its button when it closes.
+
+**Mouse.** A click on a button does not move the keyboard focus: it stays in the grid, so you can click Bold and go on typing. A select or color control needs the focus to open and gives it back to the grid once a value is chosen. A menu opened with the mouse takes the focus only when a key is pressed (Down or Up to go into it, Escape to close it). A click while a cell is being edited commits the edit first; if the edit is a formula kept open on another sheet, the click only ends the edit. Down or Up on a menu button opens its menu at the first or last item; in a menu, Up and Down move, Enter chooses, Escape closes it and returns to the button. The buttons' tooltips name the grid's keyboard shortcut for the same action.
 
 **Theming.** The toolbar is outside the grid's shadow DOM, so it takes its own custom properties: set the ones it shares with the grid (`--ls-font-family`, `--ls-text-color`, `--ls-border-color`, `--ls-focus-ring`) on both elements or on a common ancestor, and see `--ls-toolbar-*` under [Theming](#theming).
 

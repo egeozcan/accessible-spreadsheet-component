@@ -16,10 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Events: a new `toolbar-action` for the controls that are not formats, and `format-action` now also carries `verticalAlign`, `wrap` and `numberFormat`. With a target, all three events are fired before the toolbar acts, and `preventDefault()` stops it.
   - New properties `verticalAlign`, `wrap`, `numberFormat`, `canUndo`, `canRedo`, `filtered`, `frozen` and `label` (its accessible name); new CSS custom property `--ls-toolbar-input-bg`.
   - The toolbar is one Tab stop that remembers the control it was left on, color inputs and selects included.
+  - A mouse click on a toolbar button leaves the keyboard focus in the grid, so typing goes on there; keyboard and screen reader use keeps the focus on the control.
 - Methods that do to the selection what a user does, to back your own buttons: `getSelection()`, `getSelectionFormat()`, `formatSelection()`, `clearSelectionFormat()`, `changeDecimals()`, `insertRowsAtSelection()`, `insertColumnsAtSelection()`, `deleteSelectedRows()`, `deleteSelectedColumns()`, `autoFitSelectedColumns()`, `autoSum()`, `toggleLists()`, `copy()` and `cut()`.
 - `freezePanesAsUser()` and `reapplyFilterAsUser()`: what Alt+Shift+F and Ctrl+Alt+L do, with their checks, events and announcements, to back buttons.
 - `undo()`, `redo()`, `canUndo`, `canRedo` and the `history-change` event (also fired when `setData()` starts a fresh history).
 - `announce(message)`: a message for screen readers through the grid's live region.
+- `focus()` on the grid moves the keyboard focus to the active cell.
 - Storybook: a Toolbar example group and reference page, and a toolbar with the fitting controls in most other examples.
 - A new formula engine: formulas are parsed once into an AST and then evaluated, instead of being evaluated while they are parsed. Everything below builds on it; existing formulas keep their results.
   - Grammar: `^` (left-associative, and `-2^2` is 4 as in Excel), postfix `%`, scientific literals (`1e3`), array literals (`{1,2;3,4}`, elements can be expressions), `@` and the spill operator `A1#`.
@@ -72,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In read-only mode the toolbar keeps the controls that a read-only grid still supports (copy, fit column width, filter, freeze panes, find, name manager) instead of disabling everything.
 - The toolbar's accessible name is "Spreadsheet toolbar" (was "Cell formatting"); set `label` to change it. Its Clear formatting button has an icon instead of ✘.
 - The toolbar's color controls fire `format-action` when a color is chosen (`change`), not on every step of a drag in the color picker, so a color is one undo step.
-- A change made while the keyboard focus is outside the grid (a toolbar button, a button of the page that calls `undo()` or `goTo()`) no longer moves the focus to the active cell. The rule manager, name manager and Paste Special return the focus to the outside control that opened them.
+- The grid no longer takes the keyboard focus from a control outside it: a change made while the focus is elsewhere (a toolbar button used from the keyboard, a button of the page that calls `undo()` or `goTo()`) leaves it there, an edit that ends because the user went to another control leaves it on that control, and the rule manager, name manager and Paste Special return it to the outside control that opened them.
+- `toggleFormat()`, `sortSelection()`, `toggleFilter()`, `paste()`, `openPasteSpecial()`, `applyConditionalFormatPreset()` and `clearSelectionConditionalFormats()` commit an edit in progress before they act, and only end the edit when it is a formula kept open on another sheet.
 - `computeSelectionFormat()` also reports `verticalAlign`, `wrap` and `numberFormat`.
 - The formula bar's cell reference is an `<input>` (the Name Box) instead of an `<output>`, and the formula input has the class `formula-input`: code that reached into the formula bar with `querySelector('input')` now finds the Name Box first.
 - A click on a cell while a formula is being typed, with the caret where a reference fits, picks that cell instead of committing the edit.

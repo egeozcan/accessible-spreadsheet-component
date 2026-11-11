@@ -360,6 +360,13 @@ export class Y11nToolbar extends LitElement {
 
   /** The control that Tab enters the toolbar on */
   private _tabStop = '';
+  /**
+   * Whether the control in use was reached with a pointer. A pointer user's
+   * keyboard focus belongs in the grid (click Bold, go on typing), so buttons
+   * do not take it and a select hands it back; a keyboard or screen reader
+   * user's focus stays on the control.
+   */
+  private _pointer = false;
   private _focusedItem: string | null = null;
   /** Watches for the grid named by `for` while it is not in the document yet */
   private _targetWatch: MutationObserver | null = null;
@@ -383,7 +390,9 @@ export class Y11nToolbar extends LitElement {
     if (changed.has('target') || changed.has('htmlFor')) this._attach();
     // The control that has the focus, in case this update disables it
     const focused = (this.renderRoot as ShadowRoot).activeElement as HTMLElement | null;
-    this._focusedItem = focused?.dataset?.item ?? null;
+    // For an item of an open menu: the menu's button
+    const control = focused?.closest('.menu')?.parentElement?.querySelector<HTMLElement>('[data-item]') ?? focused;
+    this._focusedItem = control?.dataset?.item ?? null;
   }
 
   protected updated(): void {
@@ -395,7 +404,12 @@ export class Y11nToolbar extends LitElement {
     // nearest neighbor, so the keyboard user is not dropped out of the toolbar
     const lost = all.findIndex((el) => el.dataset.item === this._focusedItem && !enabled(el));
     if (lost !== -1) {
-      const heir = all.slice(lost + 1).find(enabled) ?? all.slice(0, lost).reverse().find(enabled);
+      const after = all.slice(lost + 1).filter(enabled);
+      const before = all.slice(0, lost).reverse().filter(enabled);
+      // In its own group if possible (Redo's heir is Undo, not Cut)
+      const group = all[lost].closest('.group');
+      const near = (el: HTMLElement) => el.closest('.group') === group;
+      const heir = after.find(near) ?? before.find(near) ?? after[0] ?? before[0];
       if (heir) {
         this._tabStop = heir.dataset.item!;
         heir.focus();
@@ -777,11 +791,24 @@ export class Y11nToolbar extends LitElement {
     return this.dispatchEvent(new CustomEvent<T>(type, { detail, bubbles: true, composed: true, cancelable: true }));
   }
 
+  /**
+   * The grid to act on, after an event that was not cancelled. For a pointer
+   * user whose focus is in the toolbar (a select that was just used), the
+   * focus goes back to the grid first, so the action is done from there.
+   */
+  private _gridFor(proceed: boolean): Y11nSpreadsheet | null {
+    const grid = proceed ? this._attach() : null;
+    // `for` may name something that is not a grid (or not one yet)
+    if (!grid || typeof grid.getSelectionFormat !== 'function') return null;
+    if (this._pointer && (this.renderRoot as ShadowRoot).activeElement) grid.focus();
+    return grid;
+  }
+
   private _format(action: FormatActionDetail['action'], value?: FormatActionDetail['value']): void {
     const proceed = this._fire<FormatActionDetail>('format-action', { action, value });
     // The selects show the selection's format again if nothing came of the choice
     this.requestUpdate();
-    const grid = proceed ? this._attach() : null;
+    const grid = this._gridFor(proceed);
     if (!grid) return;
     if (action === 'bold' || action === 'italic' || action === 'underline' || action === 'strikethrough') {
       grid.toggleFormat(action);
@@ -795,7 +822,7 @@ export class Y11nToolbar extends LitElement {
 
   private _conditional(action: ConditionalFormatMenuAction): void {
     const proceed = this._fire<ConditionalFormatActionDetail>('conditional-format-action', { action });
-    const grid = proceed ? this._attach() : null;
+    const grid = this._gridFor(proceed);
     if (!grid) return;
     if (action === 'manage') void grid.openConditionalFormatManager();
     else if (action === 'clear') grid.clearSelectionConditionalFormats();
@@ -804,7 +831,7 @@ export class Y11nToolbar extends LitElement {
 
   private _act(action: ToolbarAction): void {
     const proceed = this._fire<ToolbarActionDetail>('toolbar-action', { action });
-    const grid = proceed ? this._attach() : null;
+    const grid = this._gridFor(proceed);
     if (!grid) return;
     switch (action) {
       case 'undo':
@@ -907,7 +934,18 @@ export class Y11nToolbar extends LitElement {
     this.requestUpdate();
   }
 
+  /**
+   * A button that is clicked does not take the focus: it stays in the grid
+   * (and in its editor, so an edit is not ended behind the user's back).
+   * Selects and color inputs need the focus to open.
+   */
+  private _handleToolbarMousedown(e: MouseEvent): void {
+    this._pointer = true;
+    if ((e.target as HTMLElement).closest?.('button')) e.preventDefault();
+  }
+
   private _handleToolbarKeydown(e: KeyboardEvent): void {
+    this._pointer = false;
     const controls = this._controls();
     const current = controls.indexOf(e.target as HTMLElement);
     if (current === -1) return;
@@ -935,7 +973,11 @@ export class Y11nToolbar extends LitElement {
     return [...this.renderRoot.querySelectorAll<HTMLElement>('.menu [role="menuitem"]:not(:disabled)')];
   }
 
-  private async _openMenu(id: string, focus: 'first' | 'last' = 'first'): Promise<void> {
+  /**
+   * @param takeFocus - Move the focus to an item. Not for a menu opened with
+   *   the pointer: the focus stays where it is until a key is pressed.
+   */
+  private async _openMenu(id: string, focus: 'first' | 'last' = 'first', takeFocus = true): Promise<void> {
     this._menu = id;
     this._menuAtEnd = false;
     this._menuAbove = false;
@@ -946,8 +988,25 @@ export class Y11nToolbar extends LitElement {
         if (wrapper && e.composedPath().includes(wrapper)) return;
         this._closeMenu(false);
       };
+      // A menu opened with the pointer has the focus elsewhere (in the grid):
+      // Escape still closes it, and Down / Up go into it
+      const onKeydown = (e: KeyboardEvent) => {
+        const items = this._menuItems();
+        if (items.includes((this.renderRoot as ShadowRoot).activeElement as HTMLElement)) return;
+        const up = e.key === 'ArrowUp';
+        if (e.key !== 'Escape' && e.key !== 'ArrowDown' && !up) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this._pointer = false;
+        if (e.key === 'Escape') this._closeMenu(false);
+        else items[up ? items.length - 1 : 0]?.focus();
+      };
       document.addEventListener('pointerdown', onPointerDown);
-      this._menuCleanup = () => document.removeEventListener('pointerdown', onPointerDown);
+      document.addEventListener('keydown', onKeydown, true);
+      this._menuCleanup = () => {
+        document.removeEventListener('pointerdown', onPointerDown);
+        document.removeEventListener('keydown', onKeydown, true);
+      };
     }
     await this.updateComplete;
     const menu = this.renderRoot.querySelector<HTMLElement>('.menu');
@@ -960,6 +1019,7 @@ export class Y11nToolbar extends LitElement {
       this._menuAbove = rect.bottom > clientHeight && rect.height + 4 <= buttonTop;
       await this.updateComplete;
     }
+    if (!takeFocus) return;
     const items = this._menuItems();
     (focus === 'first' ? items[0] : items[items.length - 1])?.focus();
   }
@@ -1034,7 +1094,7 @@ export class Y11nToolbar extends LitElement {
           aria-expanded="${open}"
           title="${label}"
           ?disabled=${disabled}
-          @click=${() => (this._menu === item ? this._closeMenu(false) : void this._openMenu(item))}
+          @click=${() => (this._menu === item ? this._closeMenu(false) : void this._openMenu(item, 'first', !this._pointer))}
           @keydown=${(e: KeyboardEvent) => this._handleMenuButtonKeydown(e, item)}
         >${icon(iconName)}${caret}</button>
         ${open
@@ -1054,7 +1114,9 @@ export class Y11nToolbar extends LitElement {
                       data-action="${entry.action}"
                       ?disabled=${entry.disabled ?? false}
                       @click=${() => {
-                        this._closeMenu(true);
+                        // Back to the button if the focus was in the menu; a
+                        // pointer user's focus then goes on to the grid
+                        this._closeMenu((this.renderRoot as ShadowRoot).activeElement !== null);
                         choose(entry.action);
                       }}
                     >${entry.label}</button>`
@@ -1367,6 +1429,9 @@ export class Y11nToolbar extends LitElement {
         aria-label="${this.label}"
         @keydown=${this._handleToolbarKeydown}
         @focusin=${this._handleToolbarFocusin}
+        @mousedown=${this._handleToolbarMousedown}
+        @pointerdown=${() => (this._pointer = true)}
+        @click=${{ handleEvent: (e: MouseEvent) => (this._pointer = e.detail > 0), capture: true }}
       >
         ${groups.map(
           (group, i) => html`

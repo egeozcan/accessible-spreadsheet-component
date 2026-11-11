@@ -177,6 +177,15 @@ describe('selection and command methods', () => {
       expect(sheet.getCellFormat('0:2')?.numberFormat).toEqual(date);
     });
 
+    it('does nothing where there is no decimal place to remove', async () => {
+      sheet = await createSpreadsheet();
+      sheet.setData(data({ '0:0': '30' }));
+      sheet.goTo('A1');
+      sheet.changeDecimals(-1);
+      expect(sheet.getCellFormat('0:0')).toBeUndefined();
+      expect(sheet.canUndo).toBe(false);
+    });
+
     it('says so when the selection has no numbers', async () => {
       sheet = await createSpreadsheet();
       sheet.setData(data({ '0:0': 'text' }));
@@ -404,6 +413,37 @@ describe('selection and command methods', () => {
       await Promise.resolve();
       expect(document.activeElement).toBe(button);
       button.remove();
+    });
+
+    it('focus() goes to the active cell', async () => {
+      sheet = await createSpreadsheet();
+      sheet.goTo('B2');
+      await sheet.updateComplete;
+      const button = document.createElement('button');
+      document.body.append(button);
+      button.focus();
+      sheet.focus();
+      const cell = sheet.shadowRoot!.activeElement as HTMLElement;
+      expect([cell.dataset.row, cell.dataset.col]).toEqual(['1', '1']);
+      button.remove();
+    });
+
+    it('a command during an edit commits the edit first', async () => {
+      sheet = await createSpreadsheet();
+      sheet.setData(data({ '0:0': 'a' }));
+      sheet.goTo('A1');
+      await sheet.updateComplete;
+      const grid = sheet.shadowRoot!.querySelector('.ls-grid') as HTMLElement;
+      grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true, composed: true }));
+      await sheet.updateComplete;
+      const editor = sheet.shadowRoot!.querySelector('#editor') as HTMLInputElement;
+      editor.value = 'edited';
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      await sheet.updateComplete;
+
+      sheet.toggleFormat('bold');
+      expect(raw(sheet, '0:0')).toBe('edited');
+      expect(sheet.getCellFormat('0:0')).toEqual({ bold: true });
     });
 
     it('announce speaks through the live region', async () => {
