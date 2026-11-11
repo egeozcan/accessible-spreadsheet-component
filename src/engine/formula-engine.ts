@@ -31,7 +31,8 @@ import {
   toNumber,
   toText,
 } from './values.js';
-import { ArgumentError, type Registrar, asArray, power, registerPureBuiltins, transpose } from './functions.js';
+import { sameValue } from './functions-logical-info.js';
+import { ArgumentError, MAX_ARRAY_CELLS, type Registrar, asArray, power, registerPureBuiltins, transpose } from './functions.js';
 import { mapFormulaReferences } from '../utils/references.js';
 
 export { RangeValue, RefValue, LambdaValue } from './values.js';
@@ -2233,6 +2234,49 @@ export class FormulaEngine {
     return lambda;
   }
 
+  /** One-argument function that reads a reference range as its first cell and maps a computed array element by element. */
+  private _firstCellFunction(args: Array<Node | null>, ctx: EvalCtx, fn: (v: unknown) => unknown): unknown {
+    if (args.length !== 1 || args[0] === null) throw new Error('#VALUE!');
+    const v = this._eval(args[0], ctx);
+    if (v instanceof RefValue) {
+      // Only the first cell is read (and depended on): the rest of the range may depend on this formula
+      const first = this._deref(new RefValue(v.sheet, v.top, v.left, v.top, v.left));
+      return fn(first instanceof RangeValue ? first.get(0, 0) : first);
+    }
+    // A computed array (an array constant, A1:A5>2) goes element by element
+    if (v instanceof RangeValue) {
+      return new RangeValue(
+        v.values.map((x) => {
+          try {
+            return fn(x);
+          } catch (e) {
+            return toErrorCode(e);
+          }
+        }),
+        v.rows,
+        v.cols
+      );
+    }
+    return fn(v);
+  }
+
+  /** Calls a registered value function with arguments that are already values (nodes are evaluated, an error in one is captured). */
+  private _pureCall(name: string, parts: Array<unknown>, ctx: EvalCtx): unknown {
+    const entry = this._functions.get(name)!;
+    const values = parts.map((part) => {
+      if (part instanceof Evaluated) return part.value ?? 0;
+      if (part instanceof RangeValue) return part;
+      if (part === null) return undefined;
+      try {
+        return this._value(part as Node, ctx) ?? 0; // a blank reads as 0
+      } catch (e) {
+        if (e instanceof EvalDepthError) throw e;
+        return new ArgumentError(toErrorCode(e));
+      }
+    });
+    return fromJsArray(entry.fn!(this._functionContext(ctx), ...values) ?? 0);
+  }
+
   private _functionContext(ctx: EvalCtx): FormulaContext {
     if (ctx.fctx) return ctx.fctx;
     const sheet = ctx.sheet;
@@ -2272,6 +2316,85 @@ export class FormulaEngine {
 
   /** Functions that evaluate their arguments themselves: lazily, as references, or as lambdas. */
   private _special: Record<string, (args: Array<Node | null>, ctx: EvalCtx) => unknown> = {
+    // COUNTBLANK counts empty cells and "" results; a whole column or row is counted at the size of
+    // the grid, not just up to the content, and an error is not a blank
+    COUNTBLANK: (args, ctx) => {
+      if (args.length !== 1 || args[0] === null) throw new Error('#VALUE!');
+      const v = this._eval(args[0], ctx);
+      const blank = (x: unknown) => x === undefined || x === '';
+      if (!(v instanceof RefValue)) {
+        return v instanceof RangeValue ? v.values.filter(blank).length : blank(v) ? 1 : 0;
+      }
+      let values: unknown;
+      try {
+        values = this._deref(v);
+      } catch (e) {
+        if (e instanceof EvalDepthError) throw e;
+        return 0; // a cell holding an error is not blank
+      }
+      if (!(values instanceof RangeValue)) return blank(values) ? 1 : 0;
+      let count = 0;
+      for (const x of flattenDeep(values)) if (blank(x)) count++;
+      return count + Math.max(0, v.rows * v.cols - values.rows * values.cols);
+    },
+
+    // CHOOSE and SWITCH return the chosen argument as it is, so a reference stays a reference
+    // (OFFSET(CHOOSE(1, A1:A2, B1:B2), 0, 0)); an array index or expression goes element by element
+    CHOOSE: (args, ctx) => {
+      if (args.length < 2 || args[0] === null) throw new Error('#VALUE!');
+      const index = this._value(args[0], ctx);
+      if (index instanceof RangeValue) return this._pureCall('CHOOSE', [index, ...args.slice(1)], ctx);
+      const i = Math.trunc(toNumber(index === undefined ? 0 : index));
+      if (i < 1 || i >= args.length) throw new Error('#VALUE!');
+      const chosen = args[i];
+      return chosen === null ? 0 : this._eval(chosen, ctx);
+    },
+    SWITCH: (args, ctx) => {
+      if (args.length < 3 || args[0] === null) throw new Error('#VALUE!');
+      const value = this._value(args[0], ctx);
+      if (value instanceof RangeValue) return this._pureCall('SWITCH', [new Evaluated(value), ...args.slice(1)], ctx);
+      const hasDefault = (args.length - 1) % 2 === 1;
+      const pairsEnd = args.length - (hasDefault ? 1 : 0);
+      for (let i = 1; i < pairsEnd; i += 2) {
+        const caseNode = args[i];
+        const candidate = caseNode === null ? 0 : this._value(caseNode, ctx); // an omitted match is blank, i.e. 0
+        if (candidate instanceof RangeValue) return this._pureCall('SWITCH', [new Evaluated(value), ...args.slice(1)], ctx);
+        if (sameValue(value === undefined ? 0 : value, candidate === undefined ? 0 : candidate)) {
+          const result = args[i + 1];
+          return result === null ? 0 : this._eval(result, ctx);
+        }
+      }
+      if (hasDefault) {
+        const fallback = args[args.length - 1];
+        return fallback === null ? 0 : this._eval(fallback, ctx);
+      }
+      throw new Error('#N/A');
+    },
+
+    // T(value) is the text itself or "" ; N(value) the number (TRUE is 1, anything else 0). Given a
+    // reference range they read its first cell (not each cell); a computed array goes element by element
+    T: (args, ctx) => this._firstCellFunction(args, ctx, (v) => {
+      if (isErrorCode(v)) throw new Error(v);
+      return typeof v === 'string' ? v : '';
+    }),
+    N: (args, ctx) => this._firstCellFunction(args, ctx, (v) => {
+      if (isErrorCode(v)) throw new Error(v);
+      if (typeof v === 'number') return v;
+      return typeof v === 'boolean' ? (v ? 1 : 0) : 0;
+    }),
+
+    // ISREF sees the argument as a reference, and an invalid one (INDIRECT of a missing sheet,
+    // 1/0) is just not a reference: FALSE, not an error
+    ISREF: (args, ctx) => {
+      if (args.length !== 1 || args[0] === null) throw new Error('#VALUE!');
+      try {
+        return this._eval(args[0], ctx) instanceof RefValue;
+      } catch (e) {
+        if (e instanceof EvalDepthError) throw e;
+        return false;
+      }
+    },
+
     // IF only evaluates the branch it returns, so guards like
     // =IF(A1=0, 0, 1/A1) don't raise errors from the untaken branch.
     IF: (args, ctx) => {
@@ -2505,11 +2628,30 @@ export class FormulaEngine {
   private _byVector(args: Array<Node | null>, ctx: EvalCtx, byRow: boolean): unknown {
     if (args.length !== 2 || !args[0]) throw new Error('#VALUE!');
     const lambda = this._lambdaArg(args[1], ctx);
-    const array = asArray(this._value(args[0], ctx));
-    const source = byRow ? array : transpose(array);
+    // Over a reference every row/column handed to the lambda is itself a reference (so N(row) reads
+    // its first cell and ISREF(row) is TRUE, as in Excel). The source is not read up front: the
+    // whole range is registered as a dependency, and only what the lambda reads is evaluated.
+    const first = this._eval(args[0], ctx);
+    const ref = first instanceof RefValue && !first.whole ? first : undefined;
+    let array: RangeValue | undefined;
+    let count: number;
+    if (ref) {
+      this._trackRange(ref.sheet, ref.top, ref.left, ref.bottom, ref.right);
+      count = byRow ? ref.rows : ref.cols;
+    } else {
+      array = asArray(this._deref(first));
+      count = byRow ? array.rows : array.cols;
+    }
+    const source = array && (byRow ? array : transpose(array));
     const results: unknown[] = [];
-    for (let r = 0; r < source.rows; r++) {
-      const vector = byRow ? RangeValue.row(source.getRow(r)) : RangeValue.column(source.getRow(r));
+    for (let r = 0; r < count; r++) {
+      const vector: unknown = ref
+        ? byRow
+          ? new RefValue(ref.sheet, ref.top + r, ref.left, ref.top + r, ref.right, null, true)
+          : new RefValue(ref.sheet, ref.top, ref.left + r, ref.bottom, ref.left + r, null, true)
+        : byRow
+          ? RangeValue.row(source!.getRow(r))
+          : RangeValue.column(source!.getRow(r));
       try {
         let value = this._deref(lambda.call([vector]));
         // One value per row: a 1×1 array is that value
@@ -2656,6 +2798,11 @@ function mapValue(value: unknown, fn: (v: unknown) => unknown): unknown {
  * element makes that result the error (unless the argument is `Tolerant`),
  * and an error thrown by `fn` becomes that element's value.
  */
+/** A value already computed, passed where an argument node is expected. */
+class Evaluated {
+  constructor(readonly value: unknown) {}
+}
+
 function broadcast(args: unknown[], fn: (elements: unknown[]) => unknown, propagateErrors = true): RangeValue {
   let rows = 1;
   let cols = 1;
@@ -2670,6 +2817,7 @@ function broadcast(args: unknown[], fn: (elements: unknown[]) => unknown, propag
   });
   const values: unknown[] = new Array(rows * cols);
   const elements: unknown[] = new Array(args.length);
+  let nestedCells = 0;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       let error: string | undefined;
@@ -2691,10 +2839,13 @@ function broadcast(args: unknown[], fn: (elements: unknown[]) => unknown, propag
       try {
         const result = fn(elements.slice());
         values[r * cols + c] = result instanceof LambdaValue ? '#CALC!' : result;
+        // A call per element may each return an array: bound what all of them hold together
+        if (result instanceof RangeValue) nestedCells += result.rows * result.cols;
       } catch (e) {
         if (e instanceof EvalDepthError) throw e;
         values[r * cols + c] = toErrorCode(e);
       }
+      if (nestedCells > MAX_ARRAY_CELLS) throw new Error('#NUM!');
     }
   }
   return new RangeValue(values, rows, cols);
