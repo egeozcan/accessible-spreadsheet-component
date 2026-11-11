@@ -1,0 +1,12 @@
+import { Meta, Markdown } from '@storybook/addon-docs/blocks';
+import { readmeSection } from '../support/readme';
+
+<Meta title="Reference/Events" />
+
+# Events
+
+All events are DOM `CustomEvent`s that bubble and cross shadow DOM boundaries. What happened is in `event.detail`. See them live in the [Events example](?path=/story/examples-basics--events).
+
+<Markdown>{readmeSection('Events', '## All events')}</Markdown>
+
+<Markdown>{readmeSection('Validation and edit control', '## Validation and edit control')}</Markdown>

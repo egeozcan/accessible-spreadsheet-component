@@ -1,0 +1,78 @@
+import { Meta, Canvas, Source } from '@storybook/addon-docs/blocks';
+import * as Basics from '../basics.stories';
+import gridFromRowsSource from '../examples/grid-from-rows.ts?raw';
+
+<Meta title="Getting Started/Your First Spreadsheet" />
+
+# Your first spreadsheet
+
+Five steps from an empty element to a grid that loads data, calculates, tells your application what changed, and can be saved. Each step is a live example; **Show code** under it opens the complete file.
+
+## 1. An empty grid
+
+Import the package, create the element, say how big the grid is. In HTML this is `<y11n-spreadsheet rows="50" cols="10">`.
+
+<Canvas of={Basics.EmptyGrid} />
+
+Click a cell and type. Everything a user expects already works: Enter and Tab commit and move on, the arrow keys move, Shift+Arrow selects, Ctrl+C / Ctrl+V copy and paste, Ctrl+Z undoes.
+
+## 2. Give it data
+
+The grid keeps its cells in a `Map`. This is the one data structure to learn:
+
+- **The key** is `"row:col"`, counted from zero: `"0:0"` is A1, `"2:1"` is B3. `cellKey(row, col)` writes it for you and `parseKey(key)` reads it back.
+- **The value** is a cell: `rawValue` is what was typed (`'95'`, `'=SUM(B2:B3)'`), `displayValue` is what the cell shows, and `type` is `'text'`, `'number'`, `'boolean'` or `'error'`.
+- **Empty cells are not in the map.** A grid of a million cells with ten values has a map of ten entries.
+
+<Canvas of={Basics.LoadingData} />
+
+For a plain value, `displayValue` is the same text as `rawValue`, and `type` is `'number'` if it is one. For a formula you can leave `displayValue` empty: the grid works it out when the data is loaded.
+
+`setData()` copies what you give it, so changing your map afterwards changes nothing in the grid; call `setData()` again.
+
+### A helper for rows of text
+
+Writing a map by hand gets long. Data usually arrives as rows, so the examples use this small function to convert them. Copy it into your project, or write your own for the shape your data comes in:
+
+<Source code={gridFromRowsSource.trim()} language="ts" />
+
+## 3. Formulas
+
+Any `rawValue` that starts with `=` is a formula, with Excel's syntax and function names. Formulas recalculate when the cells they read change.
+
+<Canvas of={Basics.Formulas} />
+
+There is much more under [Examples / Formulas](?path=/docs/examples-formulas--docs): lookups, dynamic arrays, your own functions, several sheets.
+
+## 4. Hear about changes
+
+The grid fires DOM events. Listen with `addEventListener`, and read what happened from `event.detail`.
+
+<Canvas of={Basics.Events} />
+
+| Event | Fires when | `detail` |
+|---|---|---|
+| `cell-change` | One cell was edited | `cellId`, `value`, `oldValue` |
+| `data-change` | Several cells changed at once: paste, cut, clear, fill, undo, redo | `updates`, `operation`, `source` |
+| `selection-change` | The selection moved | `range` |
+
+Many events have a `before-…` twin that fires first and can be cancelled with `preventDefault()`, for example `before-change`. The full list is under [Reference / Events](?path=/docs/reference-events--docs).
+
+## 5. Save and restore
+
+`getData()` returns a copy of the map, and `setData()` takes one back. The cells are plain objects, so `JSON.stringify([...map])` and `new Map(JSON.parse(text))` are all it takes to store a grid. `toCSV()` and `fromCSV()` exchange data with other programs.
+
+<Canvas of={Basics.SavingAndRestoring} />
+
+`getData()` and `setData()` cover the cells with their formats. Column widths, the filter, conditional formats, other sheets and defined names each have their own pair of methods (`getColumnWidths()` / `setColumnWidths()`, and so on); see [Reference / Properties and Methods](?path=/docs/reference-properties-and-methods--docs).
+
+## Where next
+
+| To… | See |
+|---|---|
+| Keep users from changing some cells, or check what they type | [Validation and locked cells](?path=/story/examples-editing-and-tables--validation) |
+| Sort and filter a table | [Editing and Tables](?path=/docs/examples-editing-and-tables--docs) |
+| Format numbers, dates and colors | [Formatting](?path=/docs/examples-formatting--docs) |
+| Freeze headers, size columns, load a lot of data | [Layout](?path=/docs/examples-layout--docs) |
+| Match your application's look | [Theming](?path=/docs/examples-theming--docs) |
+| Start from something complete | [Recipes](?path=/docs/examples-recipes--docs) |

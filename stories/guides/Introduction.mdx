@@ -1,0 +1,45 @@
+import { Meta, Canvas } from '@storybook/addon-docs/blocks';
+import * as Recipes from '../recipes.stories';
+
+<Meta title="Getting Started/Introduction" />
+
+# y11n-spreadsheet
+
+An accessible spreadsheet for the web, as a custom element: `<y11n-spreadsheet>`. It works with the keyboard and with screen readers the way a spreadsheet should, calculates with an Excel-compatible formula language, and runs in any page or framework.
+
+This is a live one. Edit a number, and press **Show code** under it to see the file that made it.
+
+<Canvas of={Recipes.BudgetTracker} />
+
+## What is in the box
+
+- **A grid people can use without a mouse.** It follows the WAI-ARIA grid pattern: arrow keys, range selection, in-cell editing, and announcements for everything that changes.
+- **Formulas.** Several hundred Excel functions, dynamic arrays that spill, `LET` and `LAMBDA`, several sheets, defined names, and your own functions.
+- **The tools of a spreadsheet.** Undo and redo, copy and paste, fill handle, find, sort, filter, frozen panes, resizable columns, number formats and conditional formatting.
+- **Control for your application.** Events for every change, validation, read-only cells, cancelable `before-…` events, CSV import and export.
+- **Your look.** CSS custom properties for colors, fonts and sizes.
+
+## Find your way around
+
+| If you want to… | Go to |
+|---|---|
+| Add the component to a project | [Installation](?path=/docs/getting-started-installation--docs) |
+| Learn the basics in ten minutes | [Your First Spreadsheet](?path=/docs/getting-started-your-first-spreadsheet--docs) |
+| See how a feature is used | **Examples** in the sidebar, grouped by topic |
+| Try the HTML attributes | [Playground](?path=/story/examples-playground--playground) |
+| Look up a method, an event or a shortcut | **Reference** in the sidebar |
+
+## How to read the examples
+
+Every example is **one TypeScript file** that builds what you see and nothing else. There are two ways to read it:
+
+- On a group's **Docs** page (for instance [Basics](?path=/docs/examples-basics--docs)), each example comes with its explanation, and **Show code** opens its file.
+- Open a single example from the sidebar and it fills the canvas, with its file in the **Code** panel beside it.
+
+The files are the ones that run here, shown as they are, so they can be copied. Three things to know when you do:
+
+1. They import from `'y11n-spreadsheet'`, as your code will after `npm install y11n-spreadsheet`.
+2. Each one is a function that returns an element. In your page, add that element to the document, or write the element in your HTML and keep the lines that set it up.
+3. Most of them fill the grid with a small helper, `gridFromRows()`, which turns rows of text into the grid's data format. It is not part of the package: its few lines are printed under every example that uses it, and [Your First Spreadsheet](?path=/docs/getting-started-your-first-spreadsheet--docs) explains what it does.
+
+The comment at the top of each file says what the example shows and what to try in it.

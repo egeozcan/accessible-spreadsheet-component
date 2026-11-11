@@ -747,6 +747,7 @@ y11n-spreadsheet {
 | `--ls-editor-shadow` | `0 2px 6px rgba(0,0,0,0.2)` | Editor drop shadow |
 | `--ls-formula-bar-bg` | `#f8fafc` | Formula bar background |
 | `--ls-formula-ref-bg` | `#fff` | Name Box background |
+| `--ls-formula-input-bg` | `#fff` | Background of the formula input and the Raw / Formatted toggle |
 | `--ls-name-box-width` | `9em` | Width of the Name Box |
 | `--ls-formula-mode-active-bg` | `#dbeafe` | Active mode toggle background |
 | `--ls-ref-highlight-border` | `#1a73e8` | Reference highlight border |
@@ -1033,7 +1034,11 @@ npm run dev        # Vite dev server at http://localhost:5173
 npm run storybook  # Storybook at http://localhost:6006
 ```
 
-The `index.html` at the project root has a test harness. Storybook has detailed interactive examples covering all features.
+The `index.html` at the project root has a test harness.
+
+Storybook is the getting-started site. It has three parts: **Getting Started** (installation and a five-step tutorial), **Examples** (one runnable file per feature, shown in the Code panel next to the result) and **Reference** (the sections of this README, plus the list of every formula function).
+
+To add an example, write `stories/examples/<name>.ts`: a default-exported function that returns the element to show, with a comment at the top saying what it demonstrates. Import the package as `'y11n-spreadsheet'` and use only its public API, since the file is displayed as it is. Then add a story for it in the group's `stories/*.stories.ts` with `parameters: example('<name>')`, and its id to `e2e/storybook-a11y.spec.ts`.
 
 ### Testing
 
@@ -1078,7 +1083,12 @@ src/
     series.ts                       # Fill-handle series (numbers, dates, day/month names, numbered text)
   __tests__/                        # Unit tests colocated with source
 e2e/                                # Playwright E2E tests
-stories/                            # Storybook stories
+stories/
+  guides/                           # Getting Started pages (MDX)
+  examples/                         # One file per example: what a story runs and what its Code panel shows
+  reference/                        # Reference pages (MDX), made of sections of this README
+  support/                          # example(): story parameters for an example file; readmeSection()
+  *.stories.ts                      # One per example group
 ```
 
 ### Build

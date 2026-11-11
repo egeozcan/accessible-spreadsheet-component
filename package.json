@@ -61,6 +61,7 @@
     "@storybook/web-components-vite": "^10.6.6",
     "jsdom": "^31.0.0",
     "lit": "^3.3.3",
+    "remark-gfm": "^4.0.1",
     "storybook": "^10.6.6",
     "typescript": "^7.0.2",
     "vite": "^8.3.6",

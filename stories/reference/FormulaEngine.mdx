@@ -1,0 +1,19 @@
+import { Meta, Markdown } from '@storybook/addon-docs/blocks';
+import { FormulaEngine } from 'y11n-spreadsheet';
+import { readmeSection } from '../support/readme';
+
+export const functionNames = new FormulaEngine().functionNames();
+
+<Meta title="Reference/Formula Engine" />
+
+# Formula Engine
+
+The formula language: syntax, references, arrays, errors and custom functions. See it at work under [Examples / Formulas](?path=/docs/examples-formulas--docs).
+
+<Markdown>{readmeSection('Formula engine')}</Markdown>
+
+## Every built-in function
+
+The {functionNames.length} functions this build of the engine knows, read from the engine itself (`new FormulaEngine().functionNames()`):
+
+<Markdown>{functionNames.map((name) => '`' + name + '`').join(' ')}</Markdown>

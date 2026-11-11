@@ -1,0 +1,97 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Getting Started/Installation" />
+
+# Installation
+
+## Install the package
+
+```bash
+npm install y11n-spreadsheet lit
+```
+
+[Lit](https://lit.dev) is a peer dependency: the component is built with it, and your bundler includes it once.
+
+## Register the element
+
+Import the package once, anywhere in your application. The import registers `<y11n-spreadsheet>` (and the optional `<y11n-format-toolbar>`) as custom elements.
+
+```js
+import 'y11n-spreadsheet';
+```
+
+## Put it on the page
+
+```html
+<div style="height: 480px">
+  <y11n-spreadsheet rows="50" cols="10"></y11n-spreadsheet>
+</div>
+```
+
+**Give it a height.** The grid fills its parent (`display: block; height: 100%`) and scrolls inside itself. In a parent without a height it collapses to nothing, which is the most common first surprise. A fixed height, a flex or grid cell, or `height: 100vh` all work.
+
+That is a working spreadsheet: people can type, calculate, copy, paste and undo in it. The next page, [Your First Spreadsheet](?path=/docs/getting-started-your-first-spreadsheet--docs), gives it data and listens to it.
+
+## Attributes and properties
+
+Simple settings can be written as HTML attributes. Everything can be set as a JavaScript property.
+
+| Property | Attribute | Default | What it does |
+|---|---|---|---|
+| `rows` | `rows` | `100` | Number of rows |
+| `cols` | `cols` | `26` | Number of columns |
+| `readOnly` | `read-only` | `false` | Turns off editing |
+| `frozenRows` | `frozen-rows` | `0` | Rows that stay in view while scrolling |
+| `frozenCols` | `frozen-cols` | `0` | Columns that stay in view while scrolling |
+| `sheetTabs` | `sheet-tabs` | `false` | Shows the sheet tabs even with one sheet |
+| `hideStatusBar` | `hide-status-bar` | `false` | Hides the status bar under the grid |
+| `rawInput` | `raw-input` | `false` | Stores typed values as typed (no `15%` or date recognition) |
+| `gridLabel` | `grid-label` | `'Spreadsheet'` | The grid's accessible name |
+| `data` | – | empty | The cells: a `Map` (see the next page) |
+| `functions` | – | `{}` | Custom formula functions |
+| `validateCell` | – | – | A function that accepts or rejects typed values |
+
+The [Playground](?path=/story/examples-playground--playground) lets you change the attributes and shows the markup.
+
+`data`, `functions` and `validateCell` hold objects and functions, so they have no attribute. Set them from JavaScript:
+
+```js
+const sheet = document.querySelector('y11n-spreadsheet');
+sheet.setData(data); // the same as sheet.data = data, applied at once
+```
+
+## With TypeScript
+
+The package ships its types. Importing it also types the element, so `document.createElement('y11n-spreadsheet')` and `querySelector('y11n-spreadsheet')` return a `Y11nSpreadsheet`:
+
+```ts
+import 'y11n-spreadsheet';
+import type { Y11nSpreadsheet, GridData, CellData } from 'y11n-spreadsheet';
+
+const sheet = document.querySelector('y11n-spreadsheet')!; // Y11nSpreadsheet
+sheet.rows = 200;
+```
+
+## With a framework
+
+`<y11n-spreadsheet>` is a standard custom element, so it goes wherever HTML goes. Two things are the same in every framework:
+
+- **Objects go in as properties, not attributes.** Use your framework's property binding, or get a reference to the element and call `setData()`.
+- **Changes come out as DOM events** (`cell-change`, `data-change`, `selection-change` and others), which bubble like any other event.
+
+In a Lit template, for example:
+
+```ts
+html`
+  <y11n-spreadsheet
+    rows="50"
+    cols="10"
+    .data=${this.data}
+    @cell-change=${this.onCellChange}
+  ></y11n-spreadsheet>
+`;
+```
+
+## Next
+
+[Your First Spreadsheet](?path=/docs/getting-started-your-first-spreadsheet--docs): data, formulas, events and saving.

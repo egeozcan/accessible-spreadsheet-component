@@ -15,7 +15,7 @@ npm run test:watch       # Unit tests in watch mode
 npm run test:e2e         # Playwright E2E tests (headless)
 npm run test:e2e:headed  # E2E tests in visible browser
 npm run test:e2e:ui      # E2E tests with Playwright UI
-npm run storybook        # Dev Storybook on port 6006
+npm run storybook        # Dev Storybook on port 6006 (getting-started site: guides, examples, reference)
 npm run build-storybook  # Build static Storybook
 ```
 
@@ -91,6 +91,16 @@ src/
 - Playwright runs against the Vite dev server on port 5173
 - E2E tests use shadow DOM piercing via Lit's locator patterns
 - Run `npx playwright install` if browsers aren't installed
+
+## Storybook
+
+Storybook is the getting-started site for users of the component, so everything in it is user-facing documentation.
+
+- **Examples** (`stories/examples/<name>.ts`): one file per example, a default-exported function that returns the element to show. The file is displayed verbatim in the Code panel and under "Show code" (`example('<name>')` in `stories/support/example.ts` reads it with `?raw`), and its leading `/** */` comment becomes the story description. So: import the package as `'y11n-spreadsheet'` (aliased to `src/index.ts` in `.storybook/main.ts` and `tsconfig.json`), use public API only (no `_private` members, no `as any`), and keep code lines short enough to read in a side panel. `gridFromRows` (`examples/grid-from-rows.ts`) is appended to every listing that imports it.
+- **Setup order in examples**: `setData()` starts a fresh undo history for the sheet, so setup that should not be undoable by the user (column widths, conditional-format rules, formats inside the data) goes before it. A filter needs the data first and stays an undo step.
+- **Stories** (`stories/*.stories.ts`): one file per group under `Examples/`, each story `{ name, render, parameters: example('<name>', { height }) }`. Group Docs pages use `.storybook/ExamplesPage.mdx`. New stories must be added to the list in `e2e/storybook-a11y.spec.ts`, and new groups to `storySort` in `.storybook/preview.ts`.
+- **Guides** (`stories/guides/*.mdx`) are hand-written. **Reference** pages (`stories/reference/*.mdx`) render README sections through `readmeSection('<heading>')`: change the README, not the page, and keep README section headings in step with those calls.
+- `.storybook/manager.ts` is only read at startup: restart `npm run storybook` after changing it.
 
 ## Conformance harness
 

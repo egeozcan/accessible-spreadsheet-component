@@ -90,7 +90,7 @@ export class Y11nFormulaBar extends LitElement {
       border: 1px solid var(--ls-border-color, #e0e0e0);
       border-radius: 4px;
       overflow: hidden;
-      background: #fff;
+      background: var(--ls-formula-input-bg, #fff);
     }
 
     .mode-toggle button {
@@ -117,7 +117,7 @@ export class Y11nFormulaBar extends LitElement {
       font: inherit;
       color: inherit;
       outline: none;
-      background: #fff;
+      background: var(--ls-formula-input-bg, #fff);
     }
 
     input:focus {

@@ -18,7 +18,10 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "paths": {
+      "y11n-spreadsheet": ["./src/index.ts"]
+    }
   },
   "include": ["src", "e2e", "stories"]
 }
