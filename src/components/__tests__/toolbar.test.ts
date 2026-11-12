@@ -186,6 +186,31 @@ describe('Y11nToolbar', () => {
         expect((input as HTMLInputElement).disabled).toBe(true);
       }
     });
+    it('a disabled control leaves its tooltip to the element around it', async () => {
+      const root = toolbar.shadowRoot!;
+      const controls = () => [...root.querySelectorAll<HTMLElement>('[data-item]')];
+      const tip = (el: Element) => el.closest<HTMLElement>('.tip')!;
+
+      toolbar.readOnly = true;
+      toolbar.canUndo = false;
+      await toolbar.updateComplete;
+      expect(controls().length).toBeGreaterThan(30);
+      for (const el of controls()) {
+        const label = el.getAttribute('aria-label')!;
+        expect(tip(el), label).not.toBeNull();
+        // An enabled control has its own tooltip, and no second one around it
+        expect(tip(el).getAttribute('title'), label).toBe(el.matches(':disabled') ? el.title : null);
+      }
+      expect(tip(root.querySelector('[aria-label="Undo"]')!).title).toBe('Undo (Ctrl+Z)');
+      expect(tip(root.querySelector('[aria-label="Font size"]')!).title).toBe('Font size');
+      expect(tip(root.querySelector('[aria-label="Text color"]')!).title).toBe('Text color');
+      expect(tip(root.querySelector('[aria-label="Insert rows or columns"]')!).title).toBe('Insert rows or columns');
+
+      toolbar.readOnly = false;
+      toolbar.canUndo = true;
+      await toolbar.updateComplete;
+      expect(root.querySelectorAll('.tip[title]').length).toBe(1); // Reapply filter: nothing is filtered
+    });
   });
 
   describe('conditional formatting menu', () => {

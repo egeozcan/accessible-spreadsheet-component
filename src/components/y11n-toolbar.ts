@@ -492,8 +492,22 @@ export class Y11nToolbar extends LitElement {
 
     button:disabled {
       opacity: 0.4;
-      /* The press goes to the toolbar, which keeps it from moving the focus */
+    }
+
+    /* The press goes to the toolbar, which keeps it from moving the focus */
+    button:disabled,
+    select:disabled,
+    input:disabled {
       pointer-events: none;
+    }
+
+    /* Around each control: has the tooltip while the control is disabled */
+    .tip {
+      display: inline-flex;
+    }
+
+    .tip[title] {
+      cursor: not-allowed;
     }
 
     button.bold-btn {
@@ -548,10 +562,6 @@ export class Y11nToolbar extends LitElement {
       height: 100%;
       cursor: pointer;
       border: none;
-    }
-
-    .color-wrapper input[type='color']:disabled {
-      cursor: not-allowed;
     }
 
     .color-swatch {
@@ -615,7 +625,6 @@ export class Y11nToolbar extends LitElement {
 
     select:disabled {
       opacity: 0.4;
-      cursor: not-allowed;
     }
 
     .menu-wrapper {
@@ -943,9 +952,9 @@ export class Y11nToolbar extends LitElement {
   /**
    * A press on the toolbar does not take the focus: it stays in the grid (and
    * in its editor, so an edit is not ended behind the user's back). That goes
-   * for buttons, disabled ones (which let the press through to the toolbar)
-   * and the space between the controls. Selects and color inputs need the
-   * focus to open.
+   * for buttons, disabled controls (which let the press through to what is
+   * around them) and the space between the controls. Selects and color inputs
+   * need the focus to open.
    */
   private _handleToolbarMousedown(e: MouseEvent): void {
     this._pointer = true;
@@ -1096,7 +1105,11 @@ export class Y11nToolbar extends LitElement {
   ) {
     const open = this._menu === item && !disabled;
     return html`
-      <div class="menu-wrapper ${open ? 'open' : ''}" @focusout=${this._handleMenuFocusout}>
+      <div
+        class="tip menu-wrapper ${open ? 'open' : ''}"
+        title="${disabled ? label : nothing}"
+        @focusout=${this._handleMenuFocusout}
+      >
         <button
           class="menu-button"
           type="button"
@@ -1184,16 +1197,31 @@ export class Y11nToolbar extends LitElement {
     onClick: () => void,
     options: { disabled?: boolean; pressed?: boolean; shortcut?: string; className?: string } = {}
   ) {
-    return html`<button
-      class="${options.className ?? ''}"
-      type="button"
-      data-item="${item}"
-      aria-pressed="${options.pressed ?? nothing}"
-      aria-label="${label}"
-      title="${options.shortcut ? `${label} (${options.shortcut})` : label}"
-      ?disabled=${options.disabled ?? false}
-      @click=${onClick}
-    >${content}</button>`;
+    const title = options.shortcut ? `${label} (${options.shortcut})` : label;
+    const disabled = options.disabled ?? false;
+    return this._tip(
+      title,
+      disabled,
+      html`<button
+        class="${options.className ?? ''}"
+        type="button"
+        data-item="${item}"
+        aria-pressed="${options.pressed ?? nothing}"
+        aria-label="${label}"
+        title="${title}"
+        ?disabled=${disabled}
+        @click=${onClick}
+      >${content}</button>`
+    );
+  }
+
+  /**
+   * A disabled control lets the pointer through, so that a press on it cannot
+   * move the focus. Its own tooltip goes with that: the element around it
+   * shows the tooltip for as long as the control is disabled.
+   */
+  private _tip(title: string, disabled: boolean, control: unknown): TemplateResult {
+    return html`<span class="tip" title="${disabled ? title : nothing}">${control}</span>`;
   }
 
   private _renderItem(item: ToolbarItem): TemplateResult {
@@ -1249,7 +1277,7 @@ export class Y11nToolbar extends LitElement {
           className: 'strikethrough-btn',
         });
       case 'fontSize':
-        return html`<select
+        return this._tip('Font size', d, html`<select
           class="font-size-select"
           data-item="${item}"
           .value=${live(String(this.fontSize))}
@@ -1261,9 +1289,9 @@ export class Y11nToolbar extends LitElement {
           ${FONT_SIZES.map(
             (size) => html`<option value=${size} ?selected=${this.fontSize === size}>${size}</option>`
           )}
-        </select>`;
+        </select>`);
       case 'textColor':
-        return html`<div class="color-wrapper ${d ? 'disabled' : ''}">
+        return html`<div class="tip color-wrapper ${d ? 'disabled' : ''}" title="${d ? 'Text color' : nothing}">
           <div class="color-swatch" aria-hidden="true">
             A<span class="indicator" style="background-color: ${this.textColor || 'currentColor'}"></span>
           </div>
@@ -1278,7 +1306,7 @@ export class Y11nToolbar extends LitElement {
           />
         </div>`;
       case 'backgroundColor':
-        return html`<div class="color-wrapper ${d ? 'disabled' : ''}">
+        return html`<div class="tip color-wrapper ${d ? 'disabled' : ''}" title="${d ? 'Background color' : nothing}">
           <div class="color-swatch" aria-hidden="true">
             <span class="indicator fill" style="background-color: ${this.backgroundColor || 'transparent'}"></span>
           </div>
@@ -1296,29 +1324,39 @@ export class Y11nToolbar extends LitElement {
       case 'textAlign':
         return html`<div class="button-group" role="group" aria-label="Text alignment">
           ${(['left', 'center', 'right'] as const).map(
-            (align) => html`<button
-              type="button"
-              data-item="${item}-${align}"
-              aria-pressed="${this.textAlign === align}"
-              aria-label="Align ${align}"
-              title="Align ${align}"
-              ?disabled=${d}
-              @click=${() => this._format('textAlign', align)}
-            >${icon(align)}</button>`
+            (align) =>
+              this._tip(
+                `Align ${align}`,
+                d,
+                html`<button
+                  type="button"
+                  data-item="${item}-${align}"
+                  aria-pressed="${this.textAlign === align}"
+                  aria-label="Align ${align}"
+                  title="Align ${align}"
+                  ?disabled=${d}
+                  @click=${() => this._format('textAlign', align)}
+                >${icon(align)}</button>`
+              )
           )}
         </div>`;
       case 'verticalAlign':
         return html`<div class="button-group" role="group" aria-label="Vertical alignment">
           ${(['top', 'middle', 'bottom'] as const).map(
-            (align) => html`<button
-              type="button"
-              data-item="${item}-${align}"
-              aria-pressed="${this.verticalAlign === align}"
-              aria-label="Align ${align}"
-              title="Align ${align}"
-              ?disabled=${d}
-              @click=${() => this._format('verticalAlign', align)}
-            >${icon(align)}</button>`
+            (align) =>
+              this._tip(
+                `Align ${align}`,
+                d,
+                html`<button
+                  type="button"
+                  data-item="${item}-${align}"
+                  aria-pressed="${this.verticalAlign === align}"
+                  aria-label="Align ${align}"
+                  title="Align ${align}"
+                  ?disabled=${d}
+                  @click=${() => this._format('verticalAlign', align)}
+                >${icon(align)}</button>`
+              )
           )}
         </div>`;
       case 'wrap':
@@ -1328,7 +1366,7 @@ export class Y11nToolbar extends LitElement {
         });
 
       case 'numberFormat':
-        return html`<select
+        return this._tip('Number format', d, html`<select
           class="number-format-select"
           data-item="${item}"
           .value=${live(this.numberFormat?.type ?? 'general')}
@@ -1344,7 +1382,7 @@ export class Y11nToolbar extends LitElement {
             ([value, label]) =>
               html`<option value=${value} ?selected=${(this.numberFormat?.type ?? 'general') === value}>${label}</option>`
           )}
-        </select>`;
+        </select>`);
       case 'decreaseDecimals':
         return this._button(item, 'Decrease decimals', icon('decreaseDecimals'), () => this._act('decreaseDecimals'), {
           disabled: d,

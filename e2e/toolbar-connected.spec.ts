@@ -529,6 +529,40 @@ test.describe('Toolbar connected to a grid', () => {
     await spreadsheet.waitForCellText(8, 2, 'k');
   });
 
+  test('a disabled control keeps its tooltip and does not take the focus', async ({ spreadsheet, page }) => {
+    await addToolbar(page);
+    await spreadsheet.setData(DATA);
+    await spreadsheet.clickCell(1, 0);
+
+    // The tooltip a mouse user gets: the nearest title at the middle of the control
+    const tooltipAt = (label: string) =>
+      control(page, label).evaluate((el) => {
+        const box = el.getBoundingClientRect();
+        const root = el.getRootNode() as ShadowRoot;
+        const hit = root.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        return { title: hit?.closest('[title]')?.getAttribute('title'), cursor: hit && getComputedStyle(hit).cursor };
+      });
+
+    expect(await tooltipAt('Undo')).toEqual({ title: 'Undo (Ctrl+Z)', cursor: 'not-allowed' });
+    expect(await tooltipAt('Reapply filter')).toEqual({ title: 'Reapply filter (Ctrl+Alt+L)', cursor: 'not-allowed' });
+    expect(await tooltipAt('Bold')).toEqual({ title: 'Bold (Ctrl+B)', cursor: 'pointer' });
+
+    await spreadsheet.setReadOnly(true);
+    for (const label of ['Bold', 'Align center', 'Font size', 'Number format', 'Text color', 'Background color', 'Insert rows or columns']) {
+      expect(await tooltipAt(label), label).toMatchObject({ cursor: 'not-allowed' });
+      expect((await tooltipAt(label)).title, label).toContain(label);
+      await control(page, label).click({ force: true });
+      await expect(spreadsheet.cell(1, 0), label).toBeFocused();
+    }
+    await expect(page.locator('#tb').locator('[role="menu"]')).toHaveCount(0);
+
+    // Enabled again, the controls answer the pointer themselves
+    await spreadsheet.setReadOnly(false);
+    expect(await tooltipAt('Font size')).toEqual({ title: 'Font size', cursor: 'pointer' });
+    await control(page, 'Font size').selectOption('18');
+    expect(await spreadsheet.getCellFormat('1:0')).toEqual({ fontSize: 18 });
+  });
+
   test('a click during an edit commits the edit and then acts', async ({ spreadsheet, page }) => {
     await addToolbar(page);
     await spreadsheet.setData(DATA);
