@@ -12,11 +12,13 @@
  * average", "data bar 64%", "up arrow") that screen readers hear with the
  * cell.
  *
- * Try it: edit a number and the whole range restyles. Alt+Shift+C opens the
- * rule manager.
+ * Try it: edit a number and the whole range restyles. Select some numbers
+ * and add a rule from the toolbar's Conditional formatting menu; its last
+ * item (or Alt+Shift+C) opens the rule manager.
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function conditionalFormatting() {
   const sheet = document.createElement('y11n-spreadsheet');
@@ -70,5 +72,9 @@ export default function conditionalFormatting() {
       ['Islands', '80', '0', '30', '51', 'pending'],
     ])
   );
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'conditionalFormat | undo redo';
+  return stack(toolbar, sheet);
 }

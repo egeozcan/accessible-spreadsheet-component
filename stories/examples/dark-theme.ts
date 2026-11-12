@@ -4,11 +4,14 @@
  *
  *     y11n-spreadsheet.dark { --ls-header-bg: #2d2d2d; ... }
  *
- * This example sets them on the element instead, to keep everything in one
- * file. The full list of properties is under Reference / Theming.
+ * This example sets them on the elements instead, to keep everything in one
+ * file. The toolbar is an element of its own, so it gets the properties it
+ * shares with the grid and its own `--ls-toolbar-` ones. The full list of
+ * properties is under Reference / Theming.
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function darkTheme() {
   const sheet = document.createElement('y11n-spreadsheet');
@@ -50,5 +53,20 @@ export default function darkTheme() {
       ['Neptune', '49528', '4495.1', '16'],
     ])
   );
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'history font alignment | sortAscending sortDescending filter';
+  toolbar.style.cssText = `
+    --ls-font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', monospace;
+    --ls-text-color: #e0e0e0;
+    --ls-border-color: #444;
+    --ls-focus-ring: 2px solid #bb86fc;
+    --ls-toolbar-bg: #2d2d2d;
+    --ls-toolbar-hover-bg: #3d3d3d;
+    --ls-toolbar-active-bg: #4a3f63;
+    --ls-toolbar-active-border: #bb86fc;
+    --ls-toolbar-input-bg: #1e1e1e;
+  `;
+  return stack(toolbar, sheet);
 }

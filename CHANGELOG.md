@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The toolbar, now `<y11n-toolbar>`, covers what the grid can do, wires itself to a grid, and shows only the controls you choose.
+  - `target` (or the `for` attribute with the grid's id) connects it: the controls show the state of the selection, follow undo, the filter, frozen panes and read-only mode, and act on the selection. Without a target it works as before: it shows its properties and fires events.
+  - New controls: undo and redo; cut, copy, paste and Paste Special; vertical alignment and wrap; a Number format select with decrease / increase decimals; Insert and Delete menus for rows and columns; fit column width; sort ascending / descending; filter and reapply filter; list in cell; AutoSum; a Freeze panes menu; find; the name manager.
+  - `items` chooses the controls and their order, as text or an array: names of items, names of groups (`history`, `clipboard`, `font`, `alignment`, `number`, `styles`, `cells`, `data`, `view`) and `|` for a separator. `TOOLBAR_GROUPS` and `TOOLBAR_ITEMS` are exported.
+  - Events: a new `toolbar-action` for the controls that are not formats, and `format-action` now also carries `verticalAlign`, `wrap` and `numberFormat`. With a target, all three events are fired before the toolbar acts, and `preventDefault()` stops it.
+  - New properties `verticalAlign`, `wrap`, `numberFormat`, `canUndo`, `canRedo`, `filtered`, `frozen` and `label` (its accessible name); new CSS custom property `--ls-toolbar-input-bg`.
+  - The toolbar is one Tab stop that remembers the control it was left on, color inputs and selects included.
+  - A mouse click on a toolbar button leaves the keyboard focus in the grid, so typing goes on there; keyboard and screen reader use keeps the focus on the control.
+- Methods that do to the selection what a user does, to back your own buttons: `getSelection()`, `getSelectionFormat()`, `formatSelection()`, `clearSelectionFormat()`, `changeDecimals()`, `insertRowsAtSelection()`, `insertColumnsAtSelection()`, `deleteSelectedRows()`, `deleteSelectedColumns()`, `autoFitSelectedColumns()`, `autoSum()`, `toggleLists()`, `copy()` and `cut()`.
+- `freezePanesAsUser()` and `reapplyFilterAsUser()`: what Alt+Shift+F and Ctrl+Alt+L do, with their checks, events and announcements, to back buttons.
+- `undo()`, `redo()`, `canUndo`, `canRedo` and the `history-change` event (also fired when `setData()` starts a fresh history).
+- `announce(message)`: a message for screen readers through the grid's live region.
+- `focus()` on the grid moves the keyboard focus to the active cell.
+- Storybook: a Toolbar example group and reference page, and a toolbar with the fitting controls in most other examples.
 - A new formula engine: formulas are parsed once into an AST and then evaluated, instead of being evaluated while they are parsed. Everything below builds on it; existing formulas keep their results.
   - Grammar: `^` (left-associative, and `-2^2` is 4 as in Excel), postfix `%`, scientific literals (`1e3`), array literals (`{1,2;3,4}`, elements can be expressions), `@` and the spill operator `A1#`.
   - `LET` and `LAMBDA` (`=LAMBDA(x, x*2)(4)`, lambdas bound by `LET`, by a defined name, or passed to `MAP`, `REDUCE`, `BYROW`, `BYCOL`), `ROW()` / `COLUMN()` of the formula's own cell, `IFNA`, `NA`, `TRUE` / `FALSE`.
@@ -48,13 +62,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Excel's precedence: rules are kept in priority order, formats merge with the earlier rule winning, and `stopIfTrue` ends the evaluation for a cell.
   - Accessibility: every rule has a short label (generated, or set with `label`) that is part of each matching cell's accessible name and of the active-cell announcement ("B6: 150, above average"). Color scales and data bars announce the cell's position, icons have text alternatives and differ in shape, color scales pick a contrasting text color, and forced-colors mode shows an edge marker for highlights, a meter line for scales and bars, and system-colored icons.
   - API: `addConditionalFormat()`, `updateConditionalFormat()`, `removeConditionalFormat()`, `moveConditionalFormat()`, `getConditionalFormats()`, `setConditionalFormats()`, `clearConditionalFormats()`, `getConditionalFormatResult()`, and for user actions `applyConditionalFormatPreset()`, `clearSelectionConditionalFormats()` and `openConditionalFormatManager()` / `closeConditionalFormatManager()`.
-  - A rule manager dialog (Alt+Shift+C) to add, edit, reorder and delete rules and set stop-if-true, and a Conditional formatting menu on `<y11n-format-toolbar>` with one-step presets (fires `conditional-format-action`).
+  - A rule manager dialog (Alt+Shift+C) to add, edit, reorder and delete rules and set stop-if-true, and a Conditional formatting menu on the toolbar with one-step presets (fires `conditional-format-action`).
   - Undoable; fires `conditional-format-change` and, for user changes, the cancelable `before-conditional-format-change`. Rules move with inserted and deleted rows/columns (ranges and rule formulas are rewritten), survive `setData()`, and are refused for users in read-only mode.
   - Range statistics (averages, top/bottom cut-offs, duplicate counts, scale bounds) are cached per rule and recomputed only when a cell inside the rule's range changes.
   - New CSS custom properties `--ls-data-bar-color` and `--ls-data-bar-negative-color`. New exports: `ConditionalFormatEvaluator`, `normalizeConditionalRule()`, `describeCondition()`, `conditionalFormatPreset()`, `adjustRulesForStructureChange()`, `clearRulesInRange()`, `rangeToA1()`, `parseA1Range()`, `Y11nConditionalFormatDialog` and the `ConditionalFormat*` types.
 
 ### Changed
 
+- `<y11n-format-toolbar>` is now `<y11n-toolbar>` and its class `Y11nToolbar` (was `Y11nFormatToolbar`), since it is no longer only about formats. Rename the element in your markup and the import, if you use the class.
+- `<y11n-toolbar>` shows all its controls by default, the new ones included. A toolbar that is wired by hand needs `items="font textAlign styles"` (the earlier set) or handlers for `toolbar-action`; or give it a `target` and drop the handlers.
+- In read-only mode the toolbar keeps the controls that a read-only grid still supports (copy, fit column width, filter, freeze panes, find, name manager) instead of disabling everything.
+- The toolbar's accessible name is "Spreadsheet toolbar" (was "Cell formatting"); set `label` to change it. Its Clear formatting button has an icon instead of ✘.
+- The toolbar's color controls fire `format-action` when a color is chosen (`change`), not on every step of a drag in the color picker, so a color is one undo step.
+- The grid no longer takes the keyboard focus from a control outside it: a change made while the focus is elsewhere (a toolbar button used from the keyboard, a button of the page that calls `undo()` or `goTo()`) leaves it there, an edit that ends because the user went to another control leaves it on that control, and the rule manager, name manager and Paste Special return it to the outside control that opened them.
+- `toggleFormat()`, `sortSelection()`, `toggleFilter()`, `paste()`, `openPasteSpecial()`, `applyConditionalFormatPreset()` and `clearSelectionConditionalFormats()` commit an edit in progress before they act, and only end the edit when it is a formula kept open on another sheet.
+- `computeSelectionFormat()` also reports `verticalAlign`, `wrap` and `numberFormat`.
 - The formula bar's cell reference is an `<input>` (the Name Box) instead of an `<output>`, and the formula input has the class `formula-input`: code that reached into the formula bar with `querySelector('input')` now finds the Name Box first.
 - A click on a cell while a formula is being typed, with the caret where a reference fits, picks that cell instead of committing the edit.
 - `adjustFormulaForStructureChange()` and `shiftFormulaReferences()` use the formula tokenizer instead of a regular expression, so they handle whole-column, whole-row and sheet-qualified references. `adjustFormulaForStructureChange()` takes a third argument naming the formula's sheet and the sheet that changed.

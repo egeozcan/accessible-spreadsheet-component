@@ -1,4 +1,4 @@
-import { html } from 'lit';
+import { html, nothing } from 'lit';
 import { ifDefined } from 'lit/directives/if-defined.js';
 import type { Meta, StoryObj } from '@storybook/web-components-vite';
 import 'y11n-spreadsheet';
@@ -13,6 +13,8 @@ interface PlaygroundArgs {
   hideStatusBar: boolean;
   rawInput: boolean;
   gridLabel: string;
+  toolbar: boolean;
+  toolbarItems: string;
 }
 
 const meta: Meta<PlaygroundArgs> = {
@@ -49,15 +51,24 @@ const meta: Meta<PlaygroundArgs> = {
       description: 'Stores typed values as typed, without recognising `15%`, `$1,200` or dates. Attribute: `raw-input`',
     },
     gridLabel: { control: 'text', description: 'Accessible name of the grid. Attribute: `grid-label`' },
+    toolbar: {
+      control: 'boolean',
+      description: 'Adds a `<y11n-toolbar>`, a separate element that its `for` attribute points at the grid',
+    },
+    toolbarItems: {
+      control: 'text',
+      description:
+        'The toolbar\'s controls: names of items and groups, `|` for a separator; empty for all of them. Attribute: `items` (of the toolbar)',
+    },
   },
 };
 
 export default meta;
 
 /**
- * Every setting that can be written as an HTML attribute. Change them in the
- * **Controls** panel; the **Code** panel shows the markup for the current
- * values.
+ * Every setting that can be written as an HTML attribute, and the optional
+ * toolbar. Change them in the **Controls** panel; the **Code** panel shows
+ * the markup for the current values.
  */
 export const Playground: StoryObj<PlaygroundArgs> = {
   args: {
@@ -70,9 +81,18 @@ export const Playground: StoryObj<PlaygroundArgs> = {
     hideStatusBar: false,
     rawInput: false,
     gridLabel: 'Spreadsheet',
+    toolbar: true,
+    toolbarItems: 'history font alignment number | sortAscending sortDescending filter | freeze find',
   },
   render: (args) => html`
+    ${args.toolbar
+      ? html`<y11n-toolbar
+          for="sheet"
+          items=${ifDefined(args.toolbarItems.trim() || undefined)}
+        ></y11n-toolbar>`
+      : nothing}
     <y11n-spreadsheet
+      id=${ifDefined(args.toolbar ? 'sheet' : undefined)}
       rows=${args.rows}
       cols=${args.cols}
       ?read-only=${args.readOnly}

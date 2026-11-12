@@ -4,12 +4,14 @@
  * colors it red when it is negative and green otherwise, so the colors
  * follow the numbers.
  *
- * Try it: raise an Actual value above its Budget.
+ * Try it: raise an Actual value above its Budget, or restyle the table with
+ * the toolbar.
  */
 import 'y11n-spreadsheet';
 import { cellKey, parseKey } from 'y11n-spreadsheet';
 import type { CellFormat } from 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function budgetTracker() {
   const categories = [
@@ -81,5 +83,9 @@ export default function budgetTracker() {
   ]);
 
   sheet.setData(data);
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'history font number styles';
+  return stack(toolbar, sheet);
 }

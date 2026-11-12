@@ -221,7 +221,7 @@ test.describe('Conditional formatting', () => {
   test('toolbar menu: presets, clear and manage', async ({ spreadsheet, page }) => {
     await seedTable(page);
     await page.evaluate(() => {
-      const toolbar = document.createElement('y11n-format-toolbar');
+      const toolbar = document.createElement('y11n-toolbar');
       toolbar.id = 'fmt-toolbar';
       const container = document.querySelector('.demo-container')!;
       container.parentElement!.insertBefore(toolbar, container);

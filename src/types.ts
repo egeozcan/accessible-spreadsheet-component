@@ -200,6 +200,25 @@ export interface SelectionChangeDetail {
   range: SelectionRange;
 }
 
+/** The selection as `getSelection()` returns it. */
+export interface SelectionInfo {
+  /** The selected range, normalized (start is its top-left cell) */
+  range: SelectionRange;
+  /** The active cell: the one that has the focus and that typing goes into */
+  activeCell: CellCoord;
+}
+
+/**
+ * Detail for the `history-change` event, fired when undo or redo becomes
+ * available or stops being available.
+ */
+export interface HistoryChangeDetail {
+  /** Whether there is a change to undo */
+  canUndo: boolean;
+  /** Whether there is an undone change to redo */
+  canRedo: boolean;
+}
+
 /**
  * Detail for the `data-change` event, fired on bulk updates (paste, cut, clear, undo/redo).
  */
@@ -536,7 +555,7 @@ export interface ConditionalFormatResult {
   scale?: number;
 }
 
-/** One-step rules for the selection, as offered by the format toolbar. */
+/** One-step rules for the selection, as offered by the toolbar. */
 export type ConditionalFormatPreset =
   | 'duplicates'
   | 'unique'

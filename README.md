@@ -18,6 +18,7 @@ An accessible spreadsheet web component built with [Lit 3.0](https://lit.dev). I
 - Filter a table by the values in its columns, from an accessible header menu (Alt+Down) or the API; edits, fills and pastes skip the hidden rows
 - Conditional formatting: highlight rules (values, text, dates, duplicates, top/bottom, averages, formulas), color scales, data bars and icon sets, with a rule manager dialog (Alt+Shift+C). Every rule has a label that is announced with its cells, so color never carries the meaning alone
 - Find (Ctrl+F) with match count and next/previous navigation
+- An optional toolbar element with buttons for all of the above, which wires itself to a grid and shows only the controls you choose
 - Per-cell read-only flag, value validation, and cancelable `cell-edit-start` / `before-change` events
 - CSV/TSV import and export
 - Copy/cut/paste with HTML and TSV clipboard formats
@@ -110,6 +111,42 @@ sheet.registerFunction('NET', (ctx, gross) => gross / 1.19, { args: ['number'] }
 sheet.setCellFormat('0:0', { bold: true, verticalAlign: 'top', wrap: true })
 sheet.setRangeFormat({ start: { row: 1, col: 1 }, end: { row: 9, col: 1 } },
   { numberFormat: { type: 'date', datePattern: 'DD/MM/YYYY' } })
+
+// The selection, and what a user does to it. These back your own buttons (the toolbar uses them).
+// Each does what its keyboard shortcut does: those that change cells are refused in read-only mode,
+// leave read-only cells and rows hidden by the filter alone, go through the cancelable before-…
+// events, are one undo step and are announced. An edit in progress is committed first
+sheet.getSelection()                  // { range: { start, end }, activeCell: { row, col } }
+sheet.getSelectionFormat()            // the format all selected cells share, e.g. { bold: true }
+sheet.formatSelection({ textAlign: 'center' })
+sheet.toggleFormat('bold')            // what Ctrl+B does; also 'italic', 'underline', 'strikethrough'
+sheet.clearSelectionFormat()
+sheet.changeDecimals(1)               // one more decimal place in each number's own format; -1 for one fewer
+sheet.insertRowsAtSelection('above')  // as many rows as the selection spans; or 'below'
+sheet.insertColumnsAtSelection('left') // or 'right'
+sheet.deleteSelectedRows()
+sheet.deleteSelectedColumns()
+sheet.autoSum()                       // what Alt+= does
+sheet.toggleLists()                   // what Ctrl+J does
+sheet.cut()                           // what Ctrl+X does
+sheet.copy()                          // what Ctrl+C does (also in read-only mode, like the three below)
+sheet.autoFitSelectedColumns()        // what Alt+Shift+0 does
+sheet.freezePanesAsUser()             // what Alt+Shift+F freezes: up to the active cell. (1, 0): the first row; (0, 0): unfreeze.
+                                      // Unlike freezePanes() it refuses what would not leave room to scroll, and announces
+sheet.reapplyFilterAsUser()           // what Ctrl+Alt+L does: unlike reapplyFilter() it takes in rows added under the table,
+                                      // fires before-filter and announces the rows shown
+
+// Undo and redo
+sheet.undo()                          // true if a change was undone
+sheet.redo()
+sheet.canUndo                         // history-change fires when canUndo or canRedo change, and when setData() starts a fresh history
+sheet.canRedo
+
+// A message for screen readers, through the grid's live region
+sheet.announce('Saved')
+
+// Move the keyboard focus to the active cell (or to the editor while a cell is being edited)
+sheet.focus()
 
 // CSV / TSV
 sheet.toCSV()                                   // display values, A1 → last used cell
@@ -321,17 +358,7 @@ A few deliberate differences from Excel: empty cells only match `blanks` and `fo
 
 **Rule manager.** Alt+Shift+C (or `openConditionalFormatManager()`) opens a modal dialog that lists the rules in priority order with Edit, Move up, Move down, Delete and a Stop if true checkbox, plus a form for a new rule (applies to, rule type, values, format, label). Changes apply at once, each as one undo step, and are announced inside the dialog. Escape goes back from the form to the list and then closes the dialog. In read-only mode it shows the rules but changes nothing.
 
-**Toolbar.** `<y11n-format-toolbar>` has a Conditional formatting menu button with one-step rules for the selection. It fires `conditional-format-action`:
-
-```js
-toolbar.addEventListener('conditional-format-action', (e) => {
-  const { action } = e.detail; // 'duplicates', 'unique', 'aboveAverage', 'belowAverage', 'top10',
-                               // 'bottom10', 'colorScale', 'dataBar', 'iconSet', 'clear' or 'manage'
-  if (action === 'manage') sheet.openConditionalFormatManager();
-  else if (action === 'clear') sheet.clearSelectionConditionalFormats();
-  else sheet.applyConditionalFormatPreset(action);
-});
-```
+**Toolbar.** The [toolbar](#toolbar)'s Conditional formatting menu has one-step rules for the selection (`applyConditionalFormatPreset()`), Clear rules from selection (`clearSelectionConditionalFormats()`) and Manage rules (`openConditionalFormatManager()`).
 
 Rules move with their cells when rows or columns are inserted or deleted: ranges shift, grow and shrink like range references, formulas in rules are rewritten, and a rule whose cells are all deleted is dropped (undo brings it back). Sorting moves cells, not rules. Like filters, rules survive `setData()` and aren't part of `getData()`: save them with `getConditionalFormats()` (for example on `conditional-format-change`) and restore them with `setConditionalFormats()`. Every rule change is undoable. Changes the user makes (the rule manager, `applyConditionalFormatPreset()`, `clearSelectionConditionalFormats()`) are refused in read-only mode and fire the cancelable `before-conditional-format-change` first; `conditional-format-change` (`{ rules, source }`) fires after every change. Invalid rules throw a `TypeError`, and ranges outside the grid a `RangeError`.
 
@@ -503,6 +530,82 @@ sheet.addEventListener('before-names-change', (e) => {
 
 The `date` type renders date serial numbers (as returned by `DATE`, `TODAY`, `NOW`) using `datePattern` (default `YYYY-MM-DD`; tokens `YYYY YY MM M DD D HH H mm ss`).
 
+### Toolbar
+
+`<y11n-toolbar>` is an optional element with buttons for what the grid can do. It is separate from the grid, so it goes wherever your layout wants it. Point it at a grid and it wires itself: its controls show the format of the selected cells, follow undo, the filter, frozen panes and read-only mode, and act on the selection.
+
+```html
+<y11n-toolbar for="sheet"></y11n-toolbar>
+<y11n-spreadsheet id="sheet"></y11n-spreadsheet>
+```
+
+```js
+toolbar.target = sheet; // from script, instead of the for attribute
+```
+
+**Choosing the controls.** `items` lists the controls to show, in order: names of items, names of groups, and `|` for a separator. Without it the toolbar shows everything.
+
+```html
+<y11n-toolbar for="sheet" items="history | bold italic textColor | sortAscending filter"></y11n-toolbar>
+```
+
+```js
+toolbar.items = 'history | bold italic textColor | sortAscending filter';
+toolbar.items = ['history', '|', 'bold', 'italic'];              // an array works too, and is type-checked
+toolbar.items = TOOLBAR_ITEMS.filter((item) => item !== 'paste'); // everything but
+```
+
+| Group | Items |
+|-------|-------|
+| `history` | `undo`, `redo` |
+| `clipboard` | `cut`, `copy`, `paste`, `pasteSpecial` |
+| `font` | `bold`, `italic`, `underline`, `strikethrough`, `fontSize`, `textColor`, `backgroundColor` |
+| `alignment` | `textAlign` (left, center, right), `verticalAlign` (top, middle, bottom), `wrap` |
+| `number` | `numberFormat` (General, Number, Currency, Percent, Scientific, Date), `decreaseDecimals`, `increaseDecimals` |
+| `styles` | `conditionalFormat` (a menu), `clearFormat` |
+| `cells` | `insert` (a menu: row above / below, column left / right), `delete` (a menu: row, column), `autoFit` |
+| `data` | `sortAscending`, `sortDescending`, `filter`, `reapplyFilter`, `list`, `autoSum` |
+| `view` | `freeze` (a menu: up to the active cell, first row, first column, unfreeze), `find`, `names` |
+
+A group name is a group of its own, with a separator on each side. An unknown name is skipped with a console warning. `TOOLBAR_GROUPS` and `TOOLBAR_ITEMS` hold these names.
+
+| Property | Attribute | Type | Default | Description |
+|----------|-----------|------|---------|-------------|
+| `target` | - | `Y11nSpreadsheet \| null` | `null` | The grid to act on and to follow |
+| `htmlFor` | `for` | `string` | `''` | The id of that grid, looked up in the toolbar's document or shadow root. The grid may be added later or replaced by another with the same id. `target` wins |
+| `items` | `items` | `string \| ToolbarItemSpec[] \| null` | `null` | The controls to show; null for all of them |
+| `label` | `label` | `string` | `'Spreadsheet toolbar'` | The toolbar's accessible name. Give each toolbar its own when a page has several |
+| `readOnly` | `read-only` | `boolean` | `false` | Disables the controls that change cells |
+
+With a target, the toolbar sets the properties below itself. Without one it shows what they say, so it can be wired by hand: `bold`, `italic`, `underline`, `strikethrough`, `textColor`, `backgroundColor`, `textAlign`, `verticalAlign`, `wrap`, `fontSize`, `numberFormat` (as in a [cell format](#cell-formats)), `canUndo`, `canRedo` (both default to true), `filtered` and `frozen`.
+
+**Events.** Every control fires an event before it acts, and `preventDefault()` stops it, so your code can step in. Without a target the events are all the toolbar does.
+
+| Event | Detail | Fired by |
+|-------|--------|----------|
+| `format-action` | `{ action, value }` | The formatting controls (the color controls when a color is chosen, not while the picker is dragged). `action` is `bold`, `italic`, `underline`, `strikethrough` (`value`: the new state), `textColor`, `backgroundColor`, `textAlign`, `verticalAlign`, `wrap`, `fontSize`, `numberFormat` (`value`: the new value, so `{ [action]: value }` is a cell format; no `numberFormat` value means General) or `clearFormat` |
+| `conditional-format-action` | `{ action }` | The Conditional formatting menu: `duplicates`, `unique`, `aboveAverage`, `belowAverage`, `top10`, `bottom10`, `colorScale`, `dataBar`, `iconSet`, `clear` or `manage` |
+| `toolbar-action` | `{ action }` | Everything else: `undo`, `redo`, `cut`, `copy`, `paste`, `pasteSpecial`, `decreaseDecimals`, `increaseDecimals`, `insertRowAbove`, `insertRowBelow`, `insertColumnLeft`, `insertColumnRight`, `deleteRow`, `deleteColumn`, `autoFit`, `sortAscending`, `sortDescending`, `filter`, `reapplyFilter`, `list`, `autoSum`, `freeze`, `freezeFirstRow`, `freezeFirstColumn`, `unfreeze`, `find` or `names` |
+
+```js
+// Paste values only, whatever was copied
+toolbar.addEventListener('toolbar-action', (e) => {
+  if (e.detail.action !== 'paste') return;
+  e.preventDefault();
+  sheet.paste({ mode: 'values' });
+});
+```
+
+What the toolbar does with a target is all public API: `toggleFormat()`, `formatSelection()` and `clearSelectionFormat()` for `format-action`; `applyConditionalFormatPreset()`, `clearSelectionConditionalFormats()` and `openConditionalFormatManager()` for `conditional-format-action`; and for `toolbar-action` the methods listed under "The selection, and what a user does to it" in [Methods](#methods), plus `sortSelection()`, `toggleFilter()`, `paste()`, `openPasteSpecial()`, `openFind()` and `openNameManager()`. So a toolbar button does exactly what the keyboard shortcut in its tooltip does, with the same checks, cancelable events and announcements. It reads the grid's state with `getSelectionFormat()`, `canUndo`, `canRedo`, `getFilter()`, `frozenRows`, `frozenCols` and `readOnly`.
+
+**Read-only.** In read-only mode the controls that change cells are disabled. Copy, Fit column width, Filter, Reapply filter, Freeze panes, Find and the name manager stay available, as they do in a read-only grid.
+
+**Keyboard.** The toolbar is one Tab stop. Left and Right move between its controls (wrapping around), Home and End go to the first and last. Tab leaves it, and Shift+Tab comes back to the control it was left on. Down or Up on a menu button opens its menu at the first or last item; in a menu, Up and Down move, Enter chooses, Escape closes it and returns to the button. The buttons' tooltips name the grid's keyboard shortcut for the same action. A control used from the keyboard (or by a screen reader) keeps the focus after it acts, so Bold and then Italic, or Undo several times, work; a control that becomes disabled while it has the focus (Undo after the last step) hands it to its neighbor, and a dialog opened this way returns the focus to its button when it closes.
+
+**Mouse.** A click on a button (also a disabled one, or on the toolbar between the controls) does not move the keyboard focus: it stays in the grid, so you can click Bold and go on typing. A select or color control needs the focus to open and gives it back to the grid once a value is chosen. A menu opened with the mouse takes the focus only when Down or Up is pressed; Escape closes it, and so does any other key, which goes to the grid as usual. A click while a cell is being edited commits the edit first; if the edit is a formula kept open on another sheet, the click only ends the edit.
+
+**Theming.** The toolbar is outside the grid's shadow DOM, so it takes its own custom properties: set the ones it shares with the grid (`--ls-font-family`, `--ls-text-color`, `--ls-border-color`, `--ls-focus-ring`) on both elements or on a common ancestor, and see `--ls-toolbar-*` under [Theming](#theming).
+
 ### Events
 
 ```js
@@ -514,6 +617,12 @@ sheet.addEventListener('cell-change', (e) => {
 // Selection moved
 sheet.addEventListener('selection-change', (e) => {
   console.log(e.detail.range); // { start: { row, col }, end: { row, col } }
+});
+
+// Undo or redo became available or stopped being available, or new data started a fresh history
+sheet.addEventListener('history-change', (e) => {
+  undoButton.disabled = !e.detail.canUndo;
+  redoButton.disabled = !e.detail.canRedo;
 });
 
 // Bulk operation (paste, cut, clear, fill, import, row/column insert/delete, sort, undo, redo)
@@ -776,6 +885,10 @@ y11n-spreadsheet {
 | `--ls-find-bg` | `#fff` | Find bar background |
 | `--ls-find-status-color` | `#555` | Find bar match count |
 | `--ls-status-bg` / `--ls-status-color` | `#f8fafc` / `#555` | Status bar under the grid |
+| `--ls-toolbar-bg` | `#f8fafc` | Toolbar background (set the `--ls-toolbar-*` properties on `<y11n-toolbar>`) |
+| `--ls-toolbar-hover-bg` | `#e8eaed` | Hovered toolbar button |
+| `--ls-toolbar-active-bg` / `--ls-toolbar-active-border` | `#d3e3fd` / `#a8c7fa` | Pressed toolbar button (Bold on a bold cell) |
+| `--ls-toolbar-input-bg` | `#fff` | Background of the toolbar's Font size and Number format selects |
 
 </details>
 
@@ -872,6 +985,14 @@ import type {
   FormulaArgumentKind,    // 'number' | 'text' | 'value' | 'array' | 'reference'
   CellChangeDetail,
   SelectionChangeDetail,
+  SelectionInfo,         // { range, activeCell }: what getSelection() returns
+  HistoryChangeDetail,   // { canUndo, canRedo }
+  ToolbarItem,           // 'undo' | 'bold' | 'filter' | ...: a control of <y11n-toolbar>
+  ToolbarGroup,          // 'history' | 'clipboard' | 'font' | 'alignment' | 'number' | 'styles' | 'cells' | 'data' | 'view'
+  ToolbarItemSpec,       // ToolbarItem | ToolbarGroup | '|'
+  FormatActionDetail,    // { action, value? }
+  ConditionalFormatActionDetail, // { action }
+  ToolbarActionDetail,   // { action: ToolbarAction }
   DataChangeDetail,
   BeforeChangeDetail,    // { changes: ProposedChange[], operation }
   CellEditStartDetail,   // { cellId, value }
@@ -971,7 +1092,8 @@ import { FormulaEngine } from 'y11n-spreadsheet';
 import { SelectionManager } from 'y11n-spreadsheet';
 import { ClipboardManager } from 'y11n-spreadsheet';
 import { Y11nFormulaBar } from 'y11n-spreadsheet';
-import { Y11nFormatToolbar, Y11nConditionalFormatDialog } from 'y11n-spreadsheet';
+import { Y11nToolbar, TOOLBAR_GROUPS, TOOLBAR_ITEMS } from 'y11n-spreadsheet';
+import { Y11nConditionalFormatDialog } from 'y11n-spreadsheet';
 import { Y11nSheetTabs, Y11nNameManager } from 'y11n-spreadsheet';
 
 // Conditional formatting without the component: validate rules and evaluate them over your own data
@@ -1060,7 +1182,7 @@ src/
   y11n-spreadsheet.ts               # Main component
   components/
     y11n-formula-bar.ts             # Formula bar sub-component (Name Box, raw / formatted input)
-    y11n-format-toolbar.ts          # Formatting toolbar (with the Conditional formatting menu)
+    y11n-toolbar.ts                 # Toolbar: configurable items, wires itself to a grid (target / for)
     y11n-conditional-format-dialog.ts # Rule manager dialog
     conditional-icons.ts            # Icon-set icons (SVG)
     y11n-sheet-tabs.ts              # Sheet tab bar (switch, add, rename, delete, reorder)

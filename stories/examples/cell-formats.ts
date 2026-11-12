@@ -7,13 +7,15 @@
  * Formats set in the data are there from the start. To change them later,
  * use `setCellFormat()` and `setRangeFormat()` (see "Format API").
  *
- * Try it: select some cells and press Ctrl+B, Ctrl+I or Ctrl+U, or
- * Ctrl+Shift+4 for currency and Ctrl+Shift+5 for percent.
+ * Try it: select some cells and use the toolbar, or press Ctrl+B, Ctrl+I or
+ * Ctrl+U, Ctrl+Shift+4 for currency and Ctrl+Shift+5 for percent. The
+ * toolbar shows the format of the cells you select.
  */
 import 'y11n-spreadsheet';
 import { cellKey } from 'y11n-spreadsheet';
 import type { CellFormat } from 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function cellFormats() {
   const data = gridFromRows([
@@ -54,5 +56,9 @@ export default function cellFormats() {
   sheet.rows = 12;
   sheet.cols = 6;
   sheet.setData(data);
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'font alignment number clearFormat';
+  return stack(toolbar, sheet);
 }

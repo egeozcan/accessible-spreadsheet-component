@@ -3,10 +3,11 @@
  * qty works out how much to buy, and `COUNTIF` counts the items to reorder.
  * A conditional format marks the rows that need attention.
  *
- * Try it: type 20 into B2.
+ * Try it: type 20 into B2, or sort and filter the list with the toolbar.
  */
 import 'y11n-spreadsheet';
 import { gridFromRows } from './grid-from-rows.js';
+import { stack } from './stack.js';
 
 export default function inventory() {
   const items = [
@@ -47,5 +48,9 @@ export default function inventory() {
       ['Items to reorder', '', '', `=COUNTIF(D2:D${items.length + 1}, "REORDER")`],
     ])
   );
-  return sheet;
+
+  const toolbar = document.createElement('y11n-toolbar');
+  toolbar.target = sheet;
+  toolbar.items = 'history | sortAscending sortDescending filter | conditionalFormat';
+  return stack(toolbar, sheet);
 }
